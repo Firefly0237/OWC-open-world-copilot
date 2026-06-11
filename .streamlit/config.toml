@@ -1,31 +1,32 @@
-# OWCopilot Workbench theme — "墨金法典" (ink & bronze codex).
-# Palette intent: deep ink night background (long-session friendly, game-tool ambience),
-# bronze-gold primary as the "seal/stamp" accent, parchment-tinted text, faint gold borders.
-# Newer theme keys (baseRadius/borderColor/...) ship with Streamlit >=1.46; on older versions
-# they are ignored with a console warning and the base palette still applies.
+# OWCopilot Workbench theme — "晨光手稿" (morning manuscript).
+# Light parchment direction, mirroring Genshin-style game UI language: warm ivory paper
+# (not pure white, to cut glare), ink text, muted-gold seals, faint hairlines.
+# Token intent: backgroundColor = bg/base (the page), secondaryBackgroundColor = bg/surface-2
+# (inputs/secondary panels); cards get a brighter surface + shadow via CSS.
+# Newer theme keys need Streamlit >=1.46; older versions ignore them with a console warning.
 [theme]
-base = "dark"
-primaryColor = "#c9a227"
-backgroundColor = "#0d0f14"
-secondaryBackgroundColor = "#161a22"
-textColor = "#e8e2d0"
-linkColor = "#d8b54a"
+base = "light"
+primaryColor = "#b78f2e"
+backgroundColor = "#f7f3e9"
+secondaryBackgroundColor = "#efe9d9"
+textColor = "#2d2618"
+linkColor = "#8a6a1e"
 font = "sans serif"
 baseRadius = "0.65rem"
 buttonRadius = "0.55rem"
-borderColor = "#2a2f3a"
-dataframeBorderColor = "#2a2f3a"
+borderColor = "#e3dac4"
+dataframeBorderColor = "#e3dac4"
 showWidgetBorder = true
-codeBackgroundColor = "#12151c"
+codeBackgroundColor = "#f1ebdc"
 chartCategoricalColors = [
-  "#c9a227", "#7fa6c9", "#8fae8b", "#b07fc9", "#c97f7f",
-  "#7fc9b4", "#c9a87f", "#9aa3b2",
+  "#b78f2e", "#3f6fae", "#5e8c5a", "#8c5ea0", "#b05656",
+  "#3e8c7d", "#a0784a", "#6b7280",
 ]
 
 [theme.sidebar]
-backgroundColor = "#0a0c10"
-secondaryBackgroundColor = "#141821"
-borderColor = "#262b35"
+backgroundColor = "#f1ebdc"
+secondaryBackgroundColor = "#e9e1cc"
+borderColor = "#ddd3b8"
 
 [client]
 # Hide the developer toolbar ("Deploy" etc.) — the Workbench faces content designers.

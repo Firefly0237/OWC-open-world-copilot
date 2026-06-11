@@ -5,9 +5,10 @@ Launch with:
 
     streamlit run src/owcopilot/app/dashboard.py
 
-Design language: "星夜法典" — a Genshin-inspired night-indigo canvas with faint starfield,
-warm bronze-gold seals, ornamental corner brackets and diamond section marks. Copy stays
-minimal: the UI shows what to do, never argues why the feature exists.
+Design language: "晨光手稿" — a light parchment canvas in the same register as Genshin-style
+game UI (warm ivory paper, ink text, muted-gold seals, ornamental corner brackets, diamond
+section marks), with quiet 120-240ms micro-interactions that honor prefers-reduced-motion.
+Copy stays minimal: the UI shows what to do, never argues why the feature exists.
 
 Product rules the layout encodes:
   * every page shows the cost of what it just did (offline = $0, deterministic);
@@ -113,16 +114,16 @@ _ENGINE_META = {
 }
 _FLAVOR_CATEGORY_LABEL = {"item": "物品", "skill": "技能", "achievement": "成就"}
 _GRAPH_NODE_COLOR = {
-    "npc": "#7fa6c9",
-    "faction": "#d8b54a",
-    "location": "#8fae8b",
-    "region": "#9aa3b2",
-    "poi": "#7fc9b4",
-    "quest": "#b07fc9",
-    "item": "#c9a87f",
-    "event": "#c97f7f",
-    "skill": "#7fc9c9",
-    "achievement": "#c9b77f",
+    "npc": "#3f6fae",
+    "faction": "#a8842c",
+    "location": "#5e8c5a",
+    "region": "#6b7280",
+    "poi": "#3e8c7d",
+    "quest": "#8c5ea0",
+    "item": "#a0784a",
+    "event": "#b05656",
+    "skill": "#3e8c8c",
+    "achievement": "#9a8a3e",
 }
 
 st.set_page_config(
@@ -138,65 +139,73 @@ st.markdown(
     @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap');
 
     :root {
-      --ow-gold: #d8b54a;
+      --ow-gold: #a8842c;          /* seals, marks, active states */
+      --ow-gold-text: #8a6a1e;     /* gold that stays readable as text on paper */
       --ow-gold-deep: #b78f2e;
-      --ow-gold-soft: rgba(211, 188, 142, .42);
-      --ow-gold-faint: rgba(211, 188, 142, .12);
-      --ow-ink: #0a0d18;
-      --ow-panel: rgba(22, 27, 43, .55);
-      --ow-line: #2b3147;
-      --ow-text: #ece5d3;
-      --ow-muted: #9a94a8;
+      --ow-gold-soft: rgba(168, 132, 44, .38);
+      --ow-gold-faint: rgba(168, 132, 44, .10);
+      --ow-paper: #f7f3e9;         /* bg/base: warm ivory, kinder than pure white */
+      --ow-surface: #fffdf7;       /* bg/surface: cards float brighter than the page */
+      --ow-surface-2: #f1ebdc;
+      --ow-line: #e3dac4;
+      --ow-ink: #2d2618;
+      --ow-muted: #7b7261;
+      --ow-shadow: 0 1px 3px rgba(45, 38, 24, .08), 0 4px 14px rgba(45, 38, 24, .05);
+      --ow-shadow-lift: 0 2px 6px rgba(45, 38, 24, .10), 0 10px 28px rgba(45, 38, 24, .08);
       --ow-serif: "Noto Serif SC", Georgia, "Songti SC", "SimSun", serif;
     }
 
-    /* night canvas: aurora glows + a faint starfield */
+    /* paper canvas with faint dawn washes */
     [data-testid="stAppViewContainer"] {
       background:
-        radial-gradient(1.2px 1.2px at 12% 22%, rgba(236,229,211,.55), transparent 100%),
-        radial-gradient(1px 1px at 28% 64%, rgba(236,229,211,.35), transparent 100%),
-        radial-gradient(1.4px 1.4px at 41% 12%, rgba(236,229,211,.45), transparent 100%),
-        radial-gradient(1px 1px at 57% 38%, rgba(236,229,211,.30), transparent 100%),
-        radial-gradient(1.2px 1.2px at 66% 78%, rgba(236,229,211,.40), transparent 100%),
-        radial-gradient(1px 1px at 78% 18%, rgba(236,229,211,.45), transparent 100%),
-        radial-gradient(1.3px 1.3px at 89% 52%, rgba(236,229,211,.35), transparent 100%),
-        radial-gradient(1px 1px at 95% 86%, rgba(236,229,211,.30), transparent 100%),
-        radial-gradient(1100px 540px at 85% -12%, rgba(216,181,74,.10), transparent 60%),
-        radial-gradient(900px 500px at -8% -2%, rgba(86,120,196,.10), transparent 55%),
-        radial-gradient(1000px 700px at 50% 115%, rgba(96,76,150,.12), transparent 60%),
-        var(--ow-ink);
+        radial-gradient(1100px 540px at 88% -12%, rgba(183, 143, 46, .07), transparent 60%),
+        radial-gradient(900px 500px at -8% -2%, rgba(63, 111, 174, .05), transparent 55%),
+        radial-gradient(1000px 700px at 50% 115%, rgba(168, 132, 44, .06), transparent 60%),
+        var(--ow-paper);
       background-attachment: fixed;
     }
     [data-testid="stHeader"] { background: transparent; }
     .block-container { padding-top: 1.2rem; max-width: 1280px; }
 
-    h1, h2, h3 { font-family: var(--ow-serif); letter-spacing: .02em; }
+    h1, h2, h3 { font-family: var(--ow-serif); letter-spacing: .02em; color: var(--ow-ink); }
 
-    /* hero with ornamental corner brackets */
+    /* entrance: one quiet fade-up for structural blocks (functional, not decorative) */
+    @keyframes owFadeUp {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .ow-hero, .ow-empty,
+    div[data-testid="stMetric"],
+    div[data-testid="stVerticalBlockBorderWrapper"],
+    details[data-testid="stExpander"],
+    div[data-testid="stForm"] {
+      animation: owFadeUp .24s ease-out both;
+    }
+
+    /* hero: manuscript head with ornamental corner brackets */
     .ow-hero {
       position: relative; overflow: hidden;
       padding: 1.45rem 1.7rem 1.25rem; margin-bottom: 1rem;
       border-radius: 1rem; border: 1px solid var(--ow-gold-soft);
       background:
-        linear-gradient(120deg, rgba(216,181,74,.14) 0%,
-                        rgba(20,25,40,.92) 42%, rgba(10,13,24,.96) 100%);
-      box-shadow: 0 0 40px rgba(216,181,74,.06) inset;
+        linear-gradient(120deg, rgba(183, 143, 46, .12) 0%,
+                        rgba(255, 253, 247, .9) 42%, rgba(247, 243, 233, .95) 100%);
+      box-shadow: var(--ow-shadow);
     }
     .ow-hero::before, .ow-hero::after {
       content: ""; position: absolute; width: 22px; height: 22px;
-      border: 2px solid rgba(216,181,74,.65);
+      border: 2px solid rgba(168, 132, 44, .6);
     }
     .ow-hero::before { top: 9px; left: 9px; border-right: none; border-bottom: none;
                        border-top-left-radius: 6px; }
     .ow-hero::after { bottom: 9px; right: 9px; border-left: none; border-top: none;
                       border-bottom-right-radius: 6px; }
-    .ow-hero h1 { margin: 0; font-size: 1.65rem; color: var(--ow-text);
-                  text-shadow: 0 0 18px rgba(216,181,74,.25); }
+    .ow-hero h1 { margin: 0; font-size: 1.65rem; }
     .ow-hero .ow-tagline { margin: .3rem 0 .7rem; color: var(--ow-muted); font-size: .92rem; }
     .ow-hero .ow-mark {
       position: absolute; right: 1.15rem; top: 50%;
-      transform: translateY(-50%); opacity: .6; pointer-events: none;
-      filter: drop-shadow(0 0 14px rgba(216,181,74,.35));
+      transform: translateY(-50%); opacity: .75; pointer-events: none;
+      filter: drop-shadow(0 1px 6px rgba(168, 132, 44, .35));
     }
 
     /* chips */
@@ -205,26 +214,27 @@ st.markdown(
       padding: .14rem .62rem; margin: 0 .4rem .3rem 0;
       border-radius: 999px; font-size: .78rem;
       border: 1px solid var(--ow-line);
-      background: rgba(255,255,255,.03); color: var(--ow-muted);
+      background: var(--ow-surface); color: var(--ow-muted);
+      transition: border-color .15s ease, background .15s ease;
     }
-    .ow-chip b { color: var(--ow-text); font-weight: 600; }
-    .ow-chip.gold  { border-color: var(--ow-gold-soft); color: #e3c272;
+    .ow-chip b { color: var(--ow-ink); font-weight: 600; }
+    .ow-chip.gold  { border-color: var(--ow-gold-soft); color: var(--ow-gold-text);
                      background: var(--ow-gold-faint); }
-    .ow-chip.red   { border-color: rgba(226,93,93,.45);  color: #e89090;
-                     background: rgba(226,93,93,.10); }
-    .ow-chip.amber { border-color: rgba(216,162,60,.45); color: #dcb05e;
-                     background: rgba(216,162,60,.10); }
-    .ow-chip.blue  { border-color: rgba(111,159,216,.45); color: #9dbfe5;
-                     background: rgba(111,159,216,.10); }
-    .ow-chip.green { border-color: rgba(111,191,143,.45); color: #93cfa9;
-                     background: rgba(111,191,143,.10); }
+    .ow-chip.red   { border-color: rgba(176, 52, 52, .4);  color: #a33636;
+                     background: rgba(176, 52, 52, .07); }
+    .ow-chip.amber { border-color: rgba(154, 107, 20, .4); color: #9a6b14;
+                     background: rgba(154, 107, 20, .08); }
+    .ow-chip.blue  { border-color: rgba(63, 111, 174, .4); color: #3f6fae;
+                     background: rgba(63, 111, 174, .07); }
+    .ow-chip.green { border-color: rgba(62, 125, 84, .4);  color: #3e7d54;
+                     background: rgba(62, 125, 84, .07); }
 
     /* section heading: diamond mark + fading gold rule */
     .ow-section { display: flex; align-items: baseline; gap: .55rem; margin: .35rem 0 .55rem; }
     .ow-section::before { content: "◆"; color: var(--ow-gold); font-size: .6rem;
-                          align-self: center; text-shadow: 0 0 8px rgba(216,181,74,.6); }
+                          align-self: center; }
     .ow-section .t { font-family: var(--ow-serif); font-weight: 700;
-                     font-size: 1.02rem; color: var(--ow-text); }
+                     font-size: 1.02rem; color: var(--ow-ink); }
     .ow-section .s { color: var(--ow-muted); font-size: .8rem; }
     .ow-section::after {
       content: ""; flex: 1; height: 1px;
@@ -233,127 +243,155 @@ st.markdown(
 
     /* empty / onboarding state */
     .ow-empty {
-      border: 1px dashed rgba(216,181,74,.4); border-radius: 1rem;
+      border: 1px dashed rgba(168, 132, 44, .45); border-radius: 1rem;
       padding: 2rem 1.5rem 1.6rem; margin: .4rem 0 1rem;
-      text-align: center; background: var(--ow-panel);
+      text-align: center; background: var(--ow-surface);
+      box-shadow: var(--ow-shadow);
     }
-    .ow-empty .icon { font-size: 2.1rem; filter: drop-shadow(0 0 10px rgba(216,181,74,.4)); }
+    .ow-empty .icon { font-size: 2.1rem; }
     .ow-empty h3 { margin: .4rem 0 .25rem; }
     .ow-empty p { color: var(--ow-muted); margin: 0 0 1.05rem; }
     .ow-steps { display: flex; gap: .8rem; justify-content: center; flex-wrap: wrap; }
     .ow-step {
       width: 215px; text-align: left; padding: .7rem .9rem;
       border: 1px solid var(--ow-line); border-radius: .7rem;
-      background: rgba(10,13,24,.6);
+      background: var(--ow-paper);
+      transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
     }
+    .ow-step:hover { border-color: var(--ow-gold-soft); transform: translateY(-2px);
+                     box-shadow: var(--ow-shadow); }
     .ow-step .n {
       display: inline-flex; width: 1.35rem; height: 1.35rem; border-radius: 50%;
       align-items: center; justify-content: center; margin-bottom: .35rem;
       background: var(--ow-gold-faint); border: 1px solid var(--ow-gold-soft);
-      color: #e3c272; font-size: .78rem;
+      color: var(--ow-gold-text); font-size: .78rem;
     }
-    .ow-step b { display: block; color: var(--ow-text); font-size: .88rem;
+    .ow-step b { display: block; color: var(--ow-ink); font-size: .88rem;
                  margin-bottom: .15rem; }
     .ow-step span { color: var(--ow-muted); font-size: .78rem; line-height: 1.5; }
 
-    /* metric tiles with a gold hairline */
+    /* metric tiles: paper cards with a gold hairline */
     div[data-testid="stMetric"] {
       position: relative; overflow: hidden;
       border: 1px solid var(--ow-line); border-radius: .8rem;
       padding: .72rem .9rem .55rem;
-      background: linear-gradient(165deg, rgba(216,181,74,.08), rgba(20,25,40,.7));
-      transition: border-color .15s ease, box-shadow .15s ease;
+      background: var(--ow-surface);
+      box-shadow: var(--ow-shadow);
+      transition: border-color .15s ease, box-shadow .2s ease, transform .15s ease;
     }
     div[data-testid="stMetric"]::before {
-      content: ""; position: absolute; top: 0; left: 10%; right: 10%; height: 1px;
+      content: ""; position: absolute; top: 0; left: 10%; right: 10%; height: 2px;
       background: linear-gradient(90deg, transparent, var(--ow-gold-soft), transparent);
     }
     div[data-testid="stMetric"]:hover {
       border-color: var(--ow-gold-soft);
-      box-shadow: 0 0 18px rgba(216,181,74,.10);
+      box-shadow: var(--ow-shadow-lift);
+      transform: translateY(-1px);
     }
     div[data-testid="stMetricLabel"] p {
       color: var(--ow-muted) !important; font-size: .8rem !important;
       letter-spacing: .08em;
     }
-    div[data-testid="stMetricValue"] { color: #e3c272; font-family: var(--ow-serif); }
+    div[data-testid="stMetricValue"] { color: var(--ow-gold-text);
+                                       font-family: var(--ow-serif); }
 
     /* tabs */
     div[data-baseweb="tab-list"] { gap: .1rem; border-bottom: 1px solid var(--ow-line); }
     button[data-baseweb="tab"] {
       background: transparent !important;
       border-radius: .55rem .55rem 0 0; padding: .45rem .8rem;
+      transition: background .15s ease;
     }
-    button[data-baseweb="tab"]:hover { background: rgba(216,181,74,.08) !important; }
+    button[data-baseweb="tab"]:hover { background: var(--ow-gold-faint) !important; }
     button[data-baseweb="tab"][aria-selected="true"] p {
-      color: #e3c272 !important; font-weight: 600;
-      text-shadow: 0 0 12px rgba(216,181,74,.45);
+      color: var(--ow-gold-text) !important; font-weight: 600;
     }
     div[data-baseweb="tab-highlight"] {
       background-color: var(--ow-gold);
-      box-shadow: 0 0 10px rgba(216,181,74,.8);
+      box-shadow: 0 1px 4px rgba(168, 132, 44, .5);
     }
     div[data-baseweb="tab-border"] { background: transparent; }
 
-    /* primary buttons: gilded seal */
+    /* primary buttons: gilded seal (press = scale down, hover = lift) */
     button[data-testid="stBaseButton-primary"],
     div[data-testid="stFormSubmitButton"] button[kind="primary"],
     .stButton button[kind="primary"] {
-      background: linear-gradient(180deg, #e3c272 0%, var(--ow-gold-deep) 100%) !important;
-      color: #1a1407 !important; font-weight: 600;
-      border: 1px solid rgba(236,210,140,.9) !important;
-      box-shadow: 0 0 14px rgba(216,181,74,.30), 0 2px 6px rgba(0,0,0,.4);
-      transition: transform .12s ease, box-shadow .12s ease;
+      background: linear-gradient(180deg, #e7c873 0%, var(--ow-gold-deep) 100%) !important;
+      color: #2a2008 !important; font-weight: 600;
+      border: 1px solid rgba(168, 132, 44, .7) !important;
+      box-shadow: 0 1px 3px rgba(45, 38, 24, .18), 0 0 10px rgba(183, 143, 46, .18);
+      transition: transform .12s ease, box-shadow .15s ease, filter .15s ease;
     }
     button[data-testid="stBaseButton-primary"]:hover,
     .stButton button[kind="primary"]:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 0 22px rgba(216,181,74,.5), 0 3px 9px rgba(0,0,0,.45);
+      transform: translateY(-1px); filter: brightness(1.04);
+      box-shadow: 0 3px 8px rgba(45, 38, 24, .22), 0 0 16px rgba(183, 143, 46, .28);
     }
+    button[data-testid="stBaseButton-primary"]:active,
+    .stButton button[kind="primary"]:active { transform: scale(.985); }
+    .stButton button { transition: transform .12s ease, box-shadow .15s ease,
+                       border-color .15s ease; }
+    .stButton button:hover { border-color: var(--ow-gold-soft); }
 
-    /* bordered containers read as cards */
+    /* bordered containers read as paper cards */
     div[data-testid="stVerticalBlockBorderWrapper"] {
       border-color: var(--ow-line) !important;
-      background: var(--ow-panel);
-      transition: border-color .15s ease, box-shadow .15s ease;
+      background: var(--ow-surface);
+      box-shadow: var(--ow-shadow);
+      transition: border-color .15s ease, box-shadow .2s ease;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:hover {
-      border-color: rgba(216,181,74,.35) !important;
-      box-shadow: 0 0 16px rgba(216,181,74,.07);
+      border-color: var(--ow-gold-soft) !important;
+      box-shadow: var(--ow-shadow-lift);
     }
 
     details[data-testid="stExpander"] {
       border: 1px solid var(--ow-line); border-radius: .6rem;
-      background: rgba(20,25,40,.4);
+      background: var(--ow-surface);
+      transition: border-color .15s ease, box-shadow .2s ease;
     }
-    details[data-testid="stExpander"] summary:hover { color: #e3c272; }
+    details[data-testid="stExpander"]:hover { border-color: var(--ow-gold-soft); }
+    details[data-testid="stExpander"] summary:hover { color: var(--ow-gold-text); }
 
     div[data-testid="stForm"] {
       border: 1px solid var(--ow-line); border-radius: .9rem;
-      background: rgba(20,25,40,.42); padding: 1.05rem 1.15rem .85rem;
+      background: var(--ow-surface); padding: 1.05rem 1.15rem .85rem;
+      box-shadow: var(--ow-shadow);
     }
 
-    section[data-testid="stSidebar"] { border-right: 1px solid #20253a; }
+    section[data-testid="stSidebar"] { border-right: 1px solid #ddd3b8; }
     .ow-brand { display: flex; gap: .6rem; align-items: center; padding: .15rem 0 .5rem; }
     .ow-brand .mark {
       width: 2.2rem; height: 2.2rem; border-radius: .65rem; font-size: 1.1rem;
       display: flex; align-items: center; justify-content: center;
-      background: linear-gradient(150deg, #2c2410, #141929);
+      background: linear-gradient(150deg, #f3e3b4, #e9d896);
       border: 1px solid var(--ow-gold-soft);
-      box-shadow: 0 0 12px rgba(216,181,74,.25);
+      box-shadow: 0 1px 4px rgba(45, 38, 24, .15);
     }
     .ow-brand b { font-family: var(--ow-serif); font-size: 1.05rem;
-                  color: var(--ow-text); display: block; line-height: 1.2; }
+                  color: var(--ow-ink); display: block; line-height: 1.2; }
     .ow-brand span { font-size: .72rem; color: var(--ow-muted); letter-spacing: .06em; }
 
     div[data-testid="stChatMessage"] {
-      background: var(--ow-panel);
+      background: var(--ow-surface);
       border: 1px solid var(--ow-line); border-radius: .85rem;
+      box-shadow: var(--ow-shadow);
     }
 
+    [data-testid="stSpinner"] p { color: var(--ow-gold-text) !important; }
+
     ::-webkit-scrollbar { width: 10px; height: 10px; }
-    ::-webkit-scrollbar-thumb { background: #262c42; border-radius: 6px; }
-    ::-webkit-scrollbar-thumb:hover { background: #3a4160; }
+    ::-webkit-scrollbar-thumb { background: #d9cfb4; border-radius: 6px; }
+    ::-webkit-scrollbar-thumb:hover { background: #c8bb98; }
+
+    /* accessibility: honor the user's motion preference */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+      }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -422,10 +460,10 @@ def _fail(e: Exception) -> None:
 def _dark_axes(chart: alt.Chart) -> alt.Chart:
     return (
         chart.configure_axis(
-            labelColor="#9a94a8",
-            titleColor="#9a94a8",
-            gridColor="#222840",
-            domainColor="#3a4160",
+            labelColor="#7b7261",
+            titleColor="#7b7261",
+            gridColor="#e8e0cc",
+            domainColor="#cfc4a6",
         )
         .configure_view(strokeWidth=0)
         .configure(background="transparent")
@@ -436,7 +474,7 @@ def _bar_chart(rows: list[dict[str, Any]], *, x: str, y: str, height: int = 210)
     df = pd.DataFrame(rows)
     chart = (
         alt.Chart(df)
-        .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3, color="#d8b54a")
+        .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3, color="#b78f2e")
         .encode(
             x=alt.X(f"{x}:N", sort="-y", axis=alt.Axis(labelAngle=0, title=None)),
             y=alt.Y(f"{y}:Q", axis=alt.Axis(title=None, tickMinStep=1)),
@@ -451,7 +489,7 @@ def _hbar_chart(rows: list[dict[str, Any]], *, y: str, x: str, height: int = 240
     df = pd.DataFrame(rows)
     chart = (
         alt.Chart(df)
-        .mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3, color="#d8b54a")
+        .mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3, color="#b78f2e")
         .encode(
             y=alt.Y(f"{y}:N", sort="-x", axis=alt.Axis(title=None)),
             x=alt.X(f"{x}:Q", axis=alt.Axis(title=None, tickMinStep=1)),
@@ -475,13 +513,13 @@ def _dot_graph(
     lines = [
         "digraph world {",
         '  bgcolor="transparent"; rankdir=LR; pad=0.2;',
-        '  node [shape=box style="rounded,filled" fillcolor="#161b2b" color="#3a4160"',
-        '        fontcolor="#ece5d3" fontsize=11 margin="0.16,0.08"];',
-        '  edge [color="#4a5170" fontcolor="#9a94a8" fontsize=9 arrowsize=0.7];',
+        '  node [shape=box style="rounded,filled" fillcolor="#fffdf7" color="#cfc4a6"',
+        '        fontcolor="#2d2618" fontsize=11 margin="0.16,0.08"];',
+        '  edge [color="#b3a787" fontcolor="#7b7261" fontsize=9 arrowsize=0.7];',
     ]
     for node_id in sorted(node_ids):
         name, group = display.get(node_id, (node_id, ""))
-        color = _GRAPH_NODE_COLOR.get(group, "#3a4160")
+        color = _GRAPH_NODE_COLOR.get(group, "#cfc4a6")
         label = name.replace('"', "'")
         lines.append(f'  "{node_id}" [label="{label}" color="{color}"];')
     for edge in shown:
@@ -521,9 +559,9 @@ def _tree_dot(tree: dict[str, Any], name_of: dict[str, str]) -> str:
     lines = [
         "digraph dialogue {",
         '  bgcolor="transparent"; rankdir=TB; pad=0.2;',
-        '  node [shape=box style="rounded,filled" fillcolor="#161b2b" color="#3a4160"',
-        '        fontcolor="#ece5d3" fontsize=10 margin="0.14,0.1"];',
-        '  edge [color="#4a5170" fontcolor="#d8b54a" fontsize=9 arrowsize=0.7];',
+        '  node [shape=box style="rounded,filled" fillcolor="#fffdf7" color="#cfc4a6"',
+        '        fontcolor="#2d2618" fontsize=10 margin="0.14,0.1"];',
+        '  edge [color="#b3a787" fontcolor="#8a6a1e" fontsize=9 arrowsize=0.7];',
     ]
     nodes = tree.get("nodes") or {}
     root = tree.get("root_node") or ""
@@ -534,7 +572,7 @@ def _tree_dot(tree: dict[str, Any], name_of: dict[str, str]) -> str:
         if len(text) > 26:
             text = text[:26] + "…"
         label = f"{speaker_name}\\n{text}" if speaker_name else text
-        extra = ' color="#d8b54a" penwidth=2' if node_id == root else ""
+        extra = ' color="#a8842c" penwidth=2' if node_id == root else ""
         lines.append(f'  "{node_id}" [label="{label}"{extra}];')
     for node_id, node in nodes.items():
         next_node = node.get("next_node")
@@ -654,12 +692,12 @@ st.markdown(
     f"""
     <div class="ow-hero">
       <svg class="ow-mark" width="120" height="120" viewBox="0 0 100 100" fill="none">
-        <circle cx="50" cy="50" r="41" stroke="#d8b54a" stroke-opacity=".35"/>
-        <circle cx="50" cy="50" r="29" stroke="#d8b54a" stroke-opacity=".2"/>
+        <circle cx="50" cy="50" r="41" stroke="#a8842c" stroke-opacity=".4"/>
+        <circle cx="50" cy="50" r="29" stroke="#a8842c" stroke-opacity=".25"/>
         <path d="M50 12 L57 43 L88 50 L57 57 L50 88 L43 57 L12 50 L43 43 Z"
-              fill="#d8b54a" fill-opacity=".16" stroke="#d8b54a" stroke-opacity=".5"/>
+              fill="#b78f2e" fill-opacity=".18" stroke="#a8842c" stroke-opacity=".55"/>
         <path d="M50 30 L53.5 46.5 L70 50 L53.5 53.5 L50 70 L46.5 53.5 L30 50 L46.5 46.5 Z"
-              fill="#d8b54a" fill-opacity=".25"/>
+              fill="#b78f2e" fill-opacity=".3"/>
       </svg>
       <h1>OWCopilot 世界观工作台</h1>
       <p class="ow-tagline">查设定有出处 · 跑审查有证据 · AI 产物必过人审</p>
