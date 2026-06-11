@@ -12,7 +12,8 @@ build/
 dist/
 .idea/
 .vscode/
-.claude/settings.local.json
+# Claude Code (AI dev tool) local config — IDE-style personal tooling, never published
+.claude/
 .Rhistory
 # benchmark output at repo root only — project_docs/reports/ (real-LLM test records) stays tracked
 /reports/
