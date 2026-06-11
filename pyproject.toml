@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=77"]   # >=77 for PEP 639 SPDX `license` / `license-files`
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "owcopilot"
+version = "0.1.0"
+description = "Open-world game development AI copilot — engine-agnostic core with a consistency hub and a cost-engineering seam."
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Tingxuan Su" }]
+keywords = [
+    "llm", "game-development", "open-world", "unreal-engine", "unity",
+    "consistency", "knowledge-graph", "cost-optimization", "langgraph", "copilot",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Games/Entertainment",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.6",
+    "networkx>=3.2",
+    "langgraph>=0.2",
+    "openpyxl>=3.1",
+]
+
+# No [project.urls] yet — the project is local-only (not published to a public repo).
+# Add Homepage/Repository/Issues here once it lives on GitHub.
+
+[project.optional-dependencies]
+app = ["streamlit>=1.30"]
+dev = [
+    "pytest>=8.0",
+    "httpx2>=2.0",          # Starlette/FastAPI testclient prefers httpx2; avoids deprecation warnings
+    "ruff>=0.6",            # lint + format (replaces black/isort/flake8)
+    "mypy>=1.10",           # static type checking
+    "pre-commit>=3.7",      # local commit-time gate
+    "fakeredis>=2.20",      # in-memory Redis stand-in for the RedisCache tests (offline, $0)
+]
+live = ["openai>=1.0"]            # real provider (DeepSeek/OpenAI-compatible); offline runs don't need it
+serve = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]   # the deployable HTTP API (service/api.py)
+redis = ["redis>=5.0"]            # optional RedisCache backend for multi-instance stateless deploys
+mcp = ["mcp>=1.0"]                # optional MCP transport; core tool handlers do not require it
+
+[project.scripts]
+owcopilot = "owcopilot.cli.main:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["build", "dist", "_wheelcheck"]   # build artifacts, never lint them
+
+[tool.ruff.lint]
+# Pragmatic, widely-used starter set: pycodestyle errors, pyflakes, import sorting,
+# pyupgrade, and bugbear. Tighten later (e.g. add D for docstrings) once stable.
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    # `class X(str, Enum)` -> `class X(StrEnum)` changes str()/serialization semantics; this is a
+    # behaviour-preserving round, and the str-mixin form is intentional (pydantic/JSON use .value).
+    "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately import the app under test after a runtime importorskip guard.
+"tests/*" = ["E402"]
+
+[tool.mypy]
+# Pragmatic start (per Round 5 §2.5): check our package, tolerate third-party stub gaps,
+# and don't block on every untyped def. Fix real type bugs; tighten incrementally later.
+files = ["src/owcopilot"]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+
+[tool.setuptools.packages.find]
+where = ["src"]

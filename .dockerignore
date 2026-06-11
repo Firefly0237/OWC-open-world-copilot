@@ -1,0 +1,28 @@
+# Keep the build context small AND keep secrets out of the image.
+# .env holds real provider keys — it must NEVER enter a layer; inject keys at runtime.
+.env
+.env.*
+!.env.example
+
+# Local virtualenv / caches / build artifacts
+.venv/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Editors / VCS / local scratch
+.idea/
+.vscode/
+.git/
+.gitignore
+.Rhistory
+
+# Docs and tests aren't needed in the runtime image (tests run in CI, not in the container).
+tests/
+docs/
+project_docs/
+*.md

@@ -1,0 +1,61 @@
+name: CI
+
+# The whole test suite is offline, deterministic and $0 (mock/fake providers, no API keys),
+# so it is a perfect CI gate. No secrets are referenced here — the real-model and live-UE5
+# paths are manual and stay out of CI by design.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install (serve + dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[serve,dev]"
+
+      - name: Ruff
+        run: python -m ruff check src tests
+
+      - name: Mypy
+        run: python -m mypy src/owcopilot
+
+      - name: Run tests (offline, $0)
+        run: python -m pytest -q
+
+      - name: Acceptance benchmark (seeded errors / retrieval / impact gates)
+        run: python -m owcopilot.cli.main eval-acceptance --workspace .tmp/acceptance_ci
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the API image
+        run: docker build -t owcopilot-api:ci .
+
+      - name: Smoke-test the container (offline /health + a real request)
+        run: |
+          docker run -d --name owcopilot -p 8000:8000 owcopilot-api:ci
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8000/health && break || sleep 1
+          done
+          curl -fsS http://127.0.0.1:8000/health | grep -q '"status":"ok"'
+          curl -fsS -X POST http://127.0.0.1:8000/quests:generate \
+            -H 'Content-Type: application/json' \
+            -d '{"intent":"A caravan quest for Aldric headed to Northwatch.","world_bible_md":"## NPCs\n- Aldric - Caravan master [merchant, quest_giver]\n## Locations\n- Northwatch - Fortified town\n## Relations\n- Aldric -> Northwatch : located_in\n"}' | grep -q '"consistent":true'
+          docker rm -f owcopilot

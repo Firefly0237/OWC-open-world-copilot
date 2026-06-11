@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+.env.*
+!.env.example
+.venv/
+build/
+dist/
+.idea/
+.vscode/
+.claude/settings.local.json
+.Rhistory
+# benchmark output at repo root only — project_docs/reports/ (real-LLM test records) stays tracked
+/reports/
+.tmp/
+# runtime DBs are rebuildable indexes; content files + baselines stay tracked
+*.sqlite
