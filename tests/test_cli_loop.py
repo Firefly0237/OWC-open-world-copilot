@@ -10,9 +10,11 @@ from pathlib import Path
 
 import pytest
 
+from owcopilot.assist.review_queue import ReviewQueue
 from owcopilot.cli.main import main
 from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest, Relation
 from owcopilot.content.store import ContentStore
+from owcopilot.storage import SQLiteStore
 
 
 @pytest.fixture()
@@ -151,9 +153,7 @@ def test_draft_review_accept_writes_quest(project_root: Path, capsys) -> None:
     written = decided["written_ref"]
     assert written and written.startswith("quest:")
     quest_id = written.split(":", 1)[1]
-    saved = json.loads(
-        (project_root / "quests" / f"{quest_id}.json").read_text(encoding="utf-8")
-    )
+    saved = json.loads((project_root / "quests" / f"{quest_id}.json").read_text(encoding="utf-8"))
     assert saved["review_status"] == "approved"
     assert saved["origin"] == "ai_draft"  # provenance survives approval
 
@@ -171,6 +171,43 @@ def test_review_reject_keeps_content_untouched(project_root: Path, capsys) -> No
     )
     assert code == 0 and decided["decision"] == "rejected"
     assert not (project_root / "quests" / f"{quest_id}.json").exists()
+
+
+def test_review_accept_refuses_duplicate_quest_id(project_root: Path, capsys) -> None:
+    sqlite_path = project_root / ".owcopilot" / "runtime.sqlite"
+    sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+    before = json.loads((project_root / "quests" / "quest_patrol.json").read_text(encoding="utf-8"))
+    store = SQLiteStore(sqlite_path)
+    try:
+        item = ReviewQueue(store).add_quest_draft(
+            {
+                "id": "quest_patrol",
+                "title": "Overwrite Existing Quest",
+                "objective": "This must not replace approved content.",
+                "origin": "ai_draft",
+                "review_status": "pending_review",
+            }
+        )
+    finally:
+        store.close()
+
+    code = main(
+        [
+            "review",
+            "--content-root",
+            str(project_root),
+            "--accept",
+            item.id,
+            "--operator",
+            "lead",
+        ]
+    )
+    stderr = json.loads(capsys.readouterr().err)
+    after = json.loads((project_root / "quests" / "quest_patrol.json").read_text(encoding="utf-8"))
+
+    assert code == 2
+    assert "would overwrite existing quest content" in stderr["error"]
+    assert after == before
 
 
 def test_barks_offline_into_review_queue(project_root: Path, capsys) -> None:

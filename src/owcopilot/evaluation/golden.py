@@ -49,9 +49,7 @@ def golden_content_bundle() -> ContentBundle:
                 description="A fortified trade town on the northern road.",
             ),
         },
-        relations=[
-            Relation(source="npc_aldric", target="location_northwatch", kind="located_in")
-        ],
+        relations=[Relation(source="npc_aldric", target="location_northwatch", kind="located_in")],
         quests={
             "quest_missing_caravan": Quest(
                 id="quest_missing_caravan",

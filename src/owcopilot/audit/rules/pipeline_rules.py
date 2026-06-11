@@ -72,8 +72,7 @@ class TextTooLongForUIRule:
                     category=self.category,
                     target_ref=target_ref,
                     message=(
-                        f"Dialogue '{dialogue.id}' text length {len(text)} exceeds "
-                        f"UI limit {limit}"
+                        f"Dialogue '{dialogue.id}' text length {len(text)} exceeds UI limit {limit}"
                     ),
                     evidence=[Evidence(kind="field_path", target_ref=target_ref, path="text")],
                 )

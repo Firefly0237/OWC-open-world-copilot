@@ -43,9 +43,7 @@ def test_content_store_removes_stale_json_after_patch_remove(tmp_path) -> None:
     store = ContentStore(tmp_path / "content")
     store.save(
         ContentBundle(
-            entities={
-                "npc_aldric": Entity(id="npc_aldric", name="Aldric", type=EntityType.NPC)
-            }
+            entities={"npc_aldric": Entity(id="npc_aldric", name="Aldric", type=EntityType.NPC)}
         )
     )
 
@@ -63,9 +61,7 @@ def test_rollback_patch_in_store_restores_list_append_path(tmp_path) -> None:
     store = ContentStore(tmp_path / "content")
     store.save(
         ContentBundle(
-            entities={
-                "npc_aldric": Entity(id="npc_aldric", name="Aldric", type=EntityType.NPC)
-            }
+            entities={"npc_aldric": Entity(id="npc_aldric", name="Aldric", type=EntityType.NPC)}
         )
     )
     applied = apply_patch_to_store(

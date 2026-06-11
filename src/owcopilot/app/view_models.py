@@ -47,6 +47,124 @@ def build_project_overview(
         }
 
 
+def build_content_inventory(
+    content_root: str | Path,
+    *,
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    """Flatten the bundle into JSON-able rows for read-only browsing (the 设定档案 page).
+
+    Also exposes graph node refs so pickers (impact targets, bark speakers) can offer real
+    ids instead of free-text fields. Pure read; zero LLM cost.
+    """
+    with _project(content_root, sqlite_path) as project:
+        bundle = project.bundle
+        entities = [
+            {
+                "id": e.id,
+                "name": e.name,
+                "type": e.type.value,
+                "description": e.description,
+                "tags": ", ".join(e.tags),
+                "origin": e.origin.value,
+                "review_status": e.review_status.value,
+            }
+            for e in bundle.entities.values()
+        ]
+        quests = [
+            {
+                "id": q.id,
+                "title": q.title,
+                "giver_npc": q.giver_npc or "",
+                "location": q.location or "",
+                "objective": q.objective,
+                "stages": len(q.stages),
+                "timeline_order": q.timeline_order,
+                "origin": q.origin.value,
+                "review_status": q.review_status.value,
+            }
+            for q in bundle.quests.values()
+        ]
+        regions = [
+            {
+                "id": r.id,
+                "name": r.name,
+                "level_min": r.level_min,
+                "level_max": r.level_max,
+                "themes": ", ".join(r.themes),
+                "banned_content": ", ".join(r.banned_content),
+            }
+            for r in bundle.regions.values()
+        ]
+        pois = [
+            {
+                "id": p.id,
+                "name": p.name,
+                "region_id": p.region_id or "",
+                "purpose": p.purpose,
+                "controlling_faction": p.controlling_faction or "",
+            }
+            for p in bundle.pois.values()
+        ]
+        terms = [
+            {
+                "id": t.id,
+                "canonical": t.canonical,
+                "aliases": ", ".join(t.aliases),
+                "forbidden": ", ".join(t.forbidden),
+                "description": t.description,
+            }
+            for t in bundle.terms.values()
+        ]
+        dialogues = [
+            {
+                "id": d.id,
+                "text_key": d.text_key,
+                "speaker_id": d.speaker_id or "",
+                "quest_id": d.quest_id or "",
+                "text": d.text or "",
+            }
+            for d in bundle.dialogues.values()
+        ]
+        relations = [
+            {"source": rel.source, "kind": rel.kind, "target": rel.target}
+            for rel in bundle.relations
+        ]
+        dialogue_trees = [
+            {
+                "id": tree.id,
+                "title": tree.title,
+                "quest_id": tree.quest_id or "",
+                "participants": ", ".join(tree.participants),
+                "nodes": len(tree.nodes),
+            }
+            for tree in bundle.dialogue_trees.values()
+        ]
+        dialogue_tree_payloads = {
+            tree.id: tree.model_dump(mode="json", exclude_none=True)
+            for tree in bundle.dialogue_trees.values()
+        }
+        style_guides = [
+            {"id": s.id, "body": s.body, "rules": list(s.rules)}
+            for s in bundle.style_guides.values()
+        ]
+        return {
+            "entities": entities,
+            "quests": quests,
+            "regions": regions,
+            "pois": pois,
+            "terms": terms,
+            "dialogues": dialogues,
+            "dialogue_trees": dialogue_trees,
+            "dialogue_tree_payloads": dialogue_tree_payloads,
+            "relations": relations,
+            "style_guides": style_guides,
+            "localized_text_count": len(bundle.localized_texts),
+            "graph_refs": sorted(project.graph.node_refs()),
+            "cost_budget": _deterministic_cost_budget("content_inventory"),
+        }
+
+
 def build_issue_summary(
     content_root: str | Path,
     *,

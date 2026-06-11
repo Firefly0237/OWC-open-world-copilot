@@ -349,9 +349,7 @@ def seed_errors(clean: ContentBundle) -> tuple[ContentBundle, list[SeededError]]
     bundle.quests["quest_r9_q2"].timeline_order = bundle.quests["quest_r9_q1"].timeline_order
     note("E12", "TIMELINE_VIOLATION", "quest:quest_r9_q2", "prereq not earlier")
     assert bundle.quests["quest_r10_q2"].timeline_order is not None
-    bundle.quests["quest_r10_q3"].timeline_order = (
-        bundle.quests["quest_r10_q2"].timeline_order - 1
-    )
+    bundle.quests["quest_r10_q3"].timeline_order = bundle.quests["quest_r10_q2"].timeline_order - 1
     note("E13", "TIMELINE_VIOLATION", "quest:quest_r10_q3", "order inverted in chain")
     bundle.quest_event_refs["qer_90"] = QuestEventReference(
         id="qer_90",
@@ -483,17 +481,13 @@ def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
     clean_project = ProjectContext.open(clean_root, sqlite_path=root / "clean.sqlite")
     try:
         clean_audit = run_full_audit(clean_project, persist=False)
-        open_clean = [
-            issue for issue in clean_audit.issues if issue.status.value == "open"
-        ]
+        open_clean = [issue for issue in clean_audit.issues if issue.status.value == "open"]
         checks.append(
             AcceptanceCheck(
                 name="clean_world_zero_false_positives",
                 passed=not open_clean,
                 details={
-                    "open_issues": [
-                        f"{issue.rule_code} {issue.target_ref}" for issue in open_clean
-                    ]
+                    "open_issues": [f"{issue.rule_code} {issue.target_ref}" for issue in open_clean]
                 },
             )
         )
@@ -503,9 +497,7 @@ def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
         scenarios: list[tuple[str, Change, set[str]]] = [
             (
                 "delete_location",
-                Change(
-                    change_type=ChangeType.ENTITY_DELETE, target_ref="entity:loc_r1_a"
-                ),
+                Change(change_type=ChangeType.ENTITY_DELETE, target_ref="entity:loc_r1_a"),
                 {"quest:quest_r1_q1", "entity:npc_r1_a"},
             ),
             (
@@ -515,9 +507,7 @@ def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
             ),
             (
                 "change_quest",
-                Change(
-                    change_type=ChangeType.CONTENT_CHANGE, target_ref="quest:quest_r1_q1"
-                ),
+                Change(change_type=ChangeType.CONTENT_CHANGE, target_ref="quest:quest_r1_q1"),
                 {"quest:quest_r1_q2"},
             ),
         ]
@@ -593,9 +583,7 @@ def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
         clean_project.close()
 
     # 5. seeded-error detection on the corrupted world
-    corrupted_project = ProjectContext.open(
-        corrupted_root, sqlite_path=root / "corrupted.sqlite"
-    )
+    corrupted_project = ProjectContext.open(corrupted_root, sqlite_path=root / "corrupted.sqlite")
     try:
         corrupted_audit = run_full_audit(corrupted_project, persist=False)
     finally:

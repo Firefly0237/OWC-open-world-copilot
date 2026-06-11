@@ -36,7 +36,7 @@ dependencies = [
 # Add Homepage/Repository/Issues here once it lives on GitHub.
 
 [project.optional-dependencies]
-app = ["streamlit>=1.30"]
+app = ["streamlit>=1.46"]  # st.pills/segmented controls + newer [theme] config keys
 dev = [
     "pytest>=8.0",
     "httpx2>=2.0",          # Starlette/FastAPI testclient prefers httpx2; avoids deprecation warnings

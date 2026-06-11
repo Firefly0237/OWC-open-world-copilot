@@ -22,9 +22,7 @@ def test_neighbors_returns_k_hop_refs() -> None:
                 giver_npc="npc_aldric",
             )
         },
-        relations=[
-            Relation(source="npc_aldric", target="faction_iron_guard", kind="member_of")
-        ],
+        relations=[Relation(source="npc_aldric", target="faction_iron_guard", kind="member_of")],
     )
     graph = build_content_graph(bundle)
 
@@ -54,9 +52,7 @@ def test_query_filters_edges_by_kind_and_type() -> None:
                 giver_npc="npc_aldric",
             )
         },
-        relations=[
-            Relation(source="npc_aldric", target="faction_iron_guard", kind="member_of")
-        ],
+        relations=[Relation(source="npc_aldric", target="faction_iron_guard", kind="member_of")],
     )
     graph = build_content_graph(bundle)
 

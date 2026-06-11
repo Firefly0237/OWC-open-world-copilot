@@ -130,20 +130,16 @@ def impact_of(
         parsed: list[Change] = []
         for spec in changes:
             change_type = ChangeType(str(spec["change_type"]))
-            parsed.append(
-                Change(change_type=change_type, target_ref=str(spec["target_ref"]))
-            )
+            parsed.append(Change(change_type=change_type, target_ref=str(spec["target_ref"])))
         result = ImpactAnalyzer(project.graph).analyze(
             ChangeSet(changes=parsed), max_depth=max_depth
         )
         return {
             "must_change": [
-                item.model_dump(mode="json")
-                for item in result.by_level(ImpactLevel.MUST_CHANGE)
+                item.model_dump(mode="json") for item in result.by_level(ImpactLevel.MUST_CHANGE)
             ],
             "suggest_check": [
-                item.model_dump(mode="json")
-                for item in result.by_level(ImpactLevel.SUGGEST_CHECK)
+                item.model_dump(mode="json") for item in result.by_level(ImpactLevel.SUGGEST_CHECK)
             ],
             "total": len(result.items),
             "cost_budget": _deterministic_cost_budget("impact_of"),

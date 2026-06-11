@@ -24,9 +24,7 @@ class PromptInjectionRule:
     def check(self, ctx: AuditContext) -> Iterable[Issue]:
         for target_ref, path, text in _texts(ctx):
             matched = [
-                pattern.pattern
-                for pattern in _PROMPT_INJECTION_PATTERNS
-                if pattern.search(text)
+                pattern.pattern for pattern in _PROMPT_INJECTION_PATTERNS if pattern.search(text)
             ]
             if not matched:
                 continue

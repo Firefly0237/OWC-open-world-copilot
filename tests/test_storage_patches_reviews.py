@@ -97,8 +97,6 @@ def test_existing_db_gains_rollback_column(tmp_path) -> None:
     conn.close()
 
     store = SQLiteStore(db)  # initialize() must add the missing column
-    store.save_patch(
-        {"id": "p1", "status": "proposed", "ops": [], "rationale": "", "evidence": []}
-    )
+    store.save_patch({"id": "p1", "status": "proposed", "ops": [], "rationale": "", "evidence": []})
     assert store.get_patch("p1") is not None
     store.close()

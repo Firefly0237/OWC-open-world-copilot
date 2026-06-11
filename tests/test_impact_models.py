@@ -12,7 +12,10 @@ def test_impact_models_group_items_by_level() -> None:
         source_change="entity:npc_a",
     )
 
-    assert ChangeSet(
-        changes=[Change(change_type=ChangeType.ENTITY_RENAME, target_ref="entity:npc_a")]
-    ).changes[0].change_type is ChangeType.ENTITY_RENAME
+    assert (
+        ChangeSet(changes=[Change(change_type=ChangeType.ENTITY_RENAME, target_ref="entity:npc_a")])
+        .changes[0]
+        .change_type
+        is ChangeType.ENTITY_RENAME
+    )
     assert item.level is ImpactLevel.MUST_CHANGE

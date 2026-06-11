@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "workbench",
+      "runtimeExecutable": ".venv/Scripts/streamlit.exe",
+      "runtimeArgs": [
+        "run",
+        "src/owcopilot/app/dashboard.py",
+        "--server.port",
+        "8531",
+        "--server.headless",
+        "true"
+      ],
+      "port": 8531
+    }
+  ]
+}

@@ -1062,9 +1062,7 @@ def create_app() -> FastAPI:
                     status_code=503,
                     detail="real provider is not configured (OPENAI_BASE_URL / OPENAI_API_KEY)",
                 )
-            model: str = (
-                req.llm_model or os.getenv("OWCOPILOT_CHEAP_MODEL") or "deepseek-v4-flash"
-            )
+            model: str = req.llm_model or os.getenv("OWCOPILOT_CHEAP_MODEL") or "deepseek-v4-flash"
             provider: Any = OpenAICompatProvider(model=model)
         elif offline_provider is None:
             return None, telemetry
@@ -1145,9 +1143,7 @@ def create_app() -> FastAPI:
                 issue = find_issue(project_context, issue_id)
             except FileNotFoundError as e:
                 raise HTTPException(status_code=404, detail=str(e)) from e
-            gateway, telemetry = _task_gateway(
-                req, task="patch_suggest", offline_provider=None
-            )
+            gateway, telemetry = _task_gateway(req, task="patch_suggest", offline_provider=None)
             result = suggest_for_issue(
                 project_context,
                 issue,
@@ -1205,9 +1201,7 @@ def create_app() -> FastAPI:
         project_context = _registered_project(project)
         try:
             try:
-                outcome = apply_patch_workflow(
-                    project_context, patch_id, operator=req.operator
-                )
+                outcome = apply_patch_workflow(project_context, patch_id, operator=req.operator)
             except FileNotFoundError as e:
                 raise HTTPException(status_code=404, detail=str(e)) from e
             except ValueError as e:
@@ -1243,9 +1237,7 @@ def create_app() -> FastAPI:
         project_context = _registered_project(project)
         try:
             try:
-                outcome = rollback_patch_workflow(
-                    project_context, patch_id, operator=req.operator
-                )
+                outcome = rollback_patch_workflow(project_context, patch_id, operator=req.operator)
             except FileNotFoundError as e:
                 raise HTTPException(status_code=404, detail=str(e)) from e
             except ValueError as e:

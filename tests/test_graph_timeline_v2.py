@@ -38,6 +38,4 @@ def test_active_edges_at_filters_timeline_relations() -> None:
 
     active = active_edges_at(graph, 5)
 
-    assert [(edge.target, edge.kind) for edge in active] == [
-        ("entity:faction_new", "member_of")
-    ]
+    assert [(edge.target, edge.kind) for edge in active] == [("entity:faction_new", "member_of")]

@@ -6,7 +6,7 @@ from owcopilot.assist.drafts import QuestDraftService, parse_quest_draft
 from owcopilot.audit.default_rules import build_default_rule_registry
 from owcopilot.audit.models import Severity
 from owcopilot.audit.runner import AuditRunner
-from owcopilot.content.models import ContentBundle, Entity, EntityType, Origin, ReviewStatus
+from owcopilot.content.models import ContentBundle, Entity, EntityType, Origin, Quest, ReviewStatus
 from owcopilot.llm.cache import NoOpCache
 from owcopilot.llm.gateway import LLMGateway
 from owcopilot.llm.router import StaticRouter
@@ -61,9 +61,7 @@ def test_parse_quest_draft_tolerates_real_model_shape_drift() -> None:
 
 
 def test_parse_quest_draft_converts_reward_mapping() -> None:
-    quest = parse_quest_draft(
-        json.dumps({"title": "T", "objective": "O", "rewards": {"gold": 75}})
-    )
+    quest = parse_quest_draft(json.dumps({"title": "T", "objective": "O", "rewards": {"gold": 75}}))
     assert quest.rewards[0].kind == "gold"
     assert quest.rewards[0].value == "75"
 
@@ -157,6 +155,60 @@ def test_quest_draft_service_marks_ai_draft_and_runs_audit() -> None:
         assert {issue.rule_code for issue in result.issues} == {"UNREVIEWED_AI_CONTENT"}
         assert all(issue.severity is not Severity.ERROR for issue in result.issues)
         assert telemetry.records[0].task == "quest_draft"
+    finally:
+        store.close()
+
+
+def test_quest_draft_service_renames_id_collisions() -> None:
+    store = SQLiteStore()
+    try:
+        bundle = ContentBundle(
+            entities={
+                "npc_aldric": Entity(id="npc_aldric", name="Aldric", type=EntityType.NPC),
+                "location_northwatch": Entity(
+                    id="location_northwatch",
+                    name="Northwatch",
+                    type=EntityType.LOCATION,
+                ),
+            },
+            quests={
+                "quest_missing_caravan": Quest(
+                    id="quest_missing_caravan",
+                    title="Missing Caravan",
+                    objective="Existing approved quest.",
+                )
+            },
+        )
+        store.replace_content_index(bundle)
+        gateway = LLMGateway(
+            providers={
+                "cheap": DraftProvider(
+                    {
+                        "id": "quest_missing_caravan",
+                        "title": "Missing Caravan",
+                        "giver_npc": "npc_aldric",
+                        "location": "location_northwatch",
+                        "objective": "Find the caravan",
+                        "localization_keys": ["quest.missing_caravan.objective"],
+                    }
+                )
+            },
+            router=StaticRouter(mapping={"quest_draft": "cheap"}),
+            cache=NoOpCache(),
+        )
+        service = QuestDraftService(
+            gateway=gateway,
+            context_builder=ContextPackBuilder(bm25=BM25Retriever(store)),
+            audit_runner=AuditRunner(build_default_rule_registry()),
+            bundle=bundle,
+        )
+
+        result = service.draft_quest("Aldric")
+
+        assert result.quest.id == "quest_missing_caravan_draft"
+        assert result.quest.metadata["model_requested_id"] == "quest_missing_caravan"
+        assert result.quest.metadata["id_collision_resolved"] is True
+        assert "quest_missing_caravan" in bundle.quests
     finally:
         store.close()
 

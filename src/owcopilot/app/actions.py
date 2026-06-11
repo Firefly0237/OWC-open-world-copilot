@@ -13,19 +13,32 @@ from pathlib import Path
 from typing import Any
 
 from ..assist.barks import BarkBatchService
+from ..assist.dialogue_trees import DialogueTreeService, OfflineDialogueTreeProvider
 from ..assist.drafts import QuestDraftService
+from ..assist.flavor import FlavorBatchService, OfflineFlavorProvider
 from ..assist.offline import OfflineBarksProvider, OfflineQuestDraftProvider
 from ..assist.review_queue import ReviewQueue
 from ..audit.baseline import issue_fingerprint
+from ..audit.context import AuditContext
 from ..audit.report import render_audit_markdown
 from ..content.hash import content_hash
+from ..content.models import ContentBundle
 from ..exporters import EngineTarget, export_content_bundle
+from ..extraction import (
+    ExtractionDraft,
+    ExtractionService,
+    OfflineExtractionProvider,
+    OfflineGapFillProvider,
+    apply_gap_answers,
+    quests_from_beats,
+)
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
 from ..llm.cache import NoOpCache
 from ..llm.gateway import LLMGateway, OpenAICompatProvider
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
 from ..pipeline.audit import run_full_audit
+from ..pipeline.ingest import run_ingest
 from ..pipeline.patches import (
     apply_patch_workflow,
     find_issue,
@@ -38,6 +51,7 @@ from ..qa.offline import OfflineQAProvider
 from ..qa.service import LoreQAService
 from ..telemetry import deterministic_step, llm_step, summarize_workflow
 from ..util import load_dotenv
+from ..worldgen import OfflineWorldSeedProvider, WorldSeedBrief, WorldSeedService
 
 
 def run_project_audit_action(
@@ -131,12 +145,10 @@ def run_impact_action(
         )
         return {
             "must_change": [
-                item.model_dump(mode="json")
-                for item in result.by_level(ImpactLevel.MUST_CHANGE)
+                item.model_dump(mode="json") for item in result.by_level(ImpactLevel.MUST_CHANGE)
             ],
             "suggest_check": [
-                item.model_dump(mode="json")
-                for item in result.by_level(ImpactLevel.SUGGEST_CHECK)
+                item.model_dump(mode="json") for item in result.by_level(ImpactLevel.SUGGEST_CHECK)
             ],
             "total": len(result.items),
             "cost_budget": _deterministic_cost_budget("impact_of"),
@@ -341,6 +353,118 @@ def run_barks_action(
         }
 
 
+def add_reference_action(
+    content_root: str | Path,
+    *,
+    title: str,
+    text: str,
+    sqlite_path: str | None = None,
+    source_type: str = "uploaded_file",
+    original_filename: str | None = None,
+    allowed_uses: list[str] | None = None,
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        result = project.reference_store.add_text(
+            title=title,
+            text=text,
+            source_type=source_type,
+            original_filename=original_filename,
+            allowed_uses=allowed_uses,
+        )
+        project.reference_store.sync_index(project.sqlite_store)
+        return {
+            "source": result.source.model_dump(mode="json"),
+            "chunks": [chunk.model_dump(mode="json") for chunk in result.chunks],
+            "indexed_count": result.indexed_count,
+            "cost_budget": _deterministic_cost_budget("reference_add"),
+        }
+
+
+def list_references_action(
+    content_root: str | Path,
+    *,
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        sources = project.reference_store.list_sources()
+        return {
+            "count": len(sources),
+            "sources": [source.model_dump(mode="json") for source in sources],
+            "cost_budget": _deterministic_cost_budget("reference_list"),
+        }
+
+
+def search_references_action(
+    content_root: str | Path,
+    *,
+    query: str,
+    sqlite_path: str | None = None,
+    budget_tokens: int = 1000,
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        pack = project.reference_context_builder.build(query, budget_tokens=budget_tokens)
+        return {
+            "query": query,
+            "refs": pack.refs,
+            "hits": [hit.model_dump(mode="json") for hit in pack.hits],
+            "cost_budget": _deterministic_cost_budget("reference_search"),
+        }
+
+
+def run_world_seed_action(
+    content_root: str | Path,
+    *,
+    brief: dict[str, Any],
+    sqlite_path: str | None = None,
+    budget_tokens: int = 1800,
+    llm_mode: str = "offline",
+    llm_model: str = "deepseek-v4-flash",
+) -> dict[str, Any]:
+    parsed = WorldSeedBrief.model_validate(brief)
+    with _project(content_root, sqlite_path) as project:
+        gateway, telemetry = _gateway(
+            task="world_seed",
+            llm_mode=llm_mode,
+            llm_model=llm_model,
+            offline_provider=OfflineWorldSeedProvider(),
+        )
+        draft = WorldSeedService(
+            gateway=gateway,
+            bundle=project.bundle,
+            project_context_builder=project.context_builder,
+            reference_context_builder=project.reference_context_builder,
+        ).generate(parsed, budget_tokens=budget_tokens)
+        issues = project.audit_runner.run(AuditContext.from_bundle(draft.bundle)).issues
+        item = ReviewQueue(project.sqlite_store).add_world_seed(
+            {
+                "id": draft.id,
+                "brief": draft.brief.model_dump(mode="json"),
+                "summary": draft.summary,
+                "bundle": draft.bundle.model_dump(mode="json", exclude_none=True),
+                "reference_report": [row.model_dump(mode="json") for row in draft.reference_report],
+                "project_context_refs": draft.project_context_refs,
+                "inspiration_context_refs": draft.inspiration_context_refs,
+            },
+            issue_refs=[issue_fingerprint(issue) for issue in issues],
+        )
+        telemetry_summary = telemetry.summary()
+        return {
+            "id": draft.id,
+            "summary": draft.summary,
+            "bundle": draft.bundle.model_dump(mode="json", exclude_none=True),
+            "counts": _bundle_counts(draft.bundle),
+            "reference_report": [row.model_dump(mode="json") for row in draft.reference_report],
+            "project_context_refs": draft.project_context_refs,
+            "inspiration_context_refs": draft.inspiration_context_refs,
+            "issues": [issue.model_dump(mode="json") for issue in issues],
+            "review_item_id": item.id,
+            "telemetry": telemetry_summary,
+            "cost_budget": summarize_workflow(
+                [llm_step("world_seed", telemetry_summary)]
+            ).budget.model_dump(mode="json"),
+        }
+
+
 def list_review_items_action(
     content_root: str | Path,
     *,
@@ -430,3 +554,231 @@ def _project(content_root: str | Path, sqlite_path: str | None) -> Iterator[Proj
 
 def _deterministic_cost_budget(step_name: str) -> dict[str, Any]:
     return summarize_workflow([deterministic_step(step_name)]).budget.model_dump(mode="json")
+
+
+def _bundle_counts(bundle: Any) -> dict[str, int]:
+    return {
+        "entities": len(bundle.entities),
+        "relations": len(bundle.relations),
+        "quests": len(bundle.quests),
+        "regions": len(bundle.regions),
+        "pois": len(bundle.pois),
+        "terms": len(bundle.terms),
+        "style_guides": len(bundle.style_guides),
+    }
+
+
+def run_extraction_action(
+    content_root: str | Path,
+    *,
+    title: str,
+    text: str,
+    source_kind: str = "文稿",
+    sqlite_path: str | None = None,
+    max_chunks: int = 12,
+    llm_mode: str = "offline",
+    llm_model: str = "deepseek-v4-flash",
+) -> dict[str, Any]:
+    """Distill an unstructured manuscript into a reviewable draft (entities/relations/beats)."""
+    with _project(content_root, sqlite_path) as project:
+        gateway, telemetry = _gateway(
+            task="extract_lore",
+            llm_mode=llm_mode,
+            llm_model=llm_model,
+            offline_provider=OfflineExtractionProvider(),
+        )
+        draft = ExtractionService(gateway=gateway, bundle=project.bundle).extract(
+            title=title, text=text, source_kind=source_kind, max_chunks=max_chunks
+        )
+        telemetry_summary = telemetry.summary()
+        return {
+            "draft": draft.model_dump(mode="json", exclude_none=True),
+            "stats": draft.stats,
+            "telemetry": telemetry_summary,
+            "cost_budget": summarize_workflow(
+                [llm_step("extract_lore", telemetry_summary)]
+            ).budget.model_dump(mode="json"),
+        }
+
+
+def fill_extraction_gaps_action(
+    content_root: str | Path,
+    *,
+    draft: dict[str, Any],
+    gap_refs: list[str] | None = None,
+    sqlite_path: str | None = None,
+    llm_mode: str = "offline",
+    llm_model: str = "deepseek-v4-flash",
+) -> dict[str, Any]:
+    """Ask the model to suggest values for missing fields; the user confirms before submit."""
+    parsed = ExtractionDraft.model_validate(draft)
+    with _project(content_root, sqlite_path):
+        gateway, telemetry = _gateway(
+            task="extract_fill",
+            llm_mode=llm_mode,
+            llm_model=llm_model,
+            offline_provider=OfflineGapFillProvider(),
+        )
+        service = ExtractionService(gateway=gateway, bundle=ContentBundle())
+        updated = service.fill_gaps(parsed, gap_refs=gap_refs)
+        telemetry_summary = telemetry.summary()
+        return {
+            "draft": updated.model_dump(mode="json", exclude_none=True),
+            "telemetry": telemetry_summary,
+            "cost_budget": summarize_workflow(
+                [llm_step("extract_fill", telemetry_summary)]
+            ).budget.model_dump(mode="json"),
+        }
+
+
+def submit_extraction_action(
+    content_root: str | Path,
+    *,
+    draft: dict[str, Any],
+    answers: dict[str, str] | None = None,
+    include_beats_as_quests: bool = False,
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    """Apply confirmed gap answers and push the draft into the review queue (no direct write)."""
+    parsed = ExtractionDraft.model_validate(draft)
+    if answers:
+        parsed = apply_gap_answers(parsed, answers)
+    if include_beats_as_quests:
+        parsed.bundle.quests.update(quests_from_beats(parsed))
+    with _project(content_root, sqlite_path) as project:
+        issues = project.audit_runner.run(AuditContext.from_bundle(parsed.bundle)).issues
+        item = ReviewQueue(project.sqlite_store).add_import_draft(
+            {
+                "id": parsed.id,
+                "source_title": parsed.source_title,
+                "source_kind": parsed.source_kind,
+                "summary": parsed.summary,
+                "bundle": parsed.bundle.model_dump(mode="json", exclude_none=True),
+                "plot_beats": [beat.model_dump(mode="json") for beat in parsed.plot_beats],
+                "open_gaps": [gap.model_dump(mode="json") for gap in parsed.gaps],
+            },
+            issue_refs=[issue_fingerprint(issue) for issue in issues],
+        )
+        return {
+            "review_item_id": item.id,
+            "draft_id": parsed.id,
+            "open_gaps": len(parsed.gaps),
+            "issues": [issue.model_dump(mode="json") for issue in issues],
+            "counts": _bundle_counts(parsed.bundle),
+            "cost_budget": _deterministic_cost_budget("extraction_submit"),
+        }
+
+
+def run_dialogue_tree_action(
+    content_root: str | Path,
+    *,
+    participant_ids: list[str],
+    brief: str,
+    quest_id: str | None = None,
+    sqlite_path: str | None = None,
+    max_nodes: int = 12,
+    max_chars: int = 120,
+    llm_mode: str = "offline",
+    llm_model: str = "deepseek-v4-flash",
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        gateway, telemetry = _gateway(
+            task="dialogue_tree",
+            llm_mode=llm_mode,
+            llm_model=llm_model,
+            offline_provider=OfflineDialogueTreeProvider(),
+        )
+        result = DialogueTreeService(
+            gateway=gateway,
+            bundle=project.bundle,
+            review_queue=ReviewQueue(project.sqlite_store),
+        ).generate(
+            participant_ids=participant_ids,
+            brief=brief,
+            quest_id=quest_id,
+            max_nodes=max_nodes,
+            max_chars=max_chars,
+        )
+        telemetry_summary = telemetry.summary()
+        return {
+            "tree": result.tree.model_dump(mode="json", exclude_none=True),
+            "lint_issues": [issue.model_dump(mode="json") for issue in result.lint_issues],
+            "structure_problems": result.structure_problems,
+            "review_item_id": result.review_item.id if result.review_item else None,
+            "telemetry": telemetry_summary,
+            "cost_budget": summarize_workflow(
+                [llm_step("dialogue_tree", telemetry_summary)]
+            ).budget.model_dump(mode="json"),
+        }
+
+
+def run_flavor_action(
+    content_root: str | Path,
+    *,
+    category: str,
+    names: list[str],
+    theme: str = "",
+    sqlite_path: str | None = None,
+    max_chars: int = 120,
+    llm_mode: str = "offline",
+    llm_model: str = "deepseek-v4-flash",
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        gateway, telemetry = _gateway(
+            task="flavor_batch",
+            llm_mode=llm_mode,
+            llm_model=llm_model,
+            offline_provider=OfflineFlavorProvider(),
+        )
+        result = FlavorBatchService(
+            gateway=gateway,
+            bundle=project.bundle,
+            review_queue=ReviewQueue(project.sqlite_store),
+        ).generate(category=category, names=names, theme=theme, max_chars=max_chars)
+        telemetry_summary = telemetry.summary()
+        return {
+            "batch_id": result.batch_id,
+            "category": result.category,
+            "accepted": [entry.model_dump(mode="json") for entry in result.accepted],
+            "rejected": [
+                {
+                    "name": rejected.name,
+                    "text": rejected.text,
+                    "issues": [issue.code for issue in rejected.issues],
+                }
+                for rejected in result.rejected
+            ],
+            "review_item_id": result.review_item.id if result.review_item else None,
+            "telemetry": telemetry_summary,
+            "cost_budget": summarize_workflow(
+                [llm_step("flavor_batch", telemetry_summary)]
+            ).budget.model_dump(mode="json"),
+        }
+
+
+def run_ingest_action(
+    content_root: str | Path,
+    *,
+    paths: list[str],
+    sqlite_path: str | None = None,
+    dry_run: bool = True,
+    write_non_conflicting: bool = False,
+) -> dict[str, Any]:
+    """Strict-format import (xlsx/json/jsonl/md/luban). Defaults to dry-run preview."""
+    with _project(content_root, sqlite_path) as project:
+        result = run_ingest(
+            project,
+            list(paths),
+            dry_run=dry_run,
+            write_non_conflicting=write_non_conflicting,
+        )
+        return {
+            "dry_run": result.dry_run,
+            "incoming_count": result.incoming_count,
+            "changes": [change.model_dump(mode="json") for change in result.changes],
+            "issues": [issue.model_dump(mode="json") for issue in result.issues],
+            "has_errors": result.has_errors,
+            "content_hash_before": result.content_hash_before,
+            "content_hash_after": result.content_hash_after,
+            "cost_budget": _deterministic_cost_budget("ingest"),
+        }

@@ -131,6 +131,37 @@ class SQLiteStore:
                 title,
                 body
             );
+
+            CREATE TABLE IF NOT EXISTS reference_sources (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                original_filename TEXT,
+                allowed_uses_json TEXT NOT NULL,
+                text_hash TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS reference_chunks (
+                ref TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                metadata_json TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_reference_chunks_source_id
+                ON reference_chunks(source_id);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS reference_fts USING fts5(
+                ref UNINDEXED,
+                source_id UNINDEXED,
+                source_title UNINDEXED,
+                title,
+                body
+            );
             """
         )
         # Older runtime DBs predate the rollback column; content files are the source of truth,
@@ -141,9 +172,7 @@ class SQLiteStore:
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, column_type: str) -> None:
-        existing = {
-            str(row["name"]) for row in self.conn.execute(f"PRAGMA table_info({table})")
-        }
+        existing = {str(row["name"]) for row in self.conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
@@ -334,9 +363,7 @@ class SQLiteStore:
         self.conn.commit()
 
     def get_review_item(self, item_id: str) -> dict[str, Any] | None:
-        row = self.conn.execute(
-            "SELECT * FROM review_items WHERE id = ?", (item_id,)
-        ).fetchone()
+        row = self.conn.execute("SELECT * FROM review_items WHERE id = ?", (item_id,)).fetchone()
         return _review_item_from_row(row) if row is not None else None
 
     def list_review_items(
@@ -441,6 +468,145 @@ class SQLiteStore:
             for row in rows
         ]
 
+    def replace_reference_index(
+        self,
+        sources: list[Any],
+        chunks: list[Any],
+    ) -> None:
+        self.conn.execute("DELETE FROM reference_sources")
+        self.conn.execute("DELETE FROM reference_chunks")
+        self.conn.execute("DELETE FROM reference_fts")
+        self.conn.executemany(
+            """
+            INSERT INTO reference_sources (
+                id, title, source_type, original_filename, allowed_uses_json,
+                text_hash, metadata_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    source.id,
+                    source.title,
+                    source.source_type,
+                    source.original_filename,
+                    _json(list(source.allowed_uses)),
+                    source.text_hash,
+                    _json(source.metadata),
+                    source.created_at,
+                )
+                for source in sources
+            ],
+        )
+        source_titles = {source.id: source.title for source in sources}
+        self.conn.executemany(
+            """
+            INSERT INTO reference_chunks (
+                ref, source_id, chunk_index, title, body, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    f"reference_chunk:{chunk.id}",
+                    chunk.source_id,
+                    chunk.chunk_index,
+                    chunk.title,
+                    chunk.body,
+                    _json(chunk.metadata),
+                )
+                for chunk in chunks
+            ],
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO reference_fts (ref, source_id, source_title, title, body)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    f"reference_chunk:{chunk.id}",
+                    chunk.source_id,
+                    source_titles.get(chunk.source_id, ""),
+                    chunk.title,
+                    chunk.body,
+                )
+                for chunk in chunks
+            ],
+        )
+        self.conn.commit()
+
+    def list_reference_sources(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM reference_sources ORDER BY created_at, id"
+        ).fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "title": str(row["title"]),
+                "source_type": str(row["source_type"]),
+                "original_filename": row["original_filename"],
+                "allowed_uses": json.loads(str(row["allowed_uses_json"])),
+                "text_hash": str(row["text_hash"]),
+                "metadata": json.loads(str(row["metadata_json"])),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def search_reference_chunks(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        match_query = build_fts_match_query(query)
+        if match_query is None:
+            return self._fallback_reference_search(query, limit=limit)
+        rows = self.conn.execute(
+            """
+            SELECT
+                f.ref, f.source_id, f.source_title, f.title, f.body,
+                c.chunk_index, c.metadata_json,
+                bm25(reference_fts, 0.0, 0.0, 4.0, 1.0) AS rank
+            FROM reference_fts AS f
+            JOIN reference_chunks AS c ON c.ref = f.ref
+            WHERE reference_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (match_query, limit),
+        ).fetchall()
+        hits = [_reference_hit_from_row(row, score=-float(row["rank"])) for row in rows]
+        if len(hits) < limit:
+            seen = {str(hit["ref"]) for hit in hits}
+            hits.extend(
+                hit
+                for hit in self._fallback_reference_search(query, limit=limit)
+                if hit["ref"] not in seen
+            )
+        return hits[:limit]
+
+    def _fallback_reference_search(self, query: str, *, limit: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                c.ref, c.source_id, s.title AS source_title, c.title, c.body,
+                c.chunk_index, c.metadata_json
+            FROM reference_chunks AS c
+            LEFT JOIN reference_sources AS s ON s.id = c.source_id
+            ORDER BY c.ref
+            """
+        ).fetchall()
+        hits: list[dict[str, Any]] = []
+        for row in rows:
+            score = _lexical_score(
+                query,
+                [
+                    str(row["ref"]),
+                    str(row["source_title"] or ""),
+                    str(row["title"]),
+                    str(row["body"]),
+                ],
+            )
+            if score <= 0:
+                continue
+            hits.append(_reference_hit_from_row(row, score=score))
+        return sorted(hits, key=lambda hit: (-float(hit["score"]), str(hit["ref"])))[:limit]
+
 
 FTS_STOP_WORDS = {
     "a",
@@ -468,6 +634,17 @@ def build_fts_match_query(query: str) -> str | None:
     if not tokens:
         return None
     return " OR ".join(f'"{token}"' for token in tokens)
+
+
+def _lexical_score(query: str, fields: list[str]) -> float:
+    haystack = " ".join(fields).lower()
+    score = 0.0
+    for token in re.findall(r"[\w]+", query.lower(), flags=re.UNICODE):
+        if token in FTS_STOP_WORDS or not token:
+            continue
+        if token in haystack:
+            score += float(len(token))
+    return score
 
 
 def _patch_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -674,6 +851,20 @@ def _content_rows(bundle: ContentBundle) -> list[tuple[str, str, str, str, str]]
             )
         )
     return rows
+
+
+def _reference_hit_from_row(row: sqlite3.Row, *, score: float) -> dict[str, Any]:
+    return {
+        "ref": str(row["ref"]),
+        "object_type": "reference_chunk",
+        "source_id": str(row["source_id"]),
+        "source_title": str(row["source_title"] or ""),
+        "title": str(row["title"]),
+        "body": str(row["body"]),
+        "chunk_index": int(row["chunk_index"]),
+        "metadata": json.loads(str(row["metadata_json"])),
+        "score": score,
+    }
 
 
 def _json(value: Any) -> str:

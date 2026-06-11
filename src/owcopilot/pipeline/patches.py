@@ -33,9 +33,7 @@ def find_issue(project: ProjectContext, issue_id: str) -> Issue:
     for issue in project.sqlite_store.list_issues():
         if issue.id == issue_id:
             return issue
-    raise FileNotFoundError(
-        f"issue not found: {issue_id} (run an audit first, then list issues)"
-    )
+    raise FileNotFoundError(f"issue not found: {issue_id} (run an audit first, then list issues)")
 
 
 def suggest_for_issue(
@@ -87,16 +85,12 @@ class ApplyOutcome:
     post_audit_open_errors: int = 0
 
 
-def apply_patch_workflow(
-    project: ProjectContext, patch_id: str, *, operator: str
-) -> ApplyOutcome:
+def apply_patch_workflow(project: ProjectContext, patch_id: str, *, operator: str) -> ApplyOutcome:
     stored = project.sqlite_store.get_patch(patch_id)
     if stored is None:
         raise FileNotFoundError(f"patch not found: {patch_id}")
     if stored["status"] != "proposed":
-        raise ValueError(
-            f"patch {patch_id} has status '{stored['status']}', expected 'proposed'"
-        )
+        raise ValueError(f"patch {patch_id} has status '{stored['status']}', expected 'proposed'")
     candidate = candidate_from_stored(stored)
 
     before = project.audit_runner.run(AuditContext.from_bundle(project.bundle))
@@ -146,9 +140,7 @@ def rollback_patch_workflow(
     if stored is None:
         raise FileNotFoundError(f"patch not found: {patch_id}")
     if stored["status"] != "applied":
-        raise ValueError(
-            f"patch {patch_id} has status '{stored['status']}', expected 'applied'"
-        )
+        raise ValueError(f"patch {patch_id} has status '{stored['status']}', expected 'applied'")
     rollback_ops = stored.get("rollback_ops") or []
     if not rollback_ops:
         raise ValueError(f"patch {patch_id} has no stored rollback operations")

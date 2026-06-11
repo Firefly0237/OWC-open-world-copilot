@@ -97,9 +97,7 @@ class PatchSuggestService:
                 result.rejected_count += 1
                 continue
             open_fingerprints = {
-                issue_fingerprint(item)
-                for item in after.issues
-                if item.status is IssueStatus.OPEN
+                issue_fingerprint(item) for item in after.issues if item.status is IssueStatus.OPEN
             }
             ranked.append(
                 RankedCandidate(
@@ -131,9 +129,7 @@ class PatchSuggestService:
                 f"{issue.target_ref} {issue.message}", budget_tokens=budget_tokens
             )
             context_refs = pack.refs
-            context_lines = [
-                f"- [{hit.ref}] {hit.title}: {hit.body}".strip() for hit in pack.hits
-            ]
+            context_lines = [f"- [{hit.ref}] {hit.title}: {hit.body}".strip() for hit in pack.hits]
         raw = self.gateway.complete(  # type: ignore[union-attr]  # guarded by caller
             task="patch_suggest",
             system=_system_prompt(issue, self.bundle, context_lines),
@@ -152,12 +148,16 @@ class PatchSuggestService:
             return [], context_refs, True
 
     def _prepare(self, candidate: PatchCandidate, issue: Issue) -> PatchCandidate:
-        identifier = candidate.id or "patch_" + content_hash(
-            {
-                "issue": issue_fingerprint(issue),
-                "ops": [op.model_dump(mode="json") for op in candidate.ops],
-            }
-        )[:16]
+        identifier = (
+            candidate.id
+            or "patch_"
+            + content_hash(
+                {
+                    "issue": issue_fingerprint(issue),
+                    "ops": [op.model_dump(mode="json") for op in candidate.ops],
+                }
+            )[:16]
+        )
         return candidate.model_copy(
             update={"id": identifier, "issue_id": issue.id or issue_fingerprint(issue)}
         )
@@ -210,15 +210,15 @@ def _system_prompt(issue: Issue, bundle: ContentBundle, context_lines: list[str]
             "terms",
         )
     )
-    context_block = ("\n\nRelated content context:\n" + "\n".join(context_lines)) if (
-        context_lines
-    ) else ""
+    context_block = (
+        ("\n\nRelated content context:\n" + "\n".join(context_lines)) if (context_lines) else ""
+    )
     return (
         "You repair structured game-content data. Given one audit issue and its target object, "
-        "return ONE JSON object: {\"candidates\": [{\"ops\": [...], \"rationale\": \"...\"}]} "
+        'return ONE JSON object: {"candidates": [{"ops": [...], "rationale": "..."}]} '
         "with 1-3 candidates. Each op is a JSON Patch operation: "
-        "{\"op\": \"replace\"|\"add\"|\"remove\", \"path\": \"/<collection>/<id>/<field>\", "
-        "\"value\": ...}. Paths are absolute JSON pointers into the content bundle document "
+        '{"op": "replace"|"add"|"remove", "path": "/<collection>/<id>/<field>", '
+        '"value": ...}. Paths are absolute JSON pointers into the content bundle document '
         f"whose top-level collections are: {collections}, relations(array, indexed by number). "
         "Rules: only reference ids that exist in the provided context; never invent new ids; "
         "prefer the smallest edit that resolves the issue; do not change unrelated fields; "

@@ -1,3 +1,3 @@
-"""owcopilot — open-world dev AI copilot (P0 skeleton)."""
+"""owcopilot — open-world content workbench."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

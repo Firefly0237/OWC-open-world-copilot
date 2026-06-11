@@ -92,9 +92,7 @@ class EventResultReferencedTooEarlyRule:
                         path="metadata.references_event_results",
                     )
 
-    def _too_early(
-        self, ctx: AuditContext, quest_id: str, quest_order: int, event_id: str
-    ) -> bool:
+    def _too_early(self, ctx: AuditContext, quest_id: str, quest_order: int, event_id: str) -> bool:
         event_order = _event_order(ctx, event_id)
         return event_order is not None and quest_order < event_order
 

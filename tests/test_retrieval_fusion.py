@@ -41,6 +41,4 @@ def test_reciprocal_rank_fusion_merges_duplicate_ref_bodies() -> None:
 
     fused = reciprocal_rank_fusion([[bm25], [graph]], k=10)
 
-    assert fused[0].body == (
-        "漕帮 relation entity:fac_caobang enemy_of entity:fac_canglang"
-    )
+    assert fused[0].body == ("漕帮 relation entity:fac_caobang enemy_of entity:fac_canglang")

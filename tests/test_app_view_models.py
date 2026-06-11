@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from owcopilot.app import (
+    build_content_inventory,
     build_context_pack_preview,
     build_export_summary,
     build_issue_summary,
@@ -89,3 +90,18 @@ def test_build_export_summary_reports_manifest_state(tmp_path) -> None:
     assert summary["manifest_exists"] is True
     assert summary["manifest"]["target_engine"] == "unity"
     assert summary["cost_budget"]["used_usd"] == 0.0
+
+
+def test_build_content_inventory_lists_rows_and_graph_refs(tmp_path) -> None:
+    content_root = tmp_path / "content"
+    _write_project(content_root)
+
+    inventory = build_content_inventory(content_root)
+
+    assert [row["id"] for row in inventory["entities"]] == ["npc_aldric"]
+    assert inventory["entities"][0]["type"] == "npc"
+    assert inventory["entities"][0]["origin"] == "human"
+    assert [row["id"] for row in inventory["quests"]] == ["q1"]
+    assert inventory["quests"][0]["title"] == "Q1"
+    assert "entity:npc_aldric" in inventory["graph_refs"]
+    assert inventory["cost_budget"]["used_usd"] == 0.0

@@ -61,8 +61,7 @@ class MissingPrerequisiteRule:
                         category=self.category,
                         target_ref=target_ref,
                         message=(
-                            f"Quest '{quest.id}' references missing prerequisite "
-                            f"'{prereq_id}'"
+                            f"Quest '{quest.id}' references missing prerequisite '{prereq_id}'"
                         ),
                         evidence=[
                             Evidence(

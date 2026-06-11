@@ -142,8 +142,5 @@ class GraphExpansionRetriever:
                 facts.add(f"relation {edge.source} {edge.kind} {edge.target}")
         for pair, kinds in pair_kinds.items():
             if ref in pair and {"allied_with", "enemy_of"} <= kinds:
-                facts.add(
-                    f"relation_conflict {pair[0]} {pair[1]} "
-                    "both allied_with and enemy_of"
-                )
+                facts.add(f"relation_conflict {pair[0]} {pair[1]} both allied_with and enemy_of")
         return " ".join(sorted(facts))

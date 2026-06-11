@@ -79,9 +79,9 @@ def test_impact_unknown_change_type_is_422(client: TestClient) -> None:
 def test_suggest_apply_rollback_over_rest(client: TestClient) -> None:
     audit = client.post("/projects/demo/audits", json={"persist": True})
     assert audit.status_code == 200
-    issues = client.get(
-        "/projects/demo/issues", params={"rule_code": "UNKNOWN_ENTITY_REF"}
-    ).json()["issues"]
+    issues = client.get("/projects/demo/issues", params={"rule_code": "UNKNOWN_ENTITY_REF"}).json()[
+        "issues"
+    ]
     assert issues
     issue_id = issues[0]["id"]
 
@@ -92,22 +92,16 @@ def test_suggest_apply_rollback_over_rest(client: TestClient) -> None:
     assert body["candidates"]
     patch_id = body["candidates"][0]["patch_id"]
 
-    applied = client.post(
-        f"/projects/demo/patches/{patch_id}:apply", json={"operator": "lead"}
-    )
+    applied = client.post(f"/projects/demo/patches/{patch_id}:apply", json={"operator": "lead"})
     assert applied.status_code == 200
     assert applied.json()["applied"] is True
     assert applied.json()["post_audit_open_errors"] == 0
 
     # second apply conflicts (status already moved on)
-    again = client.post(
-        f"/projects/demo/patches/{patch_id}:apply", json={"operator": "lead"}
-    )
+    again = client.post(f"/projects/demo/patches/{patch_id}:apply", json={"operator": "lead"})
     assert again.status_code == 409
 
-    rolled = client.post(
-        f"/projects/demo/patches/{patch_id}:rollback", json={"operator": "lead"}
-    )
+    rolled = client.post(f"/projects/demo/patches/{patch_id}:rollback", json={"operator": "lead"})
     assert rolled.status_code == 200
     assert rolled.json()["rolled_back"] is True
 

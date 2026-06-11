@@ -10,6 +10,7 @@ from ..audit.runner import AuditRunner
 from ..content.models import ContentBundle
 from ..content.store import ContentStore
 from ..graph.index import ContentGraph, build_content_graph
+from ..inspiration import ReferenceContextBuilder, ReferenceStore
 from ..retrieval.bm25 import BM25Retriever
 from ..retrieval.context_pack import ContextPackBuilder
 from ..retrieval.graph_expand import GraphExpansionRetriever
@@ -26,6 +27,8 @@ class ProjectContext:
     graph: ContentGraph
     audit_runner: AuditRunner
     context_builder: ContextPackBuilder
+    reference_store: ReferenceStore
+    reference_context_builder: ReferenceContextBuilder
 
     @classmethod
     def open(
@@ -41,6 +44,8 @@ class ProjectContext:
         graph = build_content_graph(bundle)
         sqlite_store.replace_content_index(bundle)
         sqlite_store.replace_graph_edges(graph)
+        reference_store = ReferenceStore(root)
+        reference_store.sync_index(sqlite_store)
         context_builder = ContextPackBuilder(
             bm25=BM25Retriever(sqlite_store),
             vector=VectorRetriever(sqlite_store),
@@ -54,6 +59,8 @@ class ProjectContext:
             graph=graph,
             audit_runner=AuditRunner(build_default_rule_registry()),
             context_builder=context_builder,
+            reference_store=reference_store,
+            reference_context_builder=ReferenceContextBuilder(sqlite_store),
         )
 
     def reload(self) -> None:
@@ -61,11 +68,13 @@ class ProjectContext:
         self.graph = build_content_graph(self.bundle)
         self.sqlite_store.replace_content_index(self.bundle)
         self.sqlite_store.replace_graph_edges(self.graph)
+        self.reference_store.sync_index(self.sqlite_store)
         self.context_builder = ContextPackBuilder(
             bm25=BM25Retriever(self.sqlite_store),
             vector=VectorRetriever(self.sqlite_store),
             graph=GraphExpansionRetriever(self.graph),
         )
+        self.reference_context_builder = ReferenceContextBuilder(self.sqlite_store)
 
     def close(self) -> None:
         self.sqlite_store.close()

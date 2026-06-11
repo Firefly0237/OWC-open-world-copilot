@@ -179,6 +179,36 @@ def build_parser() -> argparse.ArgumentParser:
     _add_llm_args(draft)
     draft.set_defaults(handler=_cmd_draft)
 
+    extract = subparsers.add_parser(
+        "extract",
+        help=(
+            "Distill an unstructured manuscript (txt/md/docx/json) into a reviewable "
+            "draft: entities, relations, plot beats and a gap list."
+        ),
+    )
+    _add_project_args(extract)
+    extract.add_argument("--input", required=True, help="Path to the manuscript file.")
+    extract.add_argument("--title", help="Source title; defaults to the file stem.")
+    extract.add_argument("--source-kind", default="文稿")
+    extract.add_argument("--max-chunks", type=int, default=12)
+    extract.add_argument(
+        "--fill-gaps",
+        action="store_true",
+        help="Ask the model to suggest values for missing fields and apply them.",
+    )
+    extract.add_argument(
+        "--submit",
+        action="store_true",
+        help="Submit the draft to the review queue (otherwise print only).",
+    )
+    extract.add_argument(
+        "--beats-as-quests",
+        action="store_true",
+        help="With --submit: also turn plot beats into quest skeletons.",
+    )
+    _add_llm_args(extract)
+    extract.set_defaults(handler=_cmd_extract)
+
     barks = subparsers.add_parser(
         "barks", help="Generate lint-filtered bark variants into the review queue."
     )
@@ -333,14 +363,8 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
                 "content_hash_after": result.content_hash_after,
                 "incoming_count": result.incoming_count,
                 "has_errors": result.has_errors,
-                "changes": [
-                    change.model_dump(mode="json")
-                    for change in result.changes
-                ],
-                "issues": [
-                    issue.model_dump(mode="json")
-                    for issue in result.issues
-                ],
+                "changes": [change.model_dump(mode="json") for change in result.changes],
+                "issues": [issue.model_dump(mode="json") for issue in result.issues],
                 "per_input": [
                     {
                         "input": str(path),
@@ -371,9 +395,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
             "cost_budget": _deterministic_cost_budget("audit_project"),
         }
         if args.update_baseline:
-            baseline = (
-                _load_baseline(Path(args.baseline)) if args.baseline else AuditBaseline()
-            )
+            baseline = _load_baseline(Path(args.baseline)) if args.baseline else AuditBaseline()
             for issue in result.issues:
                 if issue.status is IssueStatus.OPEN:
                     baseline.add(issue)
@@ -618,6 +640,63 @@ def _cmd_rollback(args: argparse.Namespace) -> int:
             },
             args,
         )
+
+
+def _cmd_extract(args: argparse.Namespace) -> int:
+    # Reuses the Streamlit-free app actions so CLI/UI behave identically.
+    from ..app.actions import (
+        fill_extraction_gaps_action,
+        run_extraction_action,
+        submit_extraction_action,
+    )
+    from ..extraction import decode_document_bytes
+
+    source = Path(args.input)
+    text = decode_document_bytes(source.read_bytes(), source.name)
+    title = args.title or source.stem
+    result = run_extraction_action(
+        args.content_root,
+        title=title,
+        text=text,
+        source_kind=args.source_kind,
+        sqlite_path=args.sqlite_path,
+        max_chunks=args.max_chunks,
+        llm_mode=args.llm_mode,
+        llm_model=args.llm_model,
+    )
+    draft = result["draft"]
+    if args.fill_gaps and draft.get("gaps"):
+        filled = fill_extraction_gaps_action(
+            args.content_root,
+            draft=draft,
+            sqlite_path=args.sqlite_path,
+            llm_mode=args.llm_mode,
+            llm_model=args.llm_model,
+        )
+        draft = filled["draft"]
+        answers = {
+            gap["ref"]: gap["suggestion"] for gap in draft.get("gaps", []) if gap.get("suggestion")
+        }
+    else:
+        answers = {}
+    payload: dict[str, Any] = {
+        "draft": draft,
+        "stats": result["stats"],
+        "llm_mode": args.llm_mode,
+        "cost_budget": result["cost_budget"],
+    }
+    if args.submit:
+        submitted = submit_extraction_action(
+            args.content_root,
+            draft=draft,
+            answers=answers,
+            include_beats_as_quests=args.beats_as_quests,
+            sqlite_path=args.sqlite_path,
+        )
+        payload["review_item_id"] = submitted["review_item_id"]
+        payload["open_gaps"] = submitted["open_gaps"]
+        payload["issues"] = submitted["issues"]
+    return _emit(payload, args)
 
 
 def _cmd_draft(args: argparse.Namespace) -> int:

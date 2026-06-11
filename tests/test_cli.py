@@ -318,10 +318,7 @@ def test_cli_context_pack_and_ask(tmp_path, capsys) -> None:
     assert context_body["refs"] == ["entity:npc_aldric"]
     assert context_body["cost_budget"]["used_usd"] == 0.0
 
-    assert (
-        main(["ask", "--content-root", str(content_root), "--query", "Who is Aldric?"])
-        == 0
-    )
+    assert main(["ask", "--content-root", str(content_root), "--query", "Who is Aldric?"]) == 0
     ask_body = _read_json(capsys)
     assert ask_body["answer"]["citations"][0]["ref"] == "entity:npc_aldric"
     assert ask_body["telemetry"]["calls"] == 1
@@ -381,10 +378,7 @@ def test_cli_ask_refuses_without_context(tmp_path, capsys) -> None:
     content_root = tmp_path / "content"
     ContentStore(content_root).save(ContentBundle())
 
-    assert (
-        main(["ask", "--content-root", str(content_root), "--query", "Who is Aldric?"])
-        == 0
-    )
+    assert main(["ask", "--content-root", str(content_root), "--query", "Who is Aldric?"]) == 0
     body = _read_json(capsys)
     assert body["answer"]["refused"] is True
     assert body["telemetry"]["calls"] == 0
@@ -405,8 +399,7 @@ def test_cli_reports_missing_input_file(tmp_path, capsys) -> None:
     missing_source = tmp_path / "missing.json"
 
     assert (
-        main(["ingest", "--content-root", str(content_root), "--input", str(missing_source)])
-        == 2
+        main(["ingest", "--content-root", str(content_root), "--input", str(missing_source)]) == 2
     )
     body = _read_stderr_json(capsys)
     assert body["type"] == "FileNotFoundError"
@@ -416,10 +409,7 @@ def test_cli_eval_golden_runs_offline_report(tmp_path, capsys) -> None:
     workspace = tmp_path / "golden_eval"
     output_path = tmp_path / "report.json"
 
-    assert (
-        main(["eval-golden", "--workspace", str(workspace), "--output", str(output_path)])
-        == 0
-    )
+    assert main(["eval-golden", "--workspace", str(workspace), "--output", str(output_path)]) == 0
     body = _read_json(capsys)
     assert body["passed"] is True
     assert output_path.exists()

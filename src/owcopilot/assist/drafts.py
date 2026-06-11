@@ -49,6 +49,7 @@ class QuestDraftService:
             user=brief,
         )
         quest = parse_quest_draft(raw)
+        quest = _with_unique_quest_id(quest, existing_ids=set(self.bundle.quests))
         quest = quest.model_copy(
             update={
                 "origin": Origin.AI_DRAFT,
@@ -82,6 +83,29 @@ def parse_quest_draft(raw: str) -> Quest:
     return Quest.model_validate(_normalize_quest_payload(data))
 
 
+def _with_unique_quest_id(quest: Quest, *, existing_ids: set[str]) -> Quest:
+    if quest.id not in existing_ids:
+        return quest
+    base_id = quest.id.strip() or slug_id(quest.title or "quest_draft", prefix="quest")
+    if not base_id:
+        base_id = "quest_draft"
+    candidate = f"{base_id}_draft"
+    index = 2
+    while candidate in existing_ids:
+        candidate = f"{base_id}_draft_{index}"
+        index += 1
+    return quest.model_copy(
+        update={
+            "id": candidate,
+            "metadata": {
+                **quest.metadata,
+                "model_requested_id": quest.id,
+                "id_collision_resolved": True,
+            },
+        }
+    )
+
+
 def _normalize_quest_payload(data: dict) -> dict:
     """Tolerate the list/dict shape drift real models actually produce.
 
@@ -111,7 +135,8 @@ def _normalize_quest_payload(data: dict) -> dict:
             ]
     if isinstance(normalized.get("rewards"), list):
         normalized["rewards"] = [
-            _normalize_reward(reward) for reward in normalized["rewards"]
+            _normalize_reward(reward)
+            for reward in normalized["rewards"]
             if isinstance(reward, dict)
         ]
     stages = normalized.get("stages")
@@ -172,6 +197,5 @@ def _system_prompt(pack: ContextPack) -> str:
         "location, objective, prerequisites, timeline_order, localization_keys, dialogue_refs, "
         "stages, rewards, tags, metadata. Use entity ids, not display names, for references. "
         "The draft is not approved content; it will enter human review.\n\n"
-        "Content context:\n"
-        + "\n".join(context_lines)
+        "Content context:\n" + "\n".join(context_lines)
     )

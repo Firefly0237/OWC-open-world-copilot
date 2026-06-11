@@ -79,7 +79,7 @@ def test_csv_importer_preserves_row_source_ref(tmp_path) -> None:
     path = tmp_path / "entities.csv"
     path.write_text(
         "kind,id,name,type,description,tags\n"
-        "entity,npc_aldric,Aldric,npc,Caravan master,\"merchant,quest_giver\"\n",
+        'entity,npc_aldric,Aldric,npc,Caravan master,"merchant,quest_giver"\n',
         encoding="utf-8",
     )
 

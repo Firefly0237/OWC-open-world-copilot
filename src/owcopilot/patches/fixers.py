@@ -110,11 +110,7 @@ def _fix_term_inconsistent(issue: Issue, bundle: ContentBundle) -> list[PatchCan
         replaced = _replace_case_insensitive(current, forbidden, canonical)
         candidates.append(
             PatchCandidate(
-                ops=[
-                    PatchOperation(
-                        op=PatchOp.REPLACE, path=f"{pointer}/{field}", value=replaced
-                    )
-                ],
+                ops=[PatchOperation(op=PatchOp.REPLACE, path=f"{pointer}/{field}", value=replaced)],
                 rationale=(
                     f"Replace forbidden term '{forbidden}' with canonical term "
                     f"'{canonical}' in {issue.target_ref}.{field}."

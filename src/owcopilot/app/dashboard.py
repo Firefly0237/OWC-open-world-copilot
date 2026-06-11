@@ -5,42 +5,124 @@ Launch with:
 
     streamlit run src/owcopilot/app/dashboard.py
 
-Design notes: dark "ink & bronze" palette (see .streamlit/config.toml) with serif display
-headers — the look borrows from worldbuilding tools (articy/World Anvil) and modern dark
-dashboards (Linear/shadcn) while staying inside Streamlit's theming surface. Every page shows
-the cost of what it just did; the review queue is the only place AI content becomes real.
+Design language: "星夜法典" — a Genshin-inspired night-indigo canvas with faint starfield,
+warm bronze-gold seals, ornamental corner brackets and diamond section marks. Copy stays
+minimal: the UI shows what to do, never argues why the feature exists.
+
+Product rules the layout encodes:
+  * every page shows the cost of what it just did (offline = $0, deterministic);
+  * the review queue is the only place AI content becomes real;
+  * pickers (issues, speakers, impact targets) offer real ids from the user's own world —
+    no demo-world names are hardcoded anywhere in this file.
 """
 
 from __future__ import annotations
 
+import html
 import json
+from collections import Counter
+from pathlib import Path
 from typing import Any
 
+import altair as alt
+import pandas as pd
 import streamlit as st
 
 from owcopilot.app.actions import (
+    add_reference_action,
     decide_review_action,
+    fill_extraction_gaps_action,
     list_patches_action,
     list_project_issues_action,
+    list_references_action,
     list_review_items_action,
     run_apply_action,
     run_ask_action,
     run_barks_action,
+    run_dialogue_tree_action,
     run_draft_action,
+    run_extraction_action,
+    run_flavor_action,
     run_impact_action,
+    run_ingest_action,
     run_project_audit_action,
     run_project_export_action,
     run_rollback_action,
     run_suggest_action,
+    run_world_seed_action,
+    search_references_action,
+    submit_extraction_action,
 )
-from owcopilot.app.view_models import build_project_overview
+from owcopilot.app.view_models import build_content_inventory, build_project_overview
+from owcopilot.content.models import ContentBundle
+from owcopilot.content.store import ContentStore
+from owcopilot.extraction import decode_document_bytes as decode_manuscript_bytes
 from owcopilot.impact import ChangeType
+from owcopilot.inspiration import decode_reference_bytes
 
-_SEVERITY_BADGE = {"error": "🟥", "warning": "🟨", "info": "🟦"}
+# ------------------------------------------------------------------------------ labels
+_VERSION = "v0.2.0"
+
+_SEVERITY_META = {
+    "error": ("致命", "red"),
+    "warning": ("警告", "amber"),
+    "info": ("提示", "blue"),
+}
 _ITEM_TYPE_LABEL = {
     "quest_draft": "📜 任务草稿",
     "bark_variant": "💬 台词变体",
     "patch_candidate": "🩹 修复补丁",
+    "world_seed": "🌍 世界草案",
+    "import_draft": "✒️ 提炼草案",
+    "dialogue_tree": "🌳 对话树",
+    "flavor_batch": "🏺 物案批次",
+}
+_ENTITY_TYPE_LABEL = {
+    "npc": "角色",
+    "location": "地点",
+    "faction": "势力",
+    "item": "物品",
+    "event": "事件",
+    "region": "区域",
+    "organization": "组织",
+    "concept": "概念",
+    "term": "术语",
+    "skill": "技能",
+    "achievement": "成就",
+}
+_ORIGIN_LABEL = {"human": "人工创作", "ai_draft": "AI 草稿", "ai_patch": "AI 修复"}
+_REFUSAL_TEXT = "世界档案中查不到这条设定的依据，我不杜撰。可先在创世工坊或档案中补全设定。"
+_REVIEW_LABEL = {"approved": "已审核", "pending_review": "待人审", "rejected": "已驳回"}
+_CHANGE_TYPE_LABEL = {
+    "entity_rename": "重命名实体",
+    "entity_delete": "删除实体",
+    "entity_field_change": "修改实体字段",
+    "relation_change": "调整关系",
+    "content_change": "修改内容",
+}
+_INGEST_CHANGE_LABEL = {
+    "add": "新增",
+    "update": "更新",
+    "unchanged": "不变",
+    "conflict": "冲突",
+}
+_ENGINE_META = {
+    "generic": ("通用 JSON Bundle", "结构化 JSON 全集，适合自建管线。"),
+    "unreal": ("Unreal Engine", "DataTable 兼容 CSV + 本地化 CSV。"),
+    "unity": ("Unity", "每任务 camelCase JSON + index 清单。"),
+}
+_FLAVOR_CATEGORY_LABEL = {"item": "物品", "skill": "技能", "achievement": "成就"}
+_GRAPH_NODE_COLOR = {
+    "npc": "#7fa6c9",
+    "faction": "#d8b54a",
+    "location": "#8fae8b",
+    "region": "#9aa3b2",
+    "poi": "#7fc9b4",
+    "quest": "#b07fc9",
+    "item": "#c9a87f",
+    "event": "#c97f7f",
+    "skill": "#7fc9c9",
+    "achievement": "#c9b77f",
 }
 
 st.set_page_config(
@@ -49,23 +131,273 @@ st.set_page_config(
     layout="wide",
 )
 
+# ------------------------------------------------------------------------------ theme css
 st.markdown(
     """
     <style>
-    h1, h2, h3 { font-family: Georgia, "Noto Serif SC", serif; letter-spacing: 0.02em; }
-    .ow-banner {
-        padding: 0.9rem 1.2rem; border-radius: 0.6rem;
-        border: 1px solid rgba(201,162,39,.35);
-        background: linear-gradient(135deg, rgba(201,162,39,.10), rgba(23,26,33,.6));
-        margin-bottom: 0.8rem;
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap');
+
+    :root {
+      --ow-gold: #d8b54a;
+      --ow-gold-deep: #b78f2e;
+      --ow-gold-soft: rgba(211, 188, 142, .42);
+      --ow-gold-faint: rgba(211, 188, 142, .12);
+      --ow-ink: #0a0d18;
+      --ow-panel: rgba(22, 27, 43, .55);
+      --ow-line: #2b3147;
+      --ow-text: #ece5d3;
+      --ow-muted: #9a94a8;
+      --ow-serif: "Noto Serif SC", Georgia, "Songti SC", "SimSun", serif;
     }
-    .ow-banner h1 { margin: 0; font-size: 1.55rem; color: #e8e2d0; }
-    .ow-banner p { margin: 0.15rem 0 0 0; color: #b8b2a0; font-size: 0.9rem; }
-    div[data-testid="stMetricValue"] { color: #c9a227; }
+
+    /* night canvas: aurora glows + a faint starfield */
+    [data-testid="stAppViewContainer"] {
+      background:
+        radial-gradient(1.2px 1.2px at 12% 22%, rgba(236,229,211,.55), transparent 100%),
+        radial-gradient(1px 1px at 28% 64%, rgba(236,229,211,.35), transparent 100%),
+        radial-gradient(1.4px 1.4px at 41% 12%, rgba(236,229,211,.45), transparent 100%),
+        radial-gradient(1px 1px at 57% 38%, rgba(236,229,211,.30), transparent 100%),
+        radial-gradient(1.2px 1.2px at 66% 78%, rgba(236,229,211,.40), transparent 100%),
+        radial-gradient(1px 1px at 78% 18%, rgba(236,229,211,.45), transparent 100%),
+        radial-gradient(1.3px 1.3px at 89% 52%, rgba(236,229,211,.35), transparent 100%),
+        radial-gradient(1px 1px at 95% 86%, rgba(236,229,211,.30), transparent 100%),
+        radial-gradient(1100px 540px at 85% -12%, rgba(216,181,74,.10), transparent 60%),
+        radial-gradient(900px 500px at -8% -2%, rgba(86,120,196,.10), transparent 55%),
+        radial-gradient(1000px 700px at 50% 115%, rgba(96,76,150,.12), transparent 60%),
+        var(--ow-ink);
+      background-attachment: fixed;
+    }
+    [data-testid="stHeader"] { background: transparent; }
+    .block-container { padding-top: 1.2rem; max-width: 1280px; }
+
+    h1, h2, h3 { font-family: var(--ow-serif); letter-spacing: .02em; }
+
+    /* hero with ornamental corner brackets */
+    .ow-hero {
+      position: relative; overflow: hidden;
+      padding: 1.45rem 1.7rem 1.25rem; margin-bottom: 1rem;
+      border-radius: 1rem; border: 1px solid var(--ow-gold-soft);
+      background:
+        linear-gradient(120deg, rgba(216,181,74,.14) 0%,
+                        rgba(20,25,40,.92) 42%, rgba(10,13,24,.96) 100%);
+      box-shadow: 0 0 40px rgba(216,181,74,.06) inset;
+    }
+    .ow-hero::before, .ow-hero::after {
+      content: ""; position: absolute; width: 22px; height: 22px;
+      border: 2px solid rgba(216,181,74,.65);
+    }
+    .ow-hero::before { top: 9px; left: 9px; border-right: none; border-bottom: none;
+                       border-top-left-radius: 6px; }
+    .ow-hero::after { bottom: 9px; right: 9px; border-left: none; border-top: none;
+                      border-bottom-right-radius: 6px; }
+    .ow-hero h1 { margin: 0; font-size: 1.65rem; color: var(--ow-text);
+                  text-shadow: 0 0 18px rgba(216,181,74,.25); }
+    .ow-hero .ow-tagline { margin: .3rem 0 .7rem; color: var(--ow-muted); font-size: .92rem; }
+    .ow-hero .ow-mark {
+      position: absolute; right: 1.15rem; top: 50%;
+      transform: translateY(-50%); opacity: .6; pointer-events: none;
+      filter: drop-shadow(0 0 14px rgba(216,181,74,.35));
+    }
+
+    /* chips */
+    .ow-chip {
+      display: inline-flex; align-items: center; gap: .3rem;
+      padding: .14rem .62rem; margin: 0 .4rem .3rem 0;
+      border-radius: 999px; font-size: .78rem;
+      border: 1px solid var(--ow-line);
+      background: rgba(255,255,255,.03); color: var(--ow-muted);
+    }
+    .ow-chip b { color: var(--ow-text); font-weight: 600; }
+    .ow-chip.gold  { border-color: var(--ow-gold-soft); color: #e3c272;
+                     background: var(--ow-gold-faint); }
+    .ow-chip.red   { border-color: rgba(226,93,93,.45);  color: #e89090;
+                     background: rgba(226,93,93,.10); }
+    .ow-chip.amber { border-color: rgba(216,162,60,.45); color: #dcb05e;
+                     background: rgba(216,162,60,.10); }
+    .ow-chip.blue  { border-color: rgba(111,159,216,.45); color: #9dbfe5;
+                     background: rgba(111,159,216,.10); }
+    .ow-chip.green { border-color: rgba(111,191,143,.45); color: #93cfa9;
+                     background: rgba(111,191,143,.10); }
+
+    /* section heading: diamond mark + fading gold rule */
+    .ow-section { display: flex; align-items: baseline; gap: .55rem; margin: .35rem 0 .55rem; }
+    .ow-section::before { content: "◆"; color: var(--ow-gold); font-size: .6rem;
+                          align-self: center; text-shadow: 0 0 8px rgba(216,181,74,.6); }
+    .ow-section .t { font-family: var(--ow-serif); font-weight: 700;
+                     font-size: 1.02rem; color: var(--ow-text); }
+    .ow-section .s { color: var(--ow-muted); font-size: .8rem; }
+    .ow-section::after {
+      content: ""; flex: 1; height: 1px;
+      background: linear-gradient(90deg, var(--ow-gold-soft), transparent);
+    }
+
+    /* empty / onboarding state */
+    .ow-empty {
+      border: 1px dashed rgba(216,181,74,.4); border-radius: 1rem;
+      padding: 2rem 1.5rem 1.6rem; margin: .4rem 0 1rem;
+      text-align: center; background: var(--ow-panel);
+    }
+    .ow-empty .icon { font-size: 2.1rem; filter: drop-shadow(0 0 10px rgba(216,181,74,.4)); }
+    .ow-empty h3 { margin: .4rem 0 .25rem; }
+    .ow-empty p { color: var(--ow-muted); margin: 0 0 1.05rem; }
+    .ow-steps { display: flex; gap: .8rem; justify-content: center; flex-wrap: wrap; }
+    .ow-step {
+      width: 215px; text-align: left; padding: .7rem .9rem;
+      border: 1px solid var(--ow-line); border-radius: .7rem;
+      background: rgba(10,13,24,.6);
+    }
+    .ow-step .n {
+      display: inline-flex; width: 1.35rem; height: 1.35rem; border-radius: 50%;
+      align-items: center; justify-content: center; margin-bottom: .35rem;
+      background: var(--ow-gold-faint); border: 1px solid var(--ow-gold-soft);
+      color: #e3c272; font-size: .78rem;
+    }
+    .ow-step b { display: block; color: var(--ow-text); font-size: .88rem;
+                 margin-bottom: .15rem; }
+    .ow-step span { color: var(--ow-muted); font-size: .78rem; line-height: 1.5; }
+
+    /* metric tiles with a gold hairline */
+    div[data-testid="stMetric"] {
+      position: relative; overflow: hidden;
+      border: 1px solid var(--ow-line); border-radius: .8rem;
+      padding: .72rem .9rem .55rem;
+      background: linear-gradient(165deg, rgba(216,181,74,.08), rgba(20,25,40,.7));
+      transition: border-color .15s ease, box-shadow .15s ease;
+    }
+    div[data-testid="stMetric"]::before {
+      content: ""; position: absolute; top: 0; left: 10%; right: 10%; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--ow-gold-soft), transparent);
+    }
+    div[data-testid="stMetric"]:hover {
+      border-color: var(--ow-gold-soft);
+      box-shadow: 0 0 18px rgba(216,181,74,.10);
+    }
+    div[data-testid="stMetricLabel"] p {
+      color: var(--ow-muted) !important; font-size: .8rem !important;
+      letter-spacing: .08em;
+    }
+    div[data-testid="stMetricValue"] { color: #e3c272; font-family: var(--ow-serif); }
+
+    /* tabs */
+    div[data-baseweb="tab-list"] { gap: .1rem; border-bottom: 1px solid var(--ow-line); }
+    button[data-baseweb="tab"] {
+      background: transparent !important;
+      border-radius: .55rem .55rem 0 0; padding: .45rem .8rem;
+    }
+    button[data-baseweb="tab"]:hover { background: rgba(216,181,74,.08) !important; }
+    button[data-baseweb="tab"][aria-selected="true"] p {
+      color: #e3c272 !important; font-weight: 600;
+      text-shadow: 0 0 12px rgba(216,181,74,.45);
+    }
+    div[data-baseweb="tab-highlight"] {
+      background-color: var(--ow-gold);
+      box-shadow: 0 0 10px rgba(216,181,74,.8);
+    }
+    div[data-baseweb="tab-border"] { background: transparent; }
+
+    /* primary buttons: gilded seal */
+    button[data-testid="stBaseButton-primary"],
+    div[data-testid="stFormSubmitButton"] button[kind="primary"],
+    .stButton button[kind="primary"] {
+      background: linear-gradient(180deg, #e3c272 0%, var(--ow-gold-deep) 100%) !important;
+      color: #1a1407 !important; font-weight: 600;
+      border: 1px solid rgba(236,210,140,.9) !important;
+      box-shadow: 0 0 14px rgba(216,181,74,.30), 0 2px 6px rgba(0,0,0,.4);
+      transition: transform .12s ease, box-shadow .12s ease;
+    }
+    button[data-testid="stBaseButton-primary"]:hover,
+    .stButton button[kind="primary"]:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 0 22px rgba(216,181,74,.5), 0 3px 9px rgba(0,0,0,.45);
+    }
+
+    /* bordered containers read as cards */
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+      border-color: var(--ow-line) !important;
+      background: var(--ow-panel);
+      transition: border-color .15s ease, box-shadow .15s ease;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+      border-color: rgba(216,181,74,.35) !important;
+      box-shadow: 0 0 16px rgba(216,181,74,.07);
+    }
+
+    details[data-testid="stExpander"] {
+      border: 1px solid var(--ow-line); border-radius: .6rem;
+      background: rgba(20,25,40,.4);
+    }
+    details[data-testid="stExpander"] summary:hover { color: #e3c272; }
+
+    div[data-testid="stForm"] {
+      border: 1px solid var(--ow-line); border-radius: .9rem;
+      background: rgba(20,25,40,.42); padding: 1.05rem 1.15rem .85rem;
+    }
+
+    section[data-testid="stSidebar"] { border-right: 1px solid #20253a; }
+    .ow-brand { display: flex; gap: .6rem; align-items: center; padding: .15rem 0 .5rem; }
+    .ow-brand .mark {
+      width: 2.2rem; height: 2.2rem; border-radius: .65rem; font-size: 1.1rem;
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(150deg, #2c2410, #141929);
+      border: 1px solid var(--ow-gold-soft);
+      box-shadow: 0 0 12px rgba(216,181,74,.25);
+    }
+    .ow-brand b { font-family: var(--ow-serif); font-size: 1.05rem;
+                  color: var(--ow-text); display: block; line-height: 1.2; }
+    .ow-brand span { font-size: .72rem; color: var(--ow-muted); letter-spacing: .06em; }
+
+    div[data-testid="stChatMessage"] {
+      background: var(--ow-panel);
+      border: 1px solid var(--ow-line); border-radius: .85rem;
+    }
+
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #262c42; border-radius: 6px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3a4160; }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+
+# ------------------------------------------------------------------------------ ui helpers
+def _chip(text: str, *, kind: str = "", strong: str | None = None) -> str:
+    cls = f"ow-chip {kind}".strip()
+    label = html.escape(text)
+    if strong is not None:
+        label = f"{label}<b>{html.escape(strong)}</b>"
+    return f'<span class="{cls}">{label}</span>'
+
+
+def _chips(*chips: str) -> None:
+    st.markdown("<div>" + "".join(chips) + "</div>", unsafe_allow_html=True)
+
+
+def _section(title: str, subtitle: str = "") -> None:
+    sub = f'<span class="s">{html.escape(subtitle)}</span>' if subtitle else ""
+    st.markdown(
+        f'<div class="ow-section"><span class="t">{html.escape(title)}</span>{sub}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _empty_state(title: str, body: str, steps: list[tuple[str, str]]) -> None:
+    cards = "".join(
+        f'<div class="ow-step"><span class="n">{i + 1}</span>'
+        f"<b>{html.escape(name)}</b><span>{html.escape(desc)}</span></div>"
+        for i, (name, desc) in enumerate(steps)
+    )
+    st.markdown(
+        f"""
+        <div class="ow-empty">
+          <div class="icon">🗺️</div>
+          <h3>{html.escape(title)}</h3>
+          <p>{html.escape(body)}</p>
+          <div class="ow-steps">{cards}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _track_cost(result: dict[str, Any]) -> None:
@@ -78,462 +410,1802 @@ def _track_cost(result: dict[str, Any]) -> None:
 def _show_cost(result: dict[str, Any]) -> None:
     budget = result.get("cost_budget") or {}
     used = float(budget.get("used_usd", 0.0))
-    note = "（确定性，零模型成本）" if used == 0 else ""
+    note = "（零模型成本）" if used == 0 else ""
     session_total = st.session_state.get("session_cost_usd", 0.0)
-    st.caption(f"本次成本：${used:.6f}{note} ｜ 本会话累计：${session_total:.6f}")
+    st.caption(f"本次 ${used:.6f}{note} ｜ 会话累计 ${session_total:.6f}")
 
 
 def _fail(e: Exception) -> None:
     st.error(f"{e.__class__.__name__}: {e}")
 
 
-# ----------------------------------------------------------------------------- sidebar
-with st.sidebar:
-    st.markdown("### 🗺️ OWCopilot")
-    st.caption("世界观内容中枢 · 一致性审计 · 检索问答 · 受约束生成")
-    content_root = st.text_input("内容仓目录", value=st.session_state.get("content_root", ""))
-    st.session_state["content_root"] = content_root
-    sqlite_override = st.text_input("运行库路径（可选）", value="")
-    sqlite_path = sqlite_override or None
+def _dark_axes(chart: alt.Chart) -> alt.Chart:
+    return (
+        chart.configure_axis(
+            labelColor="#9a94a8",
+            titleColor="#9a94a8",
+            gridColor="#222840",
+            domainColor="#3a4160",
+        )
+        .configure_view(strokeWidth=0)
+        .configure(background="transparent")
+    )
 
-    st.divider()
+
+def _bar_chart(rows: list[dict[str, Any]], *, x: str, y: str, height: int = 210) -> None:
+    df = pd.DataFrame(rows)
+    chart = (
+        alt.Chart(df)
+        .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3, color="#d8b54a")
+        .encode(
+            x=alt.X(f"{x}:N", sort="-y", axis=alt.Axis(labelAngle=0, title=None)),
+            y=alt.Y(f"{y}:Q", axis=alt.Axis(title=None, tickMinStep=1)),
+            tooltip=[x, y],
+        )
+        .properties(height=height)
+    )
+    st.altair_chart(_dark_axes(chart), use_container_width=True)
+
+
+def _hbar_chart(rows: list[dict[str, Any]], *, y: str, x: str, height: int = 240) -> None:
+    df = pd.DataFrame(rows)
+    chart = (
+        alt.Chart(df)
+        .mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3, color="#d8b54a")
+        .encode(
+            y=alt.Y(f"{y}:N", sort="-x", axis=alt.Axis(title=None)),
+            x=alt.X(f"{x}:Q", axis=alt.Axis(title=None, tickMinStep=1)),
+            tooltip=[y, x],
+        )
+        .properties(height=height)
+    )
+    st.altair_chart(_dark_axes(chart), use_container_width=True)
+
+
+def _dot_graph(
+    display: dict[str, tuple[str, str]],
+    edges: list[dict[str, str]],
+    *,
+    max_edges: int = 80,
+) -> tuple[str, int]:
+    """Build a Graphviz DOT network from (id -> (name, group)) plus relation rows."""
+    shown = edges[:max_edges]
+    truncated = max(0, len(edges) - len(shown))
+    node_ids = {e["source"] for e in shown} | {e["target"] for e in shown}
+    lines = [
+        "digraph world {",
+        '  bgcolor="transparent"; rankdir=LR; pad=0.2;',
+        '  node [shape=box style="rounded,filled" fillcolor="#161b2b" color="#3a4160"',
+        '        fontcolor="#ece5d3" fontsize=11 margin="0.16,0.08"];',
+        '  edge [color="#4a5170" fontcolor="#9a94a8" fontsize=9 arrowsize=0.7];',
+    ]
+    for node_id in sorted(node_ids):
+        name, group = display.get(node_id, (node_id, ""))
+        color = _GRAPH_NODE_COLOR.get(group, "#3a4160")
+        label = name.replace('"', "'")
+        lines.append(f'  "{node_id}" [label="{label}" color="{color}"];')
+    for edge in shown:
+        kind = str(edge["kind"]).replace('"', "'")
+        source, target = edge["source"], edge["target"]
+        lines.append(f'  "{source}" -> "{target}" [label="{kind}"];')
+    lines.append("}")
+    return "\n".join(lines), truncated
+
+
+def _inventory_display(inventory: dict[str, Any]) -> dict[str, tuple[str, str]]:
+    display: dict[str, tuple[str, str]] = {}
+    for row in inventory["entities"]:
+        display[row["id"]] = (row["name"], row["type"])
+    for row in inventory["pois"]:
+        display.setdefault(row["id"], (row["name"], "poi"))
+    for row in inventory["regions"]:
+        display.setdefault(row["id"], (row["name"], "region"))
+    for row in inventory["quests"]:
+        display.setdefault(row["id"], (row["title"], "quest"))
+    return display
+
+
+def _bundle_display(bundle: dict[str, Any]) -> dict[str, tuple[str, str]]:
+    display: dict[str, tuple[str, str]] = {}
+    for entity_id, entity in (bundle.get("entities") or {}).items():
+        display[entity_id] = (entity.get("name", entity_id), entity.get("type", ""))
+    for poi_id, poi in (bundle.get("pois") or {}).items():
+        display.setdefault(poi_id, (poi.get("name", poi_id), "poi"))
+    for quest_id, quest in (bundle.get("quests") or {}).items():
+        display.setdefault(quest_id, (quest.get("title", quest_id), "quest"))
+    return display
+
+
+def _tree_dot(tree: dict[str, Any], name_of: dict[str, str]) -> str:
+    """Render a dialogue tree as a top-down DOT graph (choices labelled on edges)."""
+    lines = [
+        "digraph dialogue {",
+        '  bgcolor="transparent"; rankdir=TB; pad=0.2;',
+        '  node [shape=box style="rounded,filled" fillcolor="#161b2b" color="#3a4160"',
+        '        fontcolor="#ece5d3" fontsize=10 margin="0.14,0.1"];',
+        '  edge [color="#4a5170" fontcolor="#d8b54a" fontsize=9 arrowsize=0.7];',
+    ]
+    nodes = tree.get("nodes") or {}
+    root = tree.get("root_node") or ""
+    for node_id, node in nodes.items():
+        speaker = node.get("speaker_id") or ""
+        speaker_name = name_of.get(speaker, speaker)
+        text = str(node.get("text") or "").replace('"', "'")
+        if len(text) > 26:
+            text = text[:26] + "…"
+        label = f"{speaker_name}\\n{text}" if speaker_name else text
+        extra = ' color="#d8b54a" penwidth=2' if node_id == root else ""
+        lines.append(f'  "{node_id}" [label="{label}"{extra}];')
+    for node_id, node in nodes.items():
+        next_node = node.get("next_node")
+        if next_node:
+            lines.append(f'  "{node_id}" -> "{next_node}";')
+        for choice in node.get("choices") or []:
+            target = choice.get("next_node")
+            if not target:
+                continue
+            text = str(choice.get("text") or "").replace('"', "'")
+            if len(text) > 14:
+                text = text[:14] + "…"
+            lines.append(f'  "{node_id}" -> "{target}" [label="{text}"];')
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _default_content_root() -> str:
+    from_query = st.query_params.get("root", "").strip()
+    if from_query:
+        return from_query
+    return str((Path.cwd() / "content").resolve())
+
+
+def _project_ready(content_root: str) -> bool:
+    if not content_root.strip():
+        return False
+    return Path(content_root).exists()
+
+
+def _show_project_required(content_root: str) -> None:
+    if content_root.strip():
+        st.warning("内容仓目录不存在。请在左侧创建或选择内容仓。", icon="⚠️")
+        st.code(content_root, language="text")
+    else:
+        st.info("请先在左侧选择或创建内容仓。", icon="🧭")
+
+
+def _initialize_content_root(content_root: str) -> None:
+    root = Path(content_root)
+    if root.exists() and any(root.iterdir()):
+        raise ValueError(
+            f"目录已存在且非空：{root}。为避免覆盖真实内容，请选择空目录或直接打开已有内容仓。"
+        )
+    ContentStore(root).save(ContentBundle())
+
+
+# ------------------------------------------------------------------------------ sidebar
+with st.sidebar:
+    st.markdown(
+        """
+        <div class="ow-brand">
+          <div class="mark">🗺️</div>
+          <div><b>OWCopilot</b><span>世界观内容工作台</span></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    _section("工作区")
+    content_root = st.text_input(
+        "内容仓目录",
+        value=st.session_state.get("content_root", _default_content_root()),
+        help="项目设定文件所在目录。新项目可先初始化一个空仓。",
+    )
+    st.session_state["content_root"] = content_root
+    if st.button("✨ 初始化内容仓", use_container_width=True):
+        try:
+            _initialize_content_root(content_root)
+        except Exception as e:
+            _fail(e)
+        else:
+            st.success("内容仓已初始化。")
+            st.rerun()
+
+    _section("模型")
     llm_mode = st.radio(
-        "模型模式",
+        "调用模式",
         options=["offline", "real"],
         horizontal=True,
-        help="offline：确定性离线应答器，$0；real：真实 OpenAI 兼容模型（读取 .env 配置）。",
+        format_func=lambda m: "离线 · $0" if m == "offline" else "真实 · 计费",
+        help="离线：确定性应答器；真实：OpenAI 兼容模型（读取 .env）。",
     )
-    llm_model = st.text_input(
-        "真实模型 ID", value="deepseek-v4-flash", disabled=llm_mode != "real"
-    )
+    llm_model = st.text_input("真实模型 ID", value="deepseek-v4-flash", disabled=llm_mode != "real")
     operator = st.text_input(
         "操作者署名",
         value=st.session_state.get("operator", ""),
-        help="apply / 审核决定会记录到审计日志。",
+        placeholder="审阅与写入动作会记录署名",
     )
     st.session_state["operator"] = operator
 
-    st.divider()
     st.metric("本会话模型成本", f"${st.session_state.get('session_cost_usd', 0.0):.6f}")
     if llm_mode == "real":
         st.warning("真实模式会产生模型费用。", icon="💰")
 
+    with st.expander("高级设置"):
+        sqlite_override = st.text_input(
+            "运行库路径（可选）",
+            value="",
+            help="默认在内容仓内 .owcopilot/runtime.sqlite。",
+        )
+    sqlite_path = sqlite_override or None
+    st.caption(f"OWCopilot {_VERSION}")
+
+# ------------------------------------------------------------------------------ hero
+_ready = _project_ready(content_root)
+_root_name = Path(content_root).name if content_root.strip() else "未选择"
+if llm_mode == "offline":
+    _mode_chip = _chip("离线 · $0", kind="green")
+else:
+    _mode_chip = _chip("真实 · 计费", kind="amber")
+if _ready:
+    _project_chip = _chip("内容仓 ", kind="gold", strong=_root_name)
+else:
+    _project_chip = _chip("内容仓未就绪", kind="red")
+_cost_chip = _chip("会话成本 ", strong=f"${st.session_state.get('session_cost_usd', 0.0):.4f}")
 st.markdown(
-    """
-    <div class="ow-banner">
-      <h1>🗺️ OWCopilot 世界观工作台</h1>
-      <p>把散落的设定整理成可审计的世界 —— 查设定有出处，跑审查有证据，AI 产物过人审。</p>
+    f"""
+    <div class="ow-hero">
+      <svg class="ow-mark" width="120" height="120" viewBox="0 0 100 100" fill="none">
+        <circle cx="50" cy="50" r="41" stroke="#d8b54a" stroke-opacity=".35"/>
+        <circle cx="50" cy="50" r="29" stroke="#d8b54a" stroke-opacity=".2"/>
+        <path d="M50 12 L57 43 L88 50 L57 57 L50 88 L43 57 L12 50 L43 43 Z"
+              fill="#d8b54a" fill-opacity=".16" stroke="#d8b54a" stroke-opacity=".5"/>
+        <path d="M50 30 L53.5 46.5 L70 50 L53.5 53.5 L50 70 L46.5 53.5 L30 50 L46.5 46.5 Z"
+              fill="#d8b54a" fill-opacity=".25"/>
+      </svg>
+      <h1>OWCopilot 世界观工作台</h1>
+      <p class="ow-tagline">查设定有出处 · 跑审查有证据 · AI 产物必过人审</p>
+      <div>{_project_chip}{_mode_chip}{_cost_chip}{_chip(_VERSION)}</div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-if not content_root:
-    st.info(
-        "在左侧输入内容仓目录开始。示例数据可用 `owcopilot eval-acceptance` 生成（雾脊行省）。",
-        icon="🧭",
-    )
-    st.stop()
+inventory: dict[str, Any] | None = None
+if _ready:
+    try:
+        inventory = build_content_inventory(content_root, sqlite_path=sqlite_path)
+    except Exception as e:
+        _fail(e)
 
 (
     tab_overview,
-    tab_audit,
-    tab_review,
+    tab_archive,
+    tab_genesis,
     tab_ask,
+    tab_audit,
     tab_impact,
-    tab_forge,
     tab_create,
+    tab_review,
     tab_export,
 ) = st.tabs(
     [
-        "🏰 世界概览",
-        "🛡️ 一致性审计",
-        "📜 待审队列",
+        "🏰 世界总览",
+        "📖 设定档案",
+        "🌱 创世工坊",
         "🔮 世界问答",
+        "🛡️ 审计与修复",
         "🕸️ 影响分析",
-        "⚒️ 修复工坊",
-        "🎭 生成工坊",
-        "📦 导出",
+        "🎭 创作工坊",
+        "📜 审阅台",
+        "📦 导出交付",
     ]
 )
 
-# ----------------------------------------------------------------------------- overview
+_ONBOARDING_STEPS = [
+    ("初始化内容仓", "在左侧填好目录，点「初始化内容仓」。"),
+    ("注入素材", "在创世工坊导入策划表格，或丢进一段小说/剧本让 AI 提炼。"),
+    ("一键创世", "也可以只写一句想法，生成整套世界草案。"),
+    ("审阅与深耕", "在审阅台采纳后，问答、审计、创作、导出一气呵成。"),
+]
+
+# ------------------------------------------------------------------------------ overview
 with tab_overview:
-    try:
-        overview = build_project_overview(content_root, sqlite_path=sqlite_path)
-    except Exception as e:
-        _fail(e)
+    if not _ready:
+        _show_project_required(content_root)
+        _empty_state(
+            "建立你的世界", "四步把散落的设定变成一座可审计的世界档案馆：", _ONBOARDING_STEPS
+        )
     else:
-        counts = overview["counts"]
-        top = st.columns(4)
-        top[0].metric("实体", counts["entities"])
-        top[1].metric("任务", counts["quests"])
-        top[2].metric("区域", counts["regions"])
-        top[3].metric("关系", counts["relations"])
-        mid = st.columns(4)
-        mid[0].metric("兴趣点", counts["pois"])
-        mid[1].metric("对白", counts["dialogues"])
-        mid[2].metric("图谱节点", overview["graph"]["nodes"])
-        mid[3].metric("图谱边", overview["graph"]["edges"])
-
-        provenance = overview.get("provenance") or {}
-        unreviewed = provenance.get("unreviewed_ai_refs") or []
-        with st.container(border=True):
-            st.markdown("**🔏 内容溯源（AI 参与度）**")
-            st.json(
-                {
-                    "by_origin": provenance.get("by_origin"),
-                    "by_review_status": provenance.get("by_review_status"),
-                }
-            )
-            if unreviewed:
-                preview = "、".join(unreviewed[:5])
-                st.warning(f"有 {len(unreviewed)} 项 AI 内容未过人审：{preview}…")
-            else:
-                st.success("所有 AI 产物均已通过人工审核。")
-        st.caption(f"content_hash：`{overview['content_hash']}`")
-
-# ----------------------------------------------------------------------------- audit
-with tab_audit:
-    left, right = st.columns([1, 3])
-    with left:
-        run_clicked = st.button("🛡️ 运行全量审计", type="primary", use_container_width=True)
-        severity_filter = st.selectbox("严重度筛选", ["全部", "error", "warning", "info"])
-    if run_clicked:
         try:
-            result = run_project_audit_action(content_root, sqlite_path=sqlite_path)
+            overview = build_project_overview(content_root, sqlite_path=sqlite_path)
         except Exception as e:
             _fail(e)
         else:
-            _track_cost(result)
-            st.session_state["audit_markdown"] = result["markdown_report"]
-            totals = result["audit_run"]["totals"]
-            if result["open_errors"]:
-                st.error(f"未解决 error：{result['open_errors']}")
+            counts = overview["counts"]
+            is_blank = counts["entities"] == 0 and counts["quests"] == 0
+            if is_blank:
+                _empty_state(
+                    "这个世界还是一张白纸",
+                    "从素材或一句想法开始，让世界长出第一批设定：",
+                    _ONBOARDING_STEPS[1:],
+                )
+            top = st.columns(4)
+            top[0].metric("实体", counts["entities"])
+            top[1].metric("任务", counts["quests"])
+            top[2].metric("区域", counts["regions"])
+            top[3].metric("关系", counts["relations"])
+            mid = st.columns(4)
+            mid[0].metric("兴趣点", counts["pois"])
+            mid[1].metric("对白", counts["dialogues"])
+            mid[2].metric("图谱节点", overview["graph"]["nodes"])
+            mid[3].metric("图谱边", overview["graph"]["edges"])
+
+            if not is_blank and inventory is not None:
+                left, right = st.columns([3, 2])
+                with left:
+                    _section("关系图谱")
+                    if inventory["relations"]:
+                        dot, truncated = _dot_graph(
+                            _inventory_display(inventory), inventory["relations"]
+                        )
+                        st.graphviz_chart(dot, use_container_width=True)
+                        if truncated:
+                            total = len(inventory["relations"])
+                            st.caption(f"仅展示前 80 条关系（共 {total} 条）。")
+                    else:
+                        st.info("尚无关系数据。")
+                with right:
+                    _section("实体类型分布")
+                    type_counter = Counter(row["type"] for row in inventory["entities"])
+                    if type_counter:
+                        _bar_chart(
+                            [
+                                {"类型": _ENTITY_TYPE_LABEL.get(key, key), "数量": value}
+                                for key, value in type_counter.items()
+                            ],
+                            x="类型",
+                            y="数量",
+                            height=190,
+                        )
+                    _section("内容溯源")
+                    provenance = overview.get("provenance") or {}
+                    by_origin = provenance.get("by_origin") or {}
+                    by_status = provenance.get("by_review_status") or {}
+                    _chips(
+                        *(
+                            _chip(f"{_ORIGIN_LABEL.get(k, k)} ", strong=str(v), kind="gold")
+                            for k, v in by_origin.items()
+                        )
+                    )
+                    _chips(
+                        *(
+                            _chip(
+                                f"{_REVIEW_LABEL.get(k, k)} ",
+                                strong=str(v),
+                                kind="green" if k == "approved" else "amber",
+                            )
+                            for k, v in by_status.items()
+                        )
+                    )
+                    unreviewed = provenance.get("unreviewed_ai_refs") or []
+                    if unreviewed:
+                        preview = "、".join(unreviewed[:5])
+                        st.warning(f"{len(unreviewed)} 项 AI 内容未过人审：{preview}…")
+                    else:
+                        st.success("所有 AI 产物均已通过人工审核。")
+            st.caption(f"内容指纹：`{overview['content_hash']}`")
+
+# ------------------------------------------------------------------------------ archive
+with tab_archive:
+    if not _ready:
+        _show_project_required(content_root)
+    elif inventory is None:
+        st.info("内容仓读取失败，请检查上方错误信息。")
+    else:
+        kind = (
+            st.pills(
+                "档案类别",
+                options=[
+                    "实体",
+                    "任务",
+                    "区域",
+                    "兴趣点",
+                    "术语",
+                    "对白",
+                    "对话树",
+                    "关系",
+                    "风格圣经",
+                ],
+                default="实体",
+                label_visibility="collapsed",
+            )
+            or "实体"
+        )
+        query = st.text_input(
+            "搜索",
+            placeholder="按名称 / ID / 描述过滤……",
+            label_visibility="collapsed",
+        )
+
+        def _match(row: dict[str, Any]) -> bool:
+            if not query.strip():
+                return True
+            needle = query.strip().lower()
+            return any(needle in str(value).lower() for value in row.values())
+
+        if kind == "实体":
+            rows = [r for r in inventory["entities"] if _match(r)]
+            st.caption(f"{len(rows)} / {len(inventory['entities'])} 条")
+            if rows:
+                df = pd.DataFrame(rows)
+                df["type"] = df["type"].map(lambda t: _ENTITY_TYPE_LABEL.get(t, t))
+                df["origin"] = df["origin"].map(lambda o: _ORIGIN_LABEL.get(o, o))
+                df["review_status"] = df["review_status"].map(lambda s: _REVIEW_LABEL.get(s, s))
+                df = df.rename(
+                    columns={
+                        "id": "ID",
+                        "name": "名称",
+                        "type": "类型",
+                        "description": "描述",
+                        "tags": "标签",
+                        "origin": "来源",
+                        "review_status": "审核",
+                    }
+                )
+                st.dataframe(df, use_container_width=True, hide_index=True, height=380)
+                picked = st.selectbox(
+                    "查看详情",
+                    options=[""] + [r["id"] for r in rows],
+                    format_func=lambda i: "选择一个实体…" if not i else i,
+                )
+                if picked:
+                    row = next(r for r in rows if r["id"] == picked)
+                    with st.container(border=True):
+                        st.markdown(f"**{row['name']}** ｜ `{row['id']}`")
+                        _chips(
+                            _chip(_ENTITY_TYPE_LABEL.get(row["type"], row["type"]), kind="blue"),
+                            _chip(_ORIGIN_LABEL.get(row["origin"], row["origin"]), kind="gold"),
+                            _chip(
+                                _REVIEW_LABEL.get(row["review_status"], row["review_status"]),
+                                kind="green" if row["review_status"] == "approved" else "amber",
+                            ),
+                        )
+                        if row["description"]:
+                            st.write(row["description"])
+                        related = [
+                            rel
+                            for rel in inventory["relations"]
+                            if rel["source"] == picked or rel["target"] == picked
+                        ]
+                        if related:
+                            st.markdown("**关系**")
+                            for rel in related[:20]:
+                                st.write(f"- `{rel['source']}` —{rel['kind']}→ `{rel['target']}`")
+        elif kind == "任务":
+            rows = [r for r in inventory["quests"] if _match(r)]
+            st.caption(f"{len(rows)} / {len(inventory['quests'])} 条")
+            if rows:
+                df = pd.DataFrame(rows).rename(
+                    columns={
+                        "id": "ID",
+                        "title": "标题",
+                        "giver_npc": "发布人",
+                        "location": "地点",
+                        "objective": "目标",
+                        "stages": "阶段数",
+                        "timeline_order": "时间序",
+                        "origin": "来源",
+                        "review_status": "审核",
+                    }
+                )
+                df["来源"] = df["来源"].map(lambda o: _ORIGIN_LABEL.get(o, o))
+                df["审核"] = df["审核"].map(lambda s: _REVIEW_LABEL.get(s, s))
+                st.dataframe(df, use_container_width=True, hide_index=True, height=420)
+        elif kind == "区域":
+            rows = [r for r in inventory["regions"] if _match(r)]
+            st.caption(f"{len(rows)} / {len(inventory['regions'])} 条")
+            if rows:
+                df = pd.DataFrame(rows).rename(
+                    columns={
+                        "id": "ID",
+                        "name": "名称",
+                        "level_min": "等级下限",
+                        "level_max": "等级上限",
+                        "themes": "主题",
+                        "banned_content": "禁入内容",
+                    }
+                )
+                st.dataframe(df, use_container_width=True, hide_index=True)
+        elif kind == "兴趣点":
+            rows = [r for r in inventory["pois"] if _match(r)]
+            st.caption(f"{len(rows)} / {len(inventory['pois'])} 条")
+            if rows:
+                df = pd.DataFrame(rows).rename(
+                    columns={
+                        "id": "ID",
+                        "name": "名称",
+                        "region_id": "所属区域",
+                        "purpose": "用途",
+                        "controlling_faction": "控制势力",
+                    }
+                )
+                st.dataframe(df, use_container_width=True, hide_index=True)
+        elif kind == "术语":
+            rows = [r for r in inventory["terms"] if _match(r)]
+            st.caption(f"{len(rows)} / {len(inventory['terms'])} 条")
+            if rows:
+                df = pd.DataFrame(rows).rename(
+                    columns={
+                        "id": "ID",
+                        "canonical": "标准名",
+                        "aliases": "别名",
+                        "forbidden": "禁用写法",
+                        "description": "说明",
+                    }
+                )
+                st.dataframe(df, use_container_width=True, hide_index=True)
+        elif kind == "对白":
+            rows = [r for r in inventory["dialogues"] if _match(r)]
+            st.caption(f"{len(rows)} / {len(inventory['dialogues'])} 条")
+            if rows:
+                df = pd.DataFrame(rows).rename(
+                    columns={
+                        "id": "ID",
+                        "text_key": "文本键",
+                        "speaker_id": "说话人",
+                        "quest_id": "所属任务",
+                        "text": "文本",
+                    }
+                )
+                st.dataframe(df, use_container_width=True, hide_index=True)
+        elif kind == "对话树":
+            trees = inventory.get("dialogue_trees") or []
+            rows = [r for r in trees if _match(r)]
+            st.caption(f"{len(rows)} / {len(trees)} 条")
+            if rows:
+                df = pd.DataFrame(rows).rename(
+                    columns={
+                        "id": "ID",
+                        "title": "标题",
+                        "quest_id": "所属任务",
+                        "participants": "参与者",
+                        "nodes": "节点数",
+                    }
+                )
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                picked_tree = st.selectbox(
+                    "查看结构",
+                    options=[""] + [r["id"] for r in rows],
+                    format_func=lambda i: "选择一棵对话树…" if not i else i,
+                )
+                if picked_tree:
+                    full = (inventory.get("dialogue_tree_payloads") or {}).get(picked_tree)
+                    if full:
+                        name_of = {row["id"]: row["name"] for row in inventory["entities"]}
+                        st.graphviz_chart(_tree_dot(full, name_of), use_container_width=True)
             else:
-                st.success("审计通过：无未解决 error。")
+                st.info("还没有对话树。可在创作工坊生成。")
+        elif kind == "关系":
+            rows = [r for r in inventory["relations"] if _match(r)]
+            st.caption(f"{len(rows)} / {len(inventory['relations'])} 条")
+            if rows:
+                df = pd.DataFrame(rows).rename(
+                    columns={"source": "源", "kind": "关系", "target": "目标"}
+                )
+                st.dataframe(df, use_container_width=True, hide_index=True)
+        else:  # 风格圣经
+            guides = inventory["style_guides"]
+            if not guides:
+                st.info("尚无风格圣经。采纳一份世界草案后会自动生成。")
+            for guide in guides:
+                with st.container(border=True):
+                    st.markdown(f"**风格圣经** ｜ `{guide['id']}`")
+                    if guide["body"]:
+                        st.write(guide["body"])
+                    for rule in guide["rules"]:
+                        st.write(f"- {rule}")
+
+# ------------------------------------------------------------------------------ genesis
+with tab_genesis:
+    if not _ready:
+        _show_project_required(content_root)
+    else:
+        seed_tab, distill_tab, ingest_tab, refs_tab = st.tabs(
+            ["🌍 一键创世", "✒️ 文稿提炼", "📑 表格导入", "📚 灵感参考库"]
+        )
+        # ---------------------------------------------------------------- world seed
+        with seed_tab:
+            with st.form("world_seed_form"):
+                _section("核心设定")
+                idea = st.text_area(
+                    "核心想法",
+                    placeholder=(
+                        "例如：一个靠蒸汽巨树维持生命的群岛世界，"
+                        "玩家要在工会、王室和旧神信徒之间选择立场。"
+                    ),
+                    height=110,
+                )
+                c1, c2, c3 = st.columns(3)
+                medium = c1.selectbox(
+                    "载体", ["开放世界游戏", "RPG", "视觉小说", "剧本", "小说设定"]
+                )
+                game_genre = c2.text_input("玩法/类型", placeholder="开放世界 RPG / 叙事冒险")
+                player_fantasy = c3.text_input("玩家身份", placeholder="流亡调查员 / 新任领主")
+                _section("风格与基调")
+                style_choices = st.multiselect(
+                    "世界风格",
+                    [
+                        "蒸汽朋克",
+                        "魔幻",
+                        "黑暗奇幻",
+                        "科幻",
+                        "废土",
+                        "武侠",
+                        "赛博朋克",
+                        "历史架空",
+                    ],
+                    default=["蒸汽朋克"],
+                )
+                c4, c5, c6 = st.columns(3)
+                other_style = c4.text_input("其他风格")
+                tone = c5.text_input("基调", placeholder="克制、悬疑、史诗")
+                era = c6.text_input("时代/技术水平", placeholder="工业革命早期 / 近未来")
+                core_conflict = st.text_input(
+                    "核心冲突", placeholder="能源枯竭、王权更替、旧神复苏"
+                )
+                _section("参考用法")
+                c7, c8 = st.columns(2)
+                reference_mode = c7.selectbox(
+                    "参考模式",
+                    ["灵感参考", "参考剧情结构", "参考人物关系", "参考任务节奏", "做一个变体"],
+                )
+                reference_query = c8.text_input(
+                    "参考检索关键词", placeholder="留空则用核心想法检索"
+                )
+                use_project_facts = st.checkbox("在现有世界上扩写（读取项目事实）", value=False)
+                _section("生成规模")
+                counts_cols = st.columns(5)
+                faction_count = counts_cols[0].slider("阵营", 1, 8, 3)
+                region_count = counts_cols[1].slider("区域", 1, 8, 2)
+                npc_count = counts_cols[2].slider("角色", 1, 24, 8)
+                quest_count = counts_cols[3].slider("任务", 1, 16, 5)
+                term_count = counts_cols[4].slider("术语", 0, 24, 5)
+                notes = st.text_area("补充要求", height=70)
+                submitted = st.form_submit_button(
+                    "🌍 生成世界草案", type="primary", use_container_width=True
+                )
+            if submitted and idea.strip():
+                styles = list(style_choices)
+                if other_style.strip():
+                    styles.append(other_style.strip())
+                try:
+                    result = run_world_seed_action(
+                        content_root,
+                        brief={
+                            "idea": idea.strip(),
+                            "medium": medium,
+                            "game_genre": game_genre.strip(),
+                            "world_styles": styles,
+                            "tone": tone.strip(),
+                            "era": era.strip(),
+                            "player_fantasy": player_fantasy.strip(),
+                            "core_conflict": core_conflict.strip(),
+                            "reference_mode": reference_mode,
+                            "reference_query": reference_query.strip(),
+                            "use_project_facts": use_project_facts,
+                            "faction_count": int(faction_count),
+                            "region_count": int(region_count),
+                            "npc_count": int(npc_count),
+                            "quest_count": int(quest_count),
+                            "term_count": int(term_count),
+                            "notes": notes.strip(),
+                        },
+                        sqlite_path=sqlite_path,
+                        llm_mode=llm_mode,
+                        llm_model=llm_model,
+                    )
+                except Exception as e:
+                    _fail(e)
+                else:
+                    _track_cost(result)
+                    st.success("世界草案已生成，到「📜 审阅台」定夺。")
+                    st.write(result["summary"])
+                    counts = result["counts"]
+                    _chips(
+                        _chip("阵营+角色 ", strong=str(counts["entities"]), kind="gold"),
+                        _chip("区域 ", strong=str(counts["regions"]), kind="blue"),
+                        _chip("地点 ", strong=str(counts["pois"]), kind="green"),
+                        _chip("任务 ", strong=str(counts["quests"]), kind="amber"),
+                        _chip("术语 ", strong=str(counts["terms"])),
+                        _chip("关系 ", strong=str(counts["relations"])),
+                    )
+                    if result["reference_report"]:
+                        _section("参考来源与创作取舍")
+                        for row in result["reference_report"]:
+                            with st.expander(f"{row['source_title']} ｜ `{row['source_ref']}`"):
+                                st.write(f"用于：{row['used_for']}")
+                                st.write(f"转化：{row['transformation']}")
+                                if row["excluded"]:
+                                    st.write("未使用：" + "、".join(row["excluded"]))
+                    if result["issues"]:
+                        issue_count = len(result["issues"])
+                        st.warning(f"草案自动审计发现 {issue_count} 条提示。")
+                    with st.expander("结构化草案 JSON"):
+                        st.code(
+                            json.dumps(result["bundle"], ensure_ascii=False, indent=2),
+                            language="json",
+                        )
+                    _show_cost(result)
+        # ---------------------------------------------------------------- distill
+        with distill_tab:
+            st.caption("丢进一本小说、一段剧本或散乱笔记，提炼成可审阅的结构化设定。")
+            src_col, opt_col = st.columns([3, 2])
+            with src_col:
+                manuscript_file = st.file_uploader(
+                    "上传文稿",
+                    type=["txt", "md", "markdown", "docx", "json", "csv"],
+                    key="manuscript_upload",
+                )
+                manuscript_text = st.text_area("或直接粘贴文本", height=160, key="manuscript_paste")
+            with opt_col:
+                manuscript_title = st.text_input("来源标题", placeholder="默认用文件名")
+                source_kind = st.selectbox("文稿类型", ["小说", "剧本", "设定笔记", "其他文稿"])
+                max_chunks = st.slider("最多处理分块", 1, 24, 12, help="每块约 3500 字")
+            if st.button("✒️ 开始提炼", type="primary"):
+                raw_text = ""
+                title = manuscript_title.strip()
+                try:
+                    if manuscript_file is not None:
+                        raw_text = decode_manuscript_bytes(
+                            manuscript_file.getvalue(), manuscript_file.name
+                        )
+                        title = title or Path(manuscript_file.name).stem
+                    if manuscript_text.strip():
+                        raw_text = (raw_text + "\n\n" + manuscript_text).strip()
+                        title = title or "粘贴文稿"
+                    if not raw_text.strip():
+                        st.warning("请先上传文件或粘贴文本。")
+                    else:
+                        result = run_extraction_action(
+                            content_root,
+                            title=title,
+                            text=raw_text,
+                            source_kind=source_kind,
+                            sqlite_path=sqlite_path,
+                            max_chunks=int(max_chunks),
+                            llm_mode=llm_mode,
+                            llm_model=llm_model,
+                        )
+                        _track_cost(result)
+                        st.session_state["extraction_draft"] = result["draft"]
+                        st.rerun()
+                except Exception as e:
+                    _fail(e)
+            draft = st.session_state.get("extraction_draft")
+            if draft:
+                st.divider()
+                stats = draft.get("stats") or {}
+                _chips(
+                    _chip("实体 ", strong=str(stats.get("entities", 0)), kind="gold"),
+                    _chip("关系 ", strong=str(stats.get("relations", 0)), kind="blue"),
+                    _chip("剧情节拍 ", strong=str(stats.get("beats", 0)), kind="green"),
+                    _chip("术语 ", strong=str(stats.get("terms", 0))),
+                    _chip("待补缺口 ", strong=str(len(draft.get("gaps") or [])), kind="amber"),
+                )
+                st.write(draft.get("summary", ""))
+                graph_col, beats_col = st.columns([3, 2])
+                with graph_col:
+                    _section("人物关系图")
+                    bundle = draft.get("bundle") or {}
+                    relations = bundle.get("relations") or []
+                    if relations:
+                        edges = [
+                            {"source": r["source"], "target": r["target"], "kind": r["kind"]}
+                            for r in relations
+                        ]
+                        dot, _ = _dot_graph(_bundle_display(bundle), edges)
+                        st.graphviz_chart(dot, use_container_width=True)
+                    else:
+                        st.info("文稿中未发现明确的人物关系。")
+                with beats_col:
+                    _section("剧情结构")
+                    beats = draft.get("plot_beats") or []
+                    if beats:
+                        for beat in beats:
+                            with st.container(border=True):
+                                st.markdown(f"**{beat['order']}. {beat['title']}**")
+                                if beat.get("summary"):
+                                    st.caption(beat["summary"])
+                    else:
+                        st.info("未拆解出剧情节拍。")
+                with st.expander("提炼出的实体清单"):
+                    ents = (draft.get("bundle") or {}).get("entities") or {}
+                    if ents:
+                        df = pd.DataFrame(
+                            [
+                                {
+                                    "ID": eid,
+                                    "名称": e.get("name", ""),
+                                    "类型": _ENTITY_TYPE_LABEL.get(
+                                        e.get("type", ""), e.get("type", "")
+                                    ),
+                                    "描述": e.get("description", ""),
+                                }
+                                for eid, e in ents.items()
+                            ]
+                        )
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+                gaps = draft.get("gaps") or []
+                if gaps:
+                    _section("待补缺口", "逐项填写，或交给 AI 先补一版再确认")
+                    if st.button("🪄 AI 补全全部缺口"):
+                        try:
+                            filled = fill_extraction_gaps_action(
+                                content_root,
+                                draft=draft,
+                                sqlite_path=sqlite_path,
+                                llm_mode=llm_mode,
+                                llm_model=llm_model,
+                            )
+                        except Exception as e:
+                            _fail(e)
+                        else:
+                            _track_cost(filled)
+                            st.session_state["extraction_draft"] = filled["draft"]
+                            st.rerun()
+                    for gap in gaps:
+                        st.text_input(
+                            gap["question"],
+                            value=gap.get("suggestion", ""),
+                            key=f"gap_{gap['ref']}",
+                        )
+                unresolved = draft.get("unresolved_relations") or []
+                if unresolved:
+                    with st.expander(f"未能解析的关系（{len(unresolved)}）"):
+                        for rel in unresolved:
+                            st.write(f"- {rel['source']} —{rel['kind']}→ {rel['target']}")
+                submit_cols = st.columns([2, 2, 1])
+                beats_as_quests = submit_cols[0].checkbox("把剧情节拍生成任务骨架", value=True)
+                if submit_cols[1].button("📜 提交到审阅台", type="primary"):
+                    answers = {
+                        gap["ref"]: st.session_state.get(f"gap_{gap['ref']}", "") for gap in gaps
+                    }
+                    try:
+                        submit_result = submit_extraction_action(
+                            content_root,
+                            draft=draft,
+                            answers=answers,
+                            include_beats_as_quests=beats_as_quests,
+                            sqlite_path=sqlite_path,
+                        )
+                    except Exception as e:
+                        _fail(e)
+                    else:
+                        _track_cost(submit_result)
+                        del st.session_state["extraction_draft"]
+                        st.success(
+                            f"已提交审阅（剩余未填缺口 {submit_result['open_gaps']} 项），"
+                            "到「📜 审阅台」定夺。"
+                        )
+                if submit_cols[2].button("丢弃草案"):
+                    del st.session_state["extraction_draft"]
+                    st.rerun()
+        # ---------------------------------------------------------------- ingest
+        with ingest_tab:
             st.caption(
-                f"error {totals.get('error', 0)} ｜ warning {totals.get('warning', 0)} ｜ "
-                f"info {totals.get('info', 0)}"
+                "标准策划产物：Excel 多 Sheet 表、JSON/JSONL、Luban 表、Markdown。先预览后写入。"
             )
-            _show_cost(result)
-    try:
-        listing = list_project_issues_action(
-            content_root,
-            sqlite_path=sqlite_path,
-            severity=None if severity_filter == "全部" else severity_filter,
-        )
-    except Exception as e:
-        _fail(e)
-    else:
-        with right:
-            st.markdown(f"**问题清单（{listing['count']}）**")
-            for issue in listing["issues"][:200]:
-                badge = _SEVERITY_BADGE.get(issue["severity"], "▫️")
-                with st.expander(
-                    f"{badge} `{issue['rule_code']}` — {issue['target_ref']}", expanded=False
+            ingest_files = st.file_uploader(
+                "上传表格/文档",
+                type=["xlsx", "json", "jsonl", "md", "markdown", "csv"],
+                accept_multiple_files=True,
+                key="ingest_upload",
+            )
+            if st.button("🔍 预览导入", type="primary", disabled=not ingest_files):
+                upload_dir = Path(content_root) / ".owcopilot" / "uploads"
+                upload_dir.mkdir(parents=True, exist_ok=True)
+                saved: list[str] = []
+                for file in ingest_files or []:
+                    target = upload_dir / file.name
+                    target.write_bytes(file.getvalue())
+                    saved.append(str(target))
+                try:
+                    ingest_dry = run_ingest_action(
+                        content_root, paths=saved, sqlite_path=sqlite_path, dry_run=True
+                    )
+                except Exception as e:
+                    _fail(e)
+                else:
+                    st.session_state["ingest_preview"] = {"paths": saved, "result": ingest_dry}
+                    st.rerun()
+            preview_state = st.session_state.get("ingest_preview")
+            if preview_state:
+                preview = preview_state["result"]
+                change_counter = Counter(c["change_type"] for c in preview["changes"])
+                _chips(
+                    _chip("对象 ", strong=str(preview["incoming_count"]), kind="gold"),
+                    *(
+                        _chip(
+                            f"{_INGEST_CHANGE_LABEL.get(k, k)} ",
+                            strong=str(v),
+                            kind="red" if k == "conflict" else "blue",
+                        )
+                        for k, v in sorted(change_counter.items())
+                    ),
+                )
+                if preview["changes"]:
+                    df = pd.DataFrame(
+                        [
+                            {
+                                "对象": f"{c['object_type']}:{c['object_id']}",
+                                "变化": _INGEST_CHANGE_LABEL.get(
+                                    c["change_type"], c["change_type"]
+                                ),
+                            }
+                            for c in preview["changes"]
+                        ]
+                    )
+                    st.dataframe(df, use_container_width=True, hide_index=True, height=260)
+                if preview["issues"]:
+                    with st.expander(f"导入问题（{len(preview['issues'])}）"):
+                        for issue in preview["issues"][:50]:
+                            st.write(f"- `{issue['rule_code']}` {issue['message']}")
+                commit_cols = st.columns([2, 2, 1])
+                allow_partial = commit_cols[0].checkbox("跳过冲突对象，写入其余", value=False)
+                if commit_cols[1].button("📥 执行导入", type="primary"):
+                    try:
+                        committed = run_ingest_action(
+                            content_root,
+                            paths=preview_state["paths"],
+                            sqlite_path=sqlite_path,
+                            dry_run=False,
+                            write_non_conflicting=allow_partial,
+                        )
+                    except Exception as e:
+                        _fail(e)
+                    else:
+                        del st.session_state["ingest_preview"]
+                        if committed["has_errors"] and not allow_partial:
+                            st.error("存在冲突，未写入。可勾选「跳过冲突对象」部分导入。")
+                        else:
+                            st.success("导入完成。")
+                            st.rerun()
+                if commit_cols[2].button("取消"):
+                    del st.session_state["ingest_preview"]
+                    st.rerun()
+        # ---------------------------------------------------------------- references
+        with refs_tab:
+            st.caption("参考材料只供创作借鉴，不进入世界观事实问答。")
+            upload_tab, paste_tab, search_tab = st.tabs(["⬆️ 上传", "📋 粘贴", "🔎 检索"])
+            use_options = ["inspiration", "style", "structure", "adaptation", "analysis"]
+            use_labels = {
+                "inspiration": "灵感",
+                "style": "文风",
+                "structure": "结构",
+                "adaptation": "改编",
+                "analysis": "拆解",
+            }
+            with upload_tab:
+                uploaded = st.file_uploader(
+                    "参考材料",
+                    type=["txt", "md", "markdown", "json", "csv"],
+                    accept_multiple_files=True,
+                )
+                upload_uses = st.multiselect(
+                    "允许用途",
+                    use_options,
+                    default=["inspiration", "style", "structure"],
+                    format_func=lambda u: use_labels.get(u, u),
+                    key="upload_reference_uses",
+                )
+                if st.button("加入参考库", type="primary", disabled=not uploaded):
+                    for file in uploaded or []:
+                        try:
+                            text = decode_reference_bytes(file.getvalue(), file.name)
+                            result = add_reference_action(
+                                content_root,
+                                title=Path(file.name).stem,
+                                text=text,
+                                sqlite_path=sqlite_path,
+                                original_filename=file.name,
+                                allowed_uses=upload_uses,
+                            )
+                        except Exception as e:
+                            _fail(e)
+                        else:
+                            st.success(
+                                f"已加入 `{result['source']['title']}`，"
+                                f"切片 {result['indexed_count']} 段。"
+                            )
+            with paste_tab:
+                ref_title = st.text_input("标题", placeholder="某段主线节奏参考")
+                ref_text = st.text_area("文本", height=180)
+                paste_uses = st.multiselect(
+                    "允许用途",
+                    use_options,
+                    default=["inspiration"],
+                    format_func=lambda u: use_labels.get(u, u),
+                    key="paste_reference_uses",
+                )
+                if (
+                    st.button("保存文本参考", type="primary")
+                    and ref_title.strip()
+                    and ref_text.strip()
                 ):
-                    st.write(issue["message"])
-                    st.code(
-                        json.dumps(issue["evidence"], ensure_ascii=False, indent=2),
-                        language="json",
-                    )
-                    st.caption(f"issue id：`{issue['id']}`（修复工坊用）")
-    if st.session_state.get("audit_markdown"):
-        st.download_button(
-            "⬇️ 下载 Markdown 审计报告",
-            st.session_state["audit_markdown"],
-            file_name="audit_report.md",
-        )
-
-# ----------------------------------------------------------------------------- review queue
-with tab_review:
-    st.markdown("**人审是 AI 产物落盘的唯一通道。** 采纳任务草稿会写入内容仓（origin 留痕不变）。")
-    try:
-        queue = list_review_items_action(content_root, sqlite_path=sqlite_path)
-    except Exception as e:
-        _fail(e)
-    else:
-        if not queue["items"]:
-            st.success("待审队列为空。")
-        for item in queue["items"]:
-            label = _ITEM_TYPE_LABEL.get(item["item_type"], item["item_type"])
-            with st.container(border=True):
-                head, accept_col, reject_col = st.columns([6, 1, 1])
-                head.markdown(f"{label} ｜ `{item['object_ref']}`")
-                if item["issue_refs"]:
-                    head.caption(f"关联问题指纹 {len(item['issue_refs'])} 条")
-                with st.expander("查看内容"):
-                    st.code(
-                        json.dumps(item["payload"], ensure_ascii=False, indent=2),
-                        language="json",
-                    )
-                if accept_col.button("采纳", key=f"acc_{item['id']}", type="primary"):
                     try:
-                        decided = decide_review_action(
+                        result = add_reference_action(
                             content_root,
-                            item_id=item["id"],
-                            decision="accepted",
-                            operator=operator,
+                            title=ref_title.strip(),
+                            text=ref_text.strip(),
+                            sqlite_path=sqlite_path,
+                            source_type="pasted_text",
+                            allowed_uses=paste_uses,
+                        )
+                    except Exception as e:
+                        _fail(e)
+                    else:
+                        st.success(
+                            f"已加入 `{result['source']['title']}`，"
+                            f"切片 {result['indexed_count']} 段。"
+                        )
+            with search_tab:
+                ref_query = st.text_input("检索问题", placeholder="三方势力冲突、护送任务节奏")
+                if st.button("检索参考") and ref_query.strip():
+                    try:
+                        result = search_references_action(
+                            content_root,
+                            query=ref_query.strip(),
                             sqlite_path=sqlite_path,
                         )
                     except Exception as e:
                         _fail(e)
                     else:
-                        _track_cost(decided)
-                        written = decided.get("written_ref")
-                        st.success(f"已采纳{f'，写入 {written}' if written else ''}。")
-                        st.rerun()
-                if reject_col.button("驳回", key=f"rej_{item['id']}"):
-                    try:
-                        decide_review_action(
-                            content_root,
-                            item_id=item["id"],
-                            decision="rejected",
-                            operator=operator,
-                            sqlite_path=sqlite_path,
+                        if not result["hits"]:
+                            st.info("没有命中的参考片段。")
+                        for hit in result["hits"]:
+                            with st.expander(f"`{hit['ref']}` ｜ {hit['title']}"):
+                                st.write(hit["body"])
+                                st.caption(
+                                    "来源："
+                                    + hit["metadata"].get("source_title", "")
+                                    + f" ｜ 相关度 {hit['score']:.3f}"
+                                )
+            st.divider()
+            try:
+                listing = list_references_action(content_root, sqlite_path=sqlite_path)
+            except Exception as e:
+                _fail(e)
+            else:
+                _section("已入库参考", f"共 {listing['count']} 份")
+                if not listing["sources"]:
+                    st.caption("参考库还是空的。")
+                for source in listing["sources"]:
+                    with st.container(border=True):
+                        st.markdown(f"**{source['title']}** ｜ `{source['id']}`")
+                        _chips(
+                            *(
+                                _chip(use_labels.get(use, use), kind="blue")
+                                for use in source["allowed_uses"]
+                            )
                         )
-                    except Exception as e:
-                        _fail(e)
-                    else:
-                        st.rerun()
 
-# ----------------------------------------------------------------------------- ask
+# ------------------------------------------------------------------------------ ask
 with tab_ask:
-    st.markdown("带引用的世界观问答：查不到的设定明确拒答，**绝不编造**。")
-    if "ask_history" not in st.session_state:
-        st.session_state["ask_history"] = []
-    for entry in st.session_state["ask_history"]:
-        with st.chat_message("user"):
-            st.write(entry["question"])
-        with st.chat_message("assistant", avatar="🔮"):
-            st.write(entry["answer"])
-            if entry["citations"]:
-                st.caption("引用：" + "、".join(f"`{ref}`" for ref in entry["citations"]))
-    question = st.chat_input("例如：沈清河是谁？玄武之约是什么事件？")
-    if question:
-        try:
-            result = run_ask_action(
-                content_root,
-                query=question,
-                sqlite_path=sqlite_path,
-                llm_mode=llm_mode,
-                llm_model=llm_model,
-            )
-        except Exception as e:
-            _fail(e)
-        else:
+    if not _ready:
+        _show_project_required(content_root)
+    else:
+        _section("世界问答", "带引用回答；查不到的设定明确拒答")
+        if "ask_history" not in st.session_state:
+            st.session_state["ask_history"] = []
+
+        def _submit_question(question: str) -> None:
+            try:
+                result = run_ask_action(
+                    content_root,
+                    query=question,
+                    sqlite_path=sqlite_path,
+                    llm_mode=llm_mode,
+                    llm_model=llm_model,
+                )
+            except Exception as e:
+                _fail(e)
+                return
             _track_cost(result)
             answer = result["answer"]
             st.session_state["ask_history"].append(
                 {
                     "question": question,
-                    "answer": (
-                        answer["answer"]
-                        if not answer["refused"]
-                        else "图谱中没有这条设定的依据（拒答）。"
-                    ),
+                    "answer": (answer["answer"] if not answer["refused"] else _REFUSAL_TEXT),
                     "citations": [c["ref"] for c in answer.get("citations", [])],
+                    "cost": float((result.get("cost_budget") or {}).get("used_usd", 0.0)),
                 }
             )
             st.rerun()
 
-# ----------------------------------------------------------------------------- impact
-with tab_impact:
-    st.markdown("改表之前先看波及面：纯图遍历，零模型成本、零幻觉。")
-    with st.form("impact_form"):
-        cols = st.columns([2, 3, 1])
-        change_type = cols[0].selectbox("变更类型", [item.value for item in ChangeType])
-        target_ref = cols[1].text_input("目标引用", placeholder="entity:npc_aldric / quest:q_001")
-        max_depth = cols[2].number_input("传播深度", min_value=1, max_value=4, value=2)
-        submitted = st.form_submit_button("🕸️ 分析影响", type="primary")
-    if submitted and target_ref:
-        try:
-            result = run_impact_action(
-                content_root,
-                changes=[{"change_type": change_type, "target_ref": target_ref}],
-                sqlite_path=sqlite_path,
-                max_depth=int(max_depth),
-            )
-        except Exception as e:
-            _fail(e)
-        else:
-            _track_cost(result)
-            must, suggest = st.columns(2)
-            with must:
-                st.markdown(f"**🟥 必须改（{len(result['must_change'])}）**")
-                for item in result["must_change"]:
-                    st.write(f"- `{item['target_ref']}`")
-            with suggest:
-                st.markdown(f"**🟨 建议查（{len(result['suggest_check'])}）**")
-                for item in result["suggest_check"]:
-                    st.write(f"- `{item['target_ref']}`")
-            _show_cost(result)
+        if not st.session_state["ask_history"] and inventory is not None:
+            suggestions: list[str] = []
+            if inventory["entities"]:
+                suggestions.append(f"{inventory['entities'][0]['name']}是谁？有哪些关系？")
+            if inventory["quests"]:
+                suggestions.append(f"任务「{inventory['quests'][0]['title']}」的目标是什么？")
+            if inventory["terms"]:
+                suggestions.append(f"「{inventory['terms'][0]['canonical']}」指什么？")
+            if suggestions:
+                cols = st.columns(len(suggestions))
+                for idx, suggestion in enumerate(suggestions):
+                    if cols[idx].button(suggestion, key=f"sug_q_{idx}"):
+                        _submit_question(suggestion)
+        for entry in st.session_state["ask_history"]:
+            with st.chat_message("user"):
+                st.write(entry["question"])
+            with st.chat_message("assistant", avatar="🔮"):
+                st.write(entry["answer"])
+                if entry["citations"]:
+                    _chips(*(_chip(ref, kind="gold") for ref in entry["citations"]))
+                if entry.get("cost"):
+                    st.caption(f"本问成本 ${entry['cost']:.6f}")
+        placeholder = "问问你的世界……"
+        if inventory is not None and inventory["entities"]:
+            placeholder = f"例如：{inventory['entities'][0]['name']}的背景是什么？"
+        question = st.chat_input(placeholder)
+        if question:
+            _submit_question(question)
 
-# ----------------------------------------------------------------------- forge (suggest/apply)
-with tab_forge:
-    st.markdown(
-        "**审计问题 → 候选补丁 → 影子校验 → 人工应用。** "
-        "会引入新错误的候选在你看到之前就被丢弃；应用与回滚均记录操作者。"
-    )
-    issue_id = st.text_input("问题 ID（从“一致性审计”页复制）")
-    forge_cols = st.columns([1, 1, 2])
-    if forge_cols[0].button("⚒️ 生成修复候选", type="primary") and issue_id:
+# ------------------------------------------------------------------------------ audit & forge
+with tab_audit:
+    if not _ready:
+        _show_project_required(content_root)
+    else:
+        issues_listing: dict[str, Any] | None = None
         try:
-            result = run_suggest_action(
-                content_root,
-                issue_id=issue_id,
-                sqlite_path=sqlite_path,
-                llm_mode=llm_mode,
-                llm_model=llm_model,
-            )
+            issues_listing = list_project_issues_action(content_root, sqlite_path=sqlite_path)
         except Exception as e:
             _fail(e)
-        else:
-            _track_cost(result)
-            st.session_state["last_suggest"] = result
-    if st.session_state.get("last_suggest"):
-        result = st.session_state["last_suggest"]
-        st.caption(
-            f"候选 {len(result['candidates'])} ｜ 影子校验淘汰 {result['rejected_count']} ｜ "
-            f"{'使用了真实模型' if result['used_llm'] else '确定性修复器'}"
-        )
-        for candidate in result["candidates"]:
-            with st.container(border=True):
-                source = "🤖 模型" if candidate["source"] == "llm" else "⚙️ 确定性"
-                resolved = "✅ 解决目标问题" if candidate["target_resolved"] else "➖ 间接缓解"
-                st.markdown(f"{source} ｜ {resolved} ｜ `{candidate['patch_id']}`")
-                if candidate["rationale"]:
-                    st.write(candidate["rationale"])
-                st.code(
-                    json.dumps(candidate["ops"], ensure_ascii=False, indent=2), language="json"
+        check_tab, forge_tab = st.tabs(["🛡️ 一致性体检", "⚒️ 修复工坊"])
+        with check_tab:
+            run_clicked = st.button("🛡️ 运行全量审计", type="primary")
+            if run_clicked:
+                try:
+                    result = run_project_audit_action(content_root, sqlite_path=sqlite_path)
+                except Exception as e:
+                    _fail(e)
+                else:
+                    _track_cost(result)
+                    st.session_state["audit_markdown"] = result["markdown_report"]
+                    st.session_state["audit_flash"] = result["open_errors"]
+                    st.rerun()
+            flash = st.session_state.pop("audit_flash", None)
+            if flash is not None:
+                if flash:
+                    st.error(f"审计完成：未解决 error {flash} 条。")
+                else:
+                    st.success("审计通过：无未解决 error。")
+            if issues_listing is not None:
+                issues = issues_listing["issues"]
+                severity_counter = Counter(issue["severity"] for issue in issues)
+                _chips(
+                    *(
+                        _chip(
+                            f"{_SEVERITY_META[sev][0]} ",
+                            strong=str(severity_counter.get(sev, 0)),
+                            kind=_SEVERITY_META[sev][1],
+                        )
+                        for sev in ("error", "warning", "info")
+                    ),
+                    _chip("总计 ", strong=str(len(issues))),
                 )
-                if st.button("应用此补丁", key=f"apply_{candidate['patch_id']}", type="primary"):
+                if issues:
+                    rule_counter = Counter(issue["rule_code"] for issue in issues)
+                    chart_col, list_col = st.columns([2, 3])
+                    with chart_col:
+                        _section("问题按规则分布")
+                        _hbar_chart(
+                            [
+                                {"规则": rule, "数量": count}
+                                for rule, count in rule_counter.most_common(12)
+                            ],
+                            y="规则",
+                            x="数量",
+                            height=max(160, 26 * min(len(rule_counter), 12)),
+                        )
+                        if st.session_state.get("audit_markdown"):
+                            st.download_button(
+                                "⬇️ 下载审计报告",
+                                st.session_state["audit_markdown"],
+                                file_name="audit_report.md",
+                            )
+                    with list_col:
+                        _section("问题清单")
+                        severity_pick = (
+                            st.pills(
+                                "严重度",
+                                options=["全部", "致命", "警告", "提示"],
+                                default="全部",
+                                label_visibility="collapsed",
+                            )
+                            or "全部"
+                        )
+                        sev_map = {"致命": "error", "警告": "warning", "提示": "info"}
+                        shown = [
+                            issue
+                            for issue in issues
+                            if severity_pick == "全部"
+                            or issue["severity"] == sev_map.get(severity_pick)
+                        ]
+                        for issue in shown[:200]:
+                            label, kind = _SEVERITY_META.get(issue["severity"], ("▫️", ""))
+                            with st.expander(
+                                f"{label} ｜ {issue['rule_code']} — {issue['target_ref']}"
+                            ):
+                                st.write(issue["message"])
+                                st.code(
+                                    json.dumps(issue["evidence"], ensure_ascii=False, indent=2),
+                                    language="json",
+                                )
+                                st.caption(f"问题 ID：`{issue['id']}`")
+                else:
+                    st.info("暂无持久化问题。点「运行全量审计」生成体检报告。")
+        with forge_tab:
+            st.caption("候选补丁先过影子校验——会引入新错误的方案你根本不会看到。")
+            issue_options: list[str] = []
+            issue_label: dict[str, str] = {}
+            if issues_listing is not None:
+                ordered = sorted(
+                    issues_listing["issues"],
+                    key=lambda i: (i["severity"] != "error", i["rule_code"]),
+                )
+                for issue in ordered:
+                    issue_options.append(issue["id"])
+                    sev_label = _SEVERITY_META.get(issue["severity"], ("?", ""))[0]
+                    issue_label[issue["id"]] = (
+                        f"[{sev_label}] {issue['rule_code']} — {issue['target_ref']}"
+                    )
+            if not issue_options:
+                st.info("没有待修复的问题。先在「一致性体检」运行审计。")
+            else:
+                issue_id = st.selectbox(
+                    "选择要修复的问题",
+                    options=issue_options,
+                    format_func=lambda i: issue_label.get(i, i),
+                )
+                if st.button("⚒️ 生成修复候选", type="primary") and issue_id:
                     try:
-                        applied = run_apply_action(
+                        result = run_suggest_action(
                             content_root,
-                            patch_id=candidate["patch_id"],
-                            operator=operator,
+                            issue_id=issue_id,
                             sqlite_path=sqlite_path,
+                            llm_mode=llm_mode,
+                            llm_model=llm_model,
                         )
                     except Exception as e:
                         _fail(e)
                     else:
-                        _track_cost(applied)
-                        if applied["applied"]:
-                            st.success(
-                                "已应用；复跑审计后未解决 error = "
-                                f"{applied['post_audit_open_errors']}。"
+                        _track_cost(result)
+                        st.session_state["last_suggest"] = result
+                if st.session_state.get("last_suggest"):
+                    result = st.session_state["last_suggest"]
+                    _chips(
+                        _chip("候选 ", strong=str(len(result["candidates"])), kind="gold"),
+                        _chip("影子校验淘汰 ", strong=str(result["rejected_count"]), kind="red"),
+                        _chip("真实模型" if result["used_llm"] else "确定性修复器", kind="blue"),
+                    )
+                    if not result["candidates"]:
+                        st.warning("没有通过影子校验的候选。该类问题需要人工处理。")
+                    for candidate in result["candidates"]:
+                        with st.container(border=True):
+                            source = "🤖 模型" if candidate["source"] == "llm" else "⚙️ 确定性"
+                            resolved = (
+                                "✅ 解决目标问题" if candidate["target_resolved"] else "➖ 间接缓解"
                             )
+                            st.markdown(f"{source} ｜ {resolved} ｜ `{candidate['patch_id']}`")
+                            if candidate["rationale"]:
+                                st.write(candidate["rationale"])
+                            st.code(
+                                json.dumps(candidate["ops"], ensure_ascii=False, indent=2),
+                                language="json",
+                            )
+                            apply_disabled = not operator.strip()
+                            if apply_disabled:
+                                st.caption("⚠️ 先在左侧填写操作者署名。")
+                            if st.button(
+                                "应用此补丁",
+                                key=f"apply_{candidate['patch_id']}",
+                                type="primary",
+                                disabled=apply_disabled,
+                            ):
+                                try:
+                                    applied = run_apply_action(
+                                        content_root,
+                                        patch_id=candidate["patch_id"],
+                                        operator=operator,
+                                        sqlite_path=sqlite_path,
+                                    )
+                                except Exception as e:
+                                    _fail(e)
+                                else:
+                                    _track_cost(applied)
+                                    if applied["applied"]:
+                                        st.success(
+                                            "已应用；复跑审计后未解决 error = "
+                                            f"{applied['post_audit_open_errors']}。"
+                                        )
+                                    else:
+                                        st.error(f"拒绝应用：{applied['reason']}")
+            st.divider()
+            _section("已应用补丁", "可一键回滚")
+            try:
+                applied_list = list_patches_action(
+                    content_root, sqlite_path=sqlite_path, status="applied"
+                )
+            except Exception as e:
+                _fail(e)
+            else:
+                if not applied_list["patches"]:
+                    st.caption("暂无已应用补丁。")
+                for patch in applied_list["patches"]:
+                    cols = st.columns([5, 1])
+                    cols[0].markdown(
+                        f"`{patch['id']}` ｜ 应用者 {patch['applied_by']} ｜ {patch['applied_at']}"
+                    )
+                    if cols[1].button(
+                        "回滚", key=f"rb_{patch['id']}", disabled=not operator.strip()
+                    ):
+                        try:
+                            rolled = run_rollback_action(
+                                content_root,
+                                patch_id=patch["id"],
+                                operator=operator,
+                                sqlite_path=sqlite_path,
+                            )
+                        except Exception as e:
+                            _fail(e)
                         else:
-                            st.error(f"拒绝应用：{applied['reason']}")
-    st.divider()
-    st.markdown("**已应用补丁（可回滚）**")
-    try:
-        applied_list = list_patches_action(
-            content_root, sqlite_path=sqlite_path, status="applied"
-        )
-    except Exception as e:
-        _fail(e)
+                            st.success(f"已回滚 `{rolled['patch_id']}`。")
+                            st.rerun()
+
+# ------------------------------------------------------------------------------ impact
+with tab_impact:
+    if not _ready:
+        _show_project_required(content_root)
     else:
-        if not applied_list["patches"]:
-            st.caption("暂无已应用补丁。")
-        for patch in applied_list["patches"]:
-            cols = st.columns([5, 1])
-            cols[0].markdown(
-                f"`{patch['id']}` ｜ 应用者 {patch['applied_by']} ｜ {patch['applied_at']}"
+        _section("影响分析", "改设定之前先看波及面")
+        ref_options: list[str] = []
+        ref_display: dict[str, str] = {}
+        if inventory is not None:
+            for row in inventory["entities"]:
+                ref = f"entity:{row['id']}"
+                ref_display[ref] = (
+                    f"{row['name']}（{_ENTITY_TYPE_LABEL.get(row['type'], row['type'])}）"
+                )
+            for row in inventory["quests"]:
+                ref_display[f"quest:{row['id']}"] = f"{row['title']}（任务）"
+            for row in inventory["regions"]:
+                ref_display[f"region:{row['id']}"] = f"{row['name']}（区域）"
+            for row in inventory["pois"]:
+                ref_display[f"poi:{row['id']}"] = f"{row['name']}（兴趣点）"
+            ref_options = inventory["graph_refs"]
+        with st.form("impact_form"):
+            cols = st.columns([2, 3, 1])
+            change_type = cols[0].selectbox(
+                "变更类型",
+                [item.value for item in ChangeType],
+                format_func=lambda v: _CHANGE_TYPE_LABEL.get(v, v),
             )
-            if cols[1].button("回滚", key=f"rb_{patch['id']}"):
+            if ref_options:
+                target_ref = cols[1].selectbox(
+                    "目标对象（可输入过滤）",
+                    options=ref_options,
+                    format_func=lambda r: f"{ref_display.get(r, r)} · {r}",
+                )
+            else:
+                target_ref = cols[1].text_input(
+                    "目标引用", placeholder="entity:<实体ID> / quest:<任务ID>"
+                )
+            max_depth = cols[2].number_input("传播深度", min_value=1, max_value=4, value=2)
+            submitted = st.form_submit_button("🕸️ 分析影响", type="primary")
+        if submitted and target_ref:
+            try:
+                result = run_impact_action(
+                    content_root,
+                    changes=[{"change_type": change_type, "target_ref": target_ref}],
+                    sqlite_path=sqlite_path,
+                    max_depth=int(max_depth),
+                )
+            except Exception as e:
+                _fail(e)
+            else:
+                _track_cost(result)
+                _chips(
+                    _chip("波及对象 ", strong=str(result["total"]), kind="gold"),
+                    _chip("必须改 ", strong=str(len(result["must_change"])), kind="red"),
+                    _chip("建议查 ", strong=str(len(result["suggest_check"])), kind="amber"),
+                )
+                must, suggest = st.columns(2)
+                with must, st.container(border=True):
+                    st.markdown(f"**🟥 必须改（{len(result['must_change'])}）**")
+                    if not result["must_change"]:
+                        st.caption("没有强制联动项。")
+                    for item in result["must_change"]:
+                        name = ref_display.get(item["target_ref"], "")
+                        st.write(f"- `{item['target_ref']}` {name}")
+                with suggest, st.container(border=True):
+                    st.markdown(f"**🟨 建议查（{len(result['suggest_check'])}）**")
+                    if not result["suggest_check"]:
+                        st.caption("没有建议复查项。")
+                    for item in result["suggest_check"]:
+                        name = ref_display.get(item["target_ref"], "")
+                        st.write(f"- `{item['target_ref']}` {name}")
+                _show_cost(result)
+
+# ------------------------------------------------------------------------------ create
+with tab_create:
+    if not _ready:
+        _show_project_required(content_root)
+    else:
+        draft_tab, tree_tab, barks_tab, flavor_tab = st.tabs(
+            ["📜 任务草稿", "🌳 对话树", "💬 台词变体", "🏺 物案文本"]
+        )
+        npc_rows = (
+            [row for row in inventory["entities"] if row["type"] == "npc"]
+            if inventory is not None
+            else []
+        )
+        npc_label = {row["id"]: f"{row['name']} · {row['id']}" for row in npc_rows}
+        with draft_tab:
+            draft_placeholder = "描述任务背景、目标与冲突……"
+            if inventory is not None and inventory["pois"]:
+                poi = inventory["pois"][0]
+                draft_placeholder = f"例如：为{poi['name']}写一个调查异常事件的支线任务。"
+            brief = st.text_area("任务简报", placeholder=draft_placeholder, height=100)
+            if st.button("📜 起草任务", type="primary") and brief.strip():
                 try:
-                    rolled = run_rollback_action(
+                    result = run_draft_action(
                         content_root,
-                        patch_id=patch["id"],
-                        operator=operator,
+                        brief=brief.strip(),
+                        sqlite_path=sqlite_path,
+                        llm_mode=llm_mode,
+                        llm_model=llm_model,
+                    )
+                except Exception as e:
+                    _fail(e)
+                else:
+                    _track_cost(result)
+                    quest = result["quest"]
+                    st.success(f"草稿 `{quest['id']}` 已入审阅台。")
+                    with st.container(border=True):
+                        st.markdown(f"**{quest.get('title', quest['id'])}**")
+                        if quest.get("objective"):
+                            st.write(quest["objective"])
+                        for stage in quest.get("stages", []):
+                            st.write(f"- {stage.get('summary', '')}")
+                    if result["issues"]:
+                        st.warning(f"自动审计发现 {len(result['issues'])} 条提示。")
+                    with st.expander("完整 JSON"):
+                        st.code(json.dumps(quest, ensure_ascii=False, indent=2), language="json")
+                    _show_cost(result)
+        with tree_tab:
+            if not npc_rows:
+                st.info("档案中还没有角色。先创世或导入角色设定。")
+            else:
+                participants = st.multiselect(
+                    "对话参与者",
+                    options=list(npc_label),
+                    format_func=lambda i: npc_label[i],
+                    key="tree_participants",
+                )
+                tree_brief = st.text_input(
+                    "对话简报", placeholder="一次对质 / 委托交接 / 雨夜重逢……"
+                )
+                quest_options = [""] + [row["id"] for row in (inventory or {}).get("quests", [])]
+                tree_quest = st.selectbox(
+                    "挂接任务（可选）",
+                    options=quest_options,
+                    format_func=lambda q: "不挂接" if not q else q,
+                )
+                cols = st.columns(2)
+                tree_max_nodes = cols[0].slider("最大节点数", 4, 24, 12)
+                tree_max_chars = cols[1].slider("单句最大字数", 20, 200, 120)
+                if (
+                    st.button("🌳 生成对话树", type="primary")
+                    and participants
+                    and tree_brief.strip()
+                ):
+                    try:
+                        result = run_dialogue_tree_action(
+                            content_root,
+                            participant_ids=participants,
+                            brief=tree_brief.strip(),
+                            quest_id=tree_quest or None,
+                            sqlite_path=sqlite_path,
+                            max_nodes=int(tree_max_nodes),
+                            max_chars=int(tree_max_chars),
+                            llm_mode=llm_mode,
+                            llm_model=llm_model,
+                        )
+                    except Exception as e:
+                        _fail(e)
+                    else:
+                        _track_cost(result)
+                        tree = result["tree"]
+                        st.success(f"对话树 `{tree['id']}` 已入审阅台。")
+                        name_of = {row["id"]: row["name"] for row in npc_rows}
+                        st.graphviz_chart(_tree_dot(tree, name_of), use_container_width=True)
+                        if result["structure_problems"]:
+                            st.warning("结构提示：" + "；".join(result["structure_problems"]))
+                        if result["lint_issues"]:
+                            st.warning(f"文本 lint 提示 {len(result['lint_issues'])} 条。")
+                        with st.expander("完整 JSON"):
+                            st.code(json.dumps(tree, ensure_ascii=False, indent=2), language="json")
+                        _show_cost(result)
+        with barks_tab:
+            if not npc_rows:
+                st.info("档案中还没有角色。先创世或导入角色设定。")
+                speaker_ids: list[str] = []
+            else:
+                speaker_ids = st.multiselect(
+                    "说话人",
+                    options=list(npc_label),
+                    format_func=lambda i: npc_label[i],
+                    key="barks_speakers",
+                )
+            topic = st.text_input("台词主题", placeholder="发现可疑人物 / 雨夜闲谈 / 战前动员")
+            cols = st.columns(2)
+            variants = cols[0].slider("每人变体数", 1, 10, 4)
+            max_chars = cols[1].slider("单条最大字数", 8, 200, 40)
+            if st.button("💬 批量生成台词", type="primary") and speaker_ids and topic.strip():
+                try:
+                    result = run_barks_action(
+                        content_root,
+                        speaker_ids=speaker_ids,
+                        topic=topic.strip(),
+                        sqlite_path=sqlite_path,
+                        variants_per_speaker=int(variants),
+                        max_chars=int(max_chars),
+                        llm_mode=llm_mode,
+                        llm_model=llm_model,
+                    )
+                except Exception as e:
+                    _fail(e)
+                else:
+                    _track_cost(result)
+                    _chips(
+                        _chip("入队 ", strong=str(len(result["accepted"])), kind="green"),
+                        _chip("被过滤 ", strong=str(len(result["rejected"])), kind="red"),
+                    )
+                    name_of = {row["id"]: row["name"] for row in npc_rows}
+                    for variant in result["accepted"]:
+                        speaker = name_of.get(variant["speaker_id"], variant["speaker_id"])
+                        st.write(f"- **{speaker}**：{variant['text']}")
+                    if result["rejected"]:
+                        with st.expander(f"被过滤的 {len(result['rejected'])} 条"):
+                            for rejected in result["rejected"]:
+                                codes = "、".join(rejected["issues"])
+                                st.write(f"- {rejected['text']}（{codes}）")
+                    _show_cost(result)
+        with flavor_tab:
+            category_label = (
+                st.pills(
+                    "类别",
+                    options=["物品", "技能", "成就"],
+                    default="物品",
+                    label_visibility="collapsed",
+                )
+                or "物品"
+            )
+            label_to_cat = {v: k for k, v in _FLAVOR_CATEGORY_LABEL.items()}
+            flavor_names = st.text_area(
+                "名称清单（每行一个）",
+                placeholder="雾隐灯\n枯叶军徽\n远航者的罗盘",
+                height=120,
+            )
+            cols = st.columns(2)
+            flavor_theme = cols[0].text_input("主题/风味", placeholder="雾隐城异象 / 旧王朝遗物")
+            flavor_max_chars = cols[1].slider("风味文本最大字数", 20, 300, 120)
+            names = [line.strip() for line in flavor_names.splitlines() if line.strip()]
+            if st.button("🏺 批量生成物案", type="primary") and names:
+                try:
+                    result = run_flavor_action(
+                        content_root,
+                        category=label_to_cat[category_label],
+                        names=names,
+                        theme=flavor_theme.strip(),
+                        sqlite_path=sqlite_path,
+                        max_chars=int(flavor_max_chars),
+                        llm_mode=llm_mode,
+                        llm_model=llm_model,
+                    )
+                except Exception as e:
+                    _fail(e)
+                else:
+                    _track_cost(result)
+                    _chips(
+                        _chip("入队 ", strong=str(len(result["accepted"])), kind="green"),
+                        _chip("被过滤 ", strong=str(len(result["rejected"])), kind="red"),
+                    )
+                    for entry in result["accepted"]:
+                        with st.container(border=True):
+                            st.markdown(f"**{entry['name']}**")
+                            if entry["description"]:
+                                st.write(entry["description"])
+                            if entry["flavor"]:
+                                st.caption(f"“{entry['flavor']}”")
+                    if result["rejected"]:
+                        with st.expander(f"被过滤的 {len(result['rejected'])} 条"):
+                            for rejected in result["rejected"]:
+                                codes = "、".join(rejected["issues"])
+                                st.write(f"- {rejected['name']}（{codes}）")
+                    _show_cost(result)
+
+# ------------------------------------------------------------------------------ review
+with tab_review:
+    if not _ready:
+        _show_project_required(content_root)
+    else:
+        _section("审阅台", "采纳即写入档案；origin 留痕不变")
+        if not operator.strip():
+            st.info("先在左侧填写操作者署名——每个审阅决定都会记录。", icon="✍️")
+        try:
+            queue = list_review_items_action(content_root, sqlite_path=sqlite_path)
+        except Exception as e:
+            _fail(e)
+        else:
+            items = queue["items"]
+            if not items:
+                st.success("待审队列为空。")
+            else:
+                type_counter = Counter(item["item_type"] for item in items)
+                filter_options = ["全部"] + [_ITEM_TYPE_LABEL.get(t, t) for t in type_counter]
+                label_to_type = {_ITEM_TYPE_LABEL.get(t, t): t for t in type_counter}
+                picked_label = (
+                    st.pills(
+                        "类型筛选",
+                        options=filter_options,
+                        default="全部",
+                        label_visibility="collapsed",
+                    )
+                    or "全部"
+                )
+                shown = [
+                    item
+                    for item in items
+                    if picked_label == "全部"
+                    or item["item_type"] == label_to_type.get(picked_label)
+                ]
+                st.caption(f"待审 {len(shown)} / {len(items)} 项")
+                name_of_all = (
+                    {row["id"]: row["name"] for row in inventory["entities"]}
+                    if inventory is not None
+                    else {}
+                )
+                for item in shown:
+                    label = _ITEM_TYPE_LABEL.get(item["item_type"], item["item_type"])
+                    payload = item["payload"]
+                    with st.container(border=True):
+                        head, accept_col, reject_col = st.columns([6, 1, 1])
+                        head.markdown(f"{label} ｜ `{item['object_ref']}`")
+                        if item["issue_refs"]:
+                            head.caption(f"关联问题指纹 {len(item['issue_refs'])} 条")
+                        if item["item_type"] == "quest_draft":
+                            title = payload.get("title") or payload.get("id", "")
+                            head.write(f"**{title}** — {payload.get('objective', '')}")
+                        elif item["item_type"] == "bark_variant":
+                            head.write(
+                                f"**{payload.get('speaker_id', '')}**：{payload.get('text', '')}"
+                            )
+                        elif item["item_type"] in {"world_seed", "import_draft"}:
+                            head.write(payload.get("summary", ""))
+                            bundle = payload.get("bundle") or {}
+                            head.caption(
+                                f"实体 {len(bundle.get('entities', {}))} ｜ "
+                                f"任务 {len(bundle.get('quests', {}))} ｜ "
+                                f"区域 {len(bundle.get('regions', {}))} ｜ "
+                                f"关系 {len(bundle.get('relations', []))}"
+                            )
+                            open_gaps = payload.get("open_gaps") or []
+                            if open_gaps:
+                                head.warning(f"仍有 {len(open_gaps)} 个未补全字段。")
+                        elif item["item_type"] == "dialogue_tree":
+                            head.write(f"**{payload.get('title', '')}**")
+                            node_count = len(payload.get("nodes") or {})
+                            head.caption(f"节点 {node_count}")
+                            with st.expander("对话树结构"):
+                                st.graphviz_chart(
+                                    _tree_dot(payload, name_of_all),
+                                    use_container_width=True,
+                                )
+                        elif item["item_type"] == "flavor_batch":
+                            entries = payload.get("entities") or []
+                            category = payload.get("category", "")
+                            cat_label = _FLAVOR_CATEGORY_LABEL.get(category, category)
+                            head.caption(f"{cat_label} × {len(entries)}")
+                            for entry in entries[:3]:
+                                head.write(f"- **{entry.get('name', '')}**")
+                        elif item["item_type"] == "patch_candidate":
+                            head.write(payload.get("rationale", ""))
+                        with st.expander("完整内容 JSON"):
+                            st.code(
+                                json.dumps(payload, ensure_ascii=False, indent=2),
+                                language="json",
+                            )
+                        decide_disabled = not operator.strip()
+                        if accept_col.button(
+                            "采纳",
+                            key=f"acc_{item['id']}",
+                            type="primary",
+                            disabled=decide_disabled,
+                        ):
+                            try:
+                                decided = decide_review_action(
+                                    content_root,
+                                    item_id=item["id"],
+                                    decision="accepted",
+                                    operator=operator,
+                                    sqlite_path=sqlite_path,
+                                )
+                            except Exception as e:
+                                _fail(e)
+                            else:
+                                _track_cost(decided)
+                                written = decided.get("written_ref")
+                                st.success(f"已采纳{f'，写入 {written}' if written else ''}。")
+                                st.rerun()
+                        if reject_col.button(
+                            "驳回", key=f"rej_{item['id']}", disabled=decide_disabled
+                        ):
+                            try:
+                                decide_review_action(
+                                    content_root,
+                                    item_id=item["id"],
+                                    decision="rejected",
+                                    operator=operator,
+                                    sqlite_path=sqlite_path,
+                                )
+                            except Exception as e:
+                                _fail(e)
+                            else:
+                                st.rerun()
+
+# ------------------------------------------------------------------------------ export
+with tab_export:
+    if not _ready:
+        _show_project_required(content_root)
+    else:
+        _section("导出交付", "manifest 对每个产物记 sha256")
+        cols = st.columns([2, 3])
+        with cols[0]:
+            engine = st.radio(
+                "目标引擎",
+                options=list(_ENGINE_META),
+                format_func=lambda e: _ENGINE_META[e][0],
+                captions=[meta[1] for meta in _ENGINE_META.values()],
+            )
+            output_dir = st.text_input("输出目录", value=".tmp/exports")
+            export_clicked = st.button("📦 导出", type="primary")
+        with cols[1]:
+            if export_clicked:
+                try:
+                    result = run_project_export_action(
+                        content_root,
+                        output_dir=output_dir,
+                        target_engine=engine,
                         sqlite_path=sqlite_path,
                     )
                 except Exception as e:
                     _fail(e)
                 else:
-                    st.success(f"已回滚 `{rolled['patch_id']}`。")
-                    st.rerun()
-
-# ----------------------------------------------------------------------------- create (draft/barks)
-with tab_create:
-    st.markdown("生成物只引用图谱内实体、生成即审计、**全部进入待审队列**——不会直接落盘。")
-    draft_tab, barks_tab = st.tabs(["📜 任务草稿", "💬 台词变体"])
-    with draft_tab:
-        brief = st.text_area("任务简报", placeholder="为雾脊山道写一个护送盐车去烽燧的支线任务……")
-        if st.button("起草任务", type="primary") and brief.strip():
-            try:
-                result = run_draft_action(
-                    content_root,
-                    brief=brief.strip(),
-                    sqlite_path=sqlite_path,
-                    llm_mode=llm_mode,
-                    llm_model=llm_model,
-                )
-            except Exception as e:
-                _fail(e)
+                    _track_cost(result)
+                    st.success(f"已导出到 `{result['output_dir']}`")
+                    files = result["manifest"]["files"]
+                    df = pd.DataFrame(
+                        [
+                            {
+                                "文件": file["path"],
+                                "类型": file["kind"],
+                                "sha256": file["sha256"][:16] + "…",
+                            }
+                            for file in files
+                        ]
+                    )
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                    _show_cost(result)
             else:
-                _track_cost(result)
-                st.success(
-                    f"草稿 `{result['quest']['id']}` 已入待审队列"
-                    f"（审计新增问题 {len(result['issues'])} 条）。"
-                )
-                st.code(
-                    json.dumps(result["quest"], ensure_ascii=False, indent=2), language="json"
-                )
-                _show_cost(result)
-    with barks_tab:
-        speakers = st.text_input("说话人实体 ID（逗号分隔）", placeholder="npc_r1_a, npc_r2_b")
-        topic = st.text_input("主题", placeholder="发现可疑商队靠近烽燧")
-        cols = st.columns(2)
-        variants = cols[0].number_input("每人变体数", min_value=1, max_value=10, value=4)
-        max_chars = cols[1].number_input("最大字数", min_value=8, max_value=200, value=40)
-        if st.button("批量生成台词", type="primary") and speakers.strip() and topic.strip():
-            try:
-                result = run_barks_action(
-                    content_root,
-                    speaker_ids=[s.strip() for s in speakers.split(",") if s.strip()],
-                    topic=topic.strip(),
-                    sqlite_path=sqlite_path,
-                    variants_per_speaker=int(variants),
-                    max_chars=int(max_chars),
-                    llm_mode=llm_mode,
-                    llm_model=llm_model,
-                )
-            except Exception as e:
-                _fail(e)
-            else:
-                _track_cost(result)
-                st.success(
-                    f"通过 lint：{len(result['accepted'])} 条入队 ｜ "
-                    f"被过滤：{len(result['rejected'])} 条"
-                )
-                for variant in result["accepted"]:
-                    st.write(f"- **{variant['speaker_id']}**：{variant['text']}")
-                _show_cost(result)
-
-# ----------------------------------------------------------------------------- export
-with tab_export:
-    st.markdown("导出确定性文件交给引擎或下游管线；manifest 对每个产物记 sha256。")
-    cols = st.columns([2, 2, 1])
-    output_dir = cols[0].text_input("输出目录", value=".tmp/exports")
-    engine = cols[1].selectbox("目标引擎", ["generic", "unreal", "unity"])
-    if cols[2].button("📦 导出", type="primary"):
-        try:
-            result = run_project_export_action(
-                content_root,
-                output_dir=output_dir,
-                target_engine=engine,
-                sqlite_path=sqlite_path,
-            )
-        except Exception as e:
-            _fail(e)
-        else:
-            _track_cost(result)
-            st.success(f"已导出到 `{result['output_dir']}`")
-            st.markdown("**产物清单**")
-            for file in result["manifest"]["files"]:
-                st.write(f"- `{file['path']}` （{file['kind']}） `sha256:{file['sha256'][:12]}…`")
-            _show_cost(result)
+                st.caption("选择引擎与输出目录后导出。")

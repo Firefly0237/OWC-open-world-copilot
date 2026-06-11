@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Round-2 real-LLM validation: the assist/repair paths that round 1 (QA) did not cover.
 
 Round 1 (see project_docs/真实LLM测试与本轮修复报告.md) proved grounded QA against
@@ -121,9 +120,7 @@ def run(model: str, workspace: Path) -> dict[str, Any]:
                         "top_ops": [
                             op.model_dump(mode="json")
                             for op in (
-                                result.candidates[0].candidate.ops
-                                if result.candidates
-                                else []
+                                result.candidates[0].candidate.ops if result.candidates else []
                             )
                         ],
                         "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -269,9 +266,7 @@ def run(model: str, workspace: Path) -> dict[str, Any]:
 
     totals["cost_usd"] = round(totals["cost_usd"], 6)
     report["totals"] = totals
-    report["passed"] = all(
-        section.get("passed", False) for section in report["sections"].values()
-    )
+    report["passed"] = all(section.get("passed", False) for section in report["sections"].values())
     return report
 
 

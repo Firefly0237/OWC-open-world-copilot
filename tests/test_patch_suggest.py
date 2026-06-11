@@ -118,9 +118,7 @@ def test_suggest_llm_candidate_ranked_and_validated() -> None:
             ]
         }
     )
-    service = PatchSuggestService(
-        bundle=bundle, audit_runner=_runner(), gateway=_gateway(payload)
-    )
+    service = PatchSuggestService(bundle=bundle, audit_runner=_runner(), gateway=_gateway(payload))
     result = service.suggest(issue)
     assert result.used_llm
     assert not result.parse_failed
@@ -145,9 +143,7 @@ def test_suggest_drops_candidate_that_introduces_new_error() -> None:
             ]
         }
     )
-    service = PatchSuggestService(
-        bundle=bundle, audit_runner=_runner(), gateway=_gateway(payload)
-    )
+    service = PatchSuggestService(bundle=bundle, audit_runner=_runner(), gateway=_gateway(payload))
     result = service.suggest(issue)
     assert result.rejected_count >= 1
     for item in result.candidates:  # the bad combo op never surfaces

@@ -34,6 +34,8 @@ class EntityType(str, Enum):
     ORGANIZATION = "organization"
     CONCEPT = "concept"
     TERM = "term"
+    SKILL = "skill"
+    ACHIEVEMENT = "achievement"
 
 
 class SourceRef(BaseModel):
@@ -161,6 +163,35 @@ class DialogueRef(ProvenanceMixin):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class DialogueChoice(BaseModel):
+    """A player option leading to another node (or ending the tree when next_node is None)."""
+
+    text: str
+    next_node: str | None = None
+    condition: str = ""
+
+
+class DialogueNode(BaseModel):
+    id: str
+    speaker_id: str | None = None
+    text: str = ""
+    choices: list[DialogueChoice] = Field(default_factory=list)
+    next_node: str | None = None  # linear continuation when there are no choices
+
+
+class DialogueTree(ProvenanceMixin):
+    """A branching conversation: nodes wired by choices/next links, entered at root_node."""
+
+    id: str
+    title: str = ""
+    quest_id: str | None = None
+    participants: list[str] = Field(default_factory=list)
+    root_node: str = ""
+    nodes: dict[str, DialogueNode] = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class LocalizedText(ProvenanceMixin):
     id: str
     text_key: str
@@ -194,6 +225,7 @@ class ContentBundle(BaseModel):
     regions: dict[str, RegionBrief] = Field(default_factory=dict)
     pois: dict[str, POI] = Field(default_factory=dict)
     dialogues: dict[str, DialogueRef] = Field(default_factory=dict)
+    dialogue_trees: dict[str, DialogueTree] = Field(default_factory=dict)
     localized_texts: dict[str, LocalizedText] = Field(default_factory=dict)
     terms: dict[str, Term] = Field(default_factory=dict)
     style_guides: dict[str, StyleGuide] = Field(default_factory=dict)

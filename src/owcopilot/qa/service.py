@@ -65,28 +65,22 @@ def refusal_answer(query: str, *, unresolved: list[str] | None = None) -> QAAnsw
 
 
 def _system_prompt(pack: ContextPack) -> str:
-    context_lines = [
-        f"- [{hit.ref}] {hit.title}: {hit.body}".strip()
-        for hit in pack.hits
-    ]
+    context_lines = [f"- [{hit.ref}] {hit.title}: {hit.body}".strip() for hit in pack.hits]
     return (
         "Answer using only the cited lore context. Return one JSON object with keys: "
         "answer, citations, confidence, mentioned_entities, unresolved_mentions, refused. "
-        "citations must be an array of objects like {\"ref\":\"entity:npc_id\"}; "
+        'citations must be an array of objects like {"ref":"entity:npc_id"}; '
         "confidence must be a number from 0 to 1. "
         "Every citation ref must be one of the provided refs. "
         "If the context contains relation_conflict or both allied_with and enemy_of "
         "for the same pair, state that the data is conflicting instead of choosing one. "
         "If the answer is not grounded in the context, set refused=true, citations=[], "
         "confidence=0, and put missing concepts in unresolved_mentions.\n\n"
-        "Lore context:\n"
-        + "\n".join(context_lines)
+        "Lore context:\n" + "\n".join(context_lines)
     )
 
 
 def _looks_like_refusal(answer: QAAnswer) -> bool:
     return answer.refused or (
-        not answer.citations
-        and answer.confidence <= 0
-        and bool(answer.unresolved_mentions)
+        not answer.citations and answer.confidence <= 0 and bool(answer.unresolved_mentions)
     )

@@ -21,6 +21,10 @@ class ReviewItemType(str, Enum):
     QUEST_DRAFT = "quest_draft"
     PATCH_CANDIDATE = "patch_candidate"
     BARK_VARIANT = "bark_variant"
+    WORLD_SEED = "world_seed"
+    IMPORT_DRAFT = "import_draft"
+    DIALOGUE_TREE = "dialogue_tree"
+    FLAVOR_BATCH = "flavor_batch"
 
 
 class ReviewItem(BaseModel):
@@ -60,6 +64,58 @@ class ReviewQueue:
             ReviewItem(
                 item_type=ReviewItemType.QUEST_DRAFT,
                 object_ref=f"quest:{quest_id}",
+                payload=payload,
+                issue_refs=issue_refs or [],
+            )
+        )
+
+    def add_world_seed(
+        self, payload: dict[str, Any], *, issue_refs: list[str] | None = None
+    ) -> ReviewItem:
+        seed_id = str(payload.get("id") or "unknown")
+        return self.add(
+            ReviewItem(
+                item_type=ReviewItemType.WORLD_SEED,
+                object_ref=f"world_seed:{seed_id}",
+                payload=payload,
+                issue_refs=issue_refs or [],
+            )
+        )
+
+    def add_import_draft(
+        self, payload: dict[str, Any], *, issue_refs: list[str] | None = None
+    ) -> ReviewItem:
+        draft_id = str(payload.get("id") or "unknown")
+        return self.add(
+            ReviewItem(
+                item_type=ReviewItemType.IMPORT_DRAFT,
+                object_ref=f"import_draft:{draft_id}",
+                payload=payload,
+                issue_refs=issue_refs or [],
+            )
+        )
+
+    def add_dialogue_tree(
+        self, payload: dict[str, Any], *, issue_refs: list[str] | None = None
+    ) -> ReviewItem:
+        tree_id = str(payload.get("id") or "unknown")
+        return self.add(
+            ReviewItem(
+                item_type=ReviewItemType.DIALOGUE_TREE,
+                object_ref=f"dialogue_tree:{tree_id}",
+                payload=payload,
+                issue_refs=issue_refs or [],
+            )
+        )
+
+    def add_flavor_batch(
+        self, payload: dict[str, Any], *, issue_refs: list[str] | None = None
+    ) -> ReviewItem:
+        batch_id = str(payload.get("id") or "unknown")
+        return self.add(
+            ReviewItem(
+                item_type=ReviewItemType.FLAVOR_BATCH,
+                object_ref=f"flavor_batch:{batch_id}",
                 payload=payload,
                 issue_refs=issue_refs or [],
             )

@@ -56,9 +56,7 @@ def test_real_mode_requires_provider_config(client: TestClient, monkeypatch) -> 
 
 
 def test_offline_mode_unaffected_by_fail_closed(client: TestClient) -> None:
-    response = client.post(
-        "/projects/demo/contents/quests:draft", json={"brief": "a quest"}
-    )
+    response = client.post("/projects/demo/contents/quests:draft", json={"brief": "a quest"})
     assert response.status_code == 200
 
 
@@ -73,9 +71,7 @@ def test_ask_uses_shared_cache_across_requests(client: TestClient) -> None:
 
 def test_suggest_request_supports_budget_field(client: TestClient) -> None:
     client.post("/projects/demo/audits", json={"persist": True})
-    response = client.post(
-        "/projects/demo/issues/nope/suggestions", json={"max_cost_usd": 0.01}
-    )
+    response = client.post("/projects/demo/issues/nope/suggestions", json={"max_cost_usd": 0.01})
     assert response.status_code == 404  # field accepted; unknown issue still 404
 
 

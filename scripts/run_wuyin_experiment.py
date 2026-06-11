@@ -83,7 +83,10 @@ def j(value: Any) -> Any:
 
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(j(payload), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(j(payload), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def read_json(path: Path) -> Any:
@@ -181,7 +184,11 @@ def opt_int(v: Any) -> int | None:
 
 
 def src(path: Path, row: dict[str, Any] | None = None) -> SourceRef:
-    return SourceRef(path=str(path), sheet=str(row.get("_sheet")) if row else None, row=int(row["_row"]) if row else None)
+    return SourceRef(
+        path=str(path),
+        sheet=str(row.get("_sheet")) if row else None,
+        row=int(row["_row"]) if row else None,
+    )
 
 
 def safe_id(value: str) -> str:
@@ -217,7 +224,11 @@ def quests_from(path: Path) -> list[Quest]:
                 dialogue_refs=split(r.get("对白引用")),
                 localization_keys=split(r.get("文本Key")),
                 tags=split(r.get("类型")),
-                metadata={"region_id": r.get("所属区域"), "required_level": r.get("需求等级"), "rewards_raw": r.get("奖励")},
+                metadata={
+                    "region_id": r.get("所属区域"),
+                    "required_level": r.get("需求等级"),
+                    "rewards_raw": r.get("奖励"),
+                },
                 source_ref=src(path, r),
             )
         )
@@ -258,7 +269,11 @@ def build_bundle() -> tuple[ContentBundle, dict[str, Any]]:
         )
         b.entities[e.id] = e
         if r.get("所属阵营"):
-            b.relations.append(Relation(source=e.id, target=str(r["所属阵营"]), kind="member_of", source_ref=src(p, r)))
+            b.relations.append(
+                Relation(
+                    source=e.id, target=str(r["所属阵营"]), kind="member_of", source_ref=src(p, r)
+                )
+            )
     p = DATA / "02_配置表" / "事件表.xlsx"
     for r in rows(p):
         order = opt_int(r.get("时间线序"))
@@ -295,7 +310,10 @@ def build_bundle() -> tuple[ContentBundle, dict[str, Any]]:
             level_min=level,
             level_max=level,
             tags=split(r.get("标签")),
-            metadata={"gameplay_purpose": r.get("玩法目的"), "linked_quests": split(r.get("关联任务"))},
+            metadata={
+                "gameplay_purpose": r.get("玩法目的"),
+                "linked_quests": split(r.get("关联任务")),
+            },
             source_ref=src(p, r),
         )
         b.pois[poi.id] = poi
@@ -309,7 +327,14 @@ def build_bundle() -> tuple[ContentBundle, dict[str, Any]]:
             source_ref=src(p, r),
         )
         if poi.controlling_faction:
-            b.relations.append(Relation(source=poi.id, target=poi.controlling_faction, kind="controlled_by", source_ref=src(p, r)))
+            b.relations.append(
+                Relation(
+                    source=poi.id,
+                    target=poi.controlling_faction,
+                    kind="controlled_by",
+                    source_ref=src(p, r),
+                )
+            )
     for q in quests_from(DATA / "02_配置表" / "任务表.xlsx"):
         b.quests[q.id] = q
     p = DATA / "02_配置表" / "任务事件引用表.xlsx"
@@ -337,9 +362,16 @@ def build_bundle() -> tuple[ContentBundle, dict[str, Any]]:
         for col, locale in (("zh-CN", "zh-CN"), ("en-US", "en-US")):
             if r.get(col):
                 did = f"loc_{safe_id(key)}_{safe_id(locale)}"
-                b.dialogues[did] = DialogueRef(id=did, text_key=key, text=str(r[col]), locale=locale, source_ref=src(p, r))
+                b.dialogues[did] = DialogueRef(
+                    id=did, text_key=key, text=str(r[col]), locale=locale, source_ref=src(p, r)
+                )
     p = DATA / "02_配置表" / "术语表.xlsx"
-    term_ids = {"真气": "term_zhenqi", "境界": "term_jingjie", "缉司": "term_jisi", "(敏感词)": "term_sensitive"}
+    term_ids = {
+        "真气": "term_zhenqi",
+        "境界": "term_jingjie",
+        "缉司": "term_jisi",
+        "(敏感词)": "term_sensitive",
+    }
     for i, r in enumerate(rows(p), start=1):
         canonical = str(r.get("标准词") or "")
         b.terms[term_ids.get(canonical, f"term_{i:03d}")] = Term(
@@ -363,7 +395,9 @@ def build_bundle() -> tuple[ContentBundle, dict[str, Any]]:
             )
         )
     md = DATA / "01_设定文档" / "雾隐山河_世界观总纲.md"
-    b.style_guides["style_guide"] = StyleGuide(id="style_guide", body=md.read_text(encoding="utf-8"), source_ref=SourceRef(path=str(md)))
+    b.style_guides["style_guide"] = StyleGuide(
+        id="style_guide", body=md.read_text(encoding="utf-8"), source_ref=SourceRef(path=str(md))
+    )
     notes["counts"] = counts(b)
     return b, notes
 
@@ -384,7 +418,11 @@ def flat(issue: Issue) -> dict[str, Any]:
 def has(issues: list[Issue], rule: str, target: str | None = None, text: str | None = None) -> bool:
     for issue in issues:
         blob = json.dumps(flat(issue), ensure_ascii=False)
-        if issue.rule_code == rule and (target is None or issue.target_ref == target) and (text is None or text in blob):
+        if (
+            issue.rule_code == rule
+            and (target is None or issue.target_ref == target)
+            and (text is None or text in blob)
+        ):
             return True
     return False
 
@@ -396,34 +434,85 @@ def audit_bundle(bundle: ContentBundle, baseline: AuditBaseline | None = None) -
     return result, time.perf_counter() - t0
 
 
-def seeded_eval(first: list[Issue], imports: list[Issue], inc: list[Issue], luban: dict[str, Any]) -> dict[str, Any]:
+def seeded_eval(
+    first: list[Issue], imports: list[Issue], inc: list[Issue], luban: dict[str, Any]
+) -> dict[str, Any]:
     checks = {
-        "E01": (has(first, "UNKNOWN_ENTITY_REF", "quest:q_200206", "npc_xu_sanqian"), "q_200206 unknown giver"),
-        "E02": (has(first, "DEPRECATED_ENTITY_REF", "quest:q_200205", "npc_yun_canzhi"), "deprecated NPC"),
-        "E03": (has(first, "MISSING_DIALOGUE_REF", "quest:q_200206", "dlg_200206_01"), "missing dialogue"),
-        "E04": (has(first, "MISSING_LOCALIZATION_KEY", "quest:q_200210"), "missing localization key"),
+        "E01": (
+            has(first, "UNKNOWN_ENTITY_REF", "quest:q_200206", "npc_xu_sanqian"),
+            "q_200206 unknown giver",
+        ),
+        "E02": (
+            has(first, "DEPRECATED_ENTITY_REF", "quest:q_200205", "npc_yun_canzhi"),
+            "deprecated NPC",
+        ),
+        "E03": (
+            has(first, "MISSING_DIALOGUE_REF", "quest:q_200206", "dlg_200206_01"),
+            "missing dialogue",
+        ),
+        "E04": (
+            has(first, "MISSING_LOCALIZATION_KEY", "quest:q_200210"),
+            "missing localization key",
+        ),
         "E05": (has(first, "TEXT_TOO_LONG_FOR_UI", "dialogue:dlg_200204_01"), "UI row max length"),
-        "E06": (has(first, "PLACEHOLDER_MISMATCH", "dialogue_key:DLG_200203_01"), "placeholder mismatch"),
-        "E07": (has(first, "TERM_INCONSISTENT", "dialogue:dlg_200202_01", "内力值"), "forbidden term 内力值"),
-        "E08": (has(first, "TERM_INCONSISTENT", "dialogue:dlg_200201_01", "氪金"), "forbidden term 氪金"),
-        "E09": (has(first, "MISSING_RELATION_ENDPOINT", text="fac_yanyun"), "missing relation endpoint"),
-        "E10": (has(first, "DUPLICATE_RELATION", "relation:fac_xuantie:enemy_of:fac_heifeng"), "duplicate relation"),
+        "E06": (
+            has(first, "PLACEHOLDER_MISMATCH", "dialogue_key:DLG_200203_01"),
+            "placeholder mismatch",
+        ),
+        "E07": (
+            has(first, "TERM_INCONSISTENT", "dialogue:dlg_200202_01", "内力值"),
+            "forbidden term 内力值",
+        ),
+        "E08": (
+            has(first, "TERM_INCONSISTENT", "dialogue:dlg_200201_01", "氪金"),
+            "forbidden term 氪金",
+        ),
+        "E09": (
+            has(first, "MISSING_RELATION_ENDPOINT", text="fac_yanyun"),
+            "missing relation endpoint",
+        ),
+        "E10": (
+            has(first, "DUPLICATE_RELATION", "relation:fac_xuantie:enemy_of:fac_heifeng"),
+            "duplicate relation",
+        ),
         "E11": (has(first, "RELATION_CONFLICT", text="fac_caobang"), "relation conflict"),
         "E12": (has(first, "PREREQ_CYCLE", "quest_prerequisites"), "prereq cycle"),
         "E13": (has(first, "FACTION_CONFLICT", "quest:q_200204"), "faction conflict"),
         "E14": (has(first, "TIMELINE_VIOLATION", "quest:q_200207"), "timeline violation"),
-        "E15": (has(first, "EVENT_RESULT_REFERENCED_TOO_EARLY", "quest:q_200208"), "event too early"),
-        "E16": (has(first, "CHARACTER_STATE_CONTRADICTION", "entity:npc_fang_qianli"), "dead+active"),
-        "E17": (has(first, "REGION_LEVEL_BOUNDS_INVALID", "region:reg_heifengling"), "bad region level"),
+        "E15": (
+            has(first, "EVENT_RESULT_REFERENCED_TOO_EARLY", "quest:q_200208"),
+            "event too early",
+        ),
+        "E16": (
+            has(first, "CHARACTER_STATE_CONTRADICTION", "entity:npc_fang_qianli"),
+            "dead+active",
+        ),
+        "E17": (
+            has(first, "REGION_LEVEL_BOUNDS_INVALID", "region:reg_heifengling"),
+            "bad region level",
+        ),
         "E18": (has(first, "POI_LEVEL_OUT_OF_BOUNDS", "poi:poi_caoyun_yard"), "POI out of bounds"),
-        "E19": (has(first, "POI_WITHOUT_NARRATIVE_PURPOSE", "poi:poi_shuiyue_temple"), "empty POI purpose"),
+        "E19": (
+            has(first, "POI_WITHOUT_NARRATIVE_PURPOSE", "poi:poi_shuiyue_temple"),
+            "empty POI purpose",
+        ),
         "E20": (has(first, "REGION_BANNED_CONTENT_USED", "poi:poi_xunshan_camp"), "banned content"),
         "E21": (has(first, "QUEST_MISSING_OBJECTIVE", "quest:q_200209"), "empty objective"),
         "E22": (has(imports, "IMPORT_CONFLICT", "quest:q_200201"), "import conflict"),
-        "E23": (has(inc, "PREREQ_MISSING", "quest:q_200303") or has(inc, "UNKNOWN_ENTITY_REF", "quest:q_200303", "q_200399"), "missing prereq probe"),
-        "E24": (any("INJECTION" in x.rule_code or "PROMPT" in x.rule_code for x in first), "prompt injection probe"),
+        "E23": (
+            has(inc, "PREREQ_MISSING", "quest:q_200303")
+            or has(inc, "UNKNOWN_ENTITY_REF", "quest:q_200303", "q_200399"),
+            "missing prereq probe",
+        ),
+        "E24": (
+            any("INJECTION" in x.rule_code or "PROMPT" in x.rule_code for x in first),
+            "prompt injection probe",
+        ),
         "E25": (bool(luban.get("supported")), "luban header probe"),
-        "E26": (has(inc, "UNKNOWN_ENTITY_REF", "quest:q_200302", "npc_bai_su"), "increment typo NPC"),
+        "E26": (
+            has(inc, "UNKNOWN_ENTITY_REF", "quest:q_200302", "npc_bai_su"),
+            "increment typo NPC",
+        ),
     }
     details = {k: {"detected": v[0], "note": v[1]} for k, v in checks.items()}
     surface = [f"E{i:02d}" for i in range(1, 23)] + ["E26"]
@@ -431,8 +520,12 @@ def seeded_eval(first: list[Issue], imports: list[Issue], inc: list[Issue], luba
         "details": details,
         "rule_surface_detected": sum(1 for x in surface if details[x]["detected"]),
         "rule_surface_total": len(surface),
-        "rule_surface_rate": round(sum(1 for x in surface if details[x]["detected"]) / len(surface), 4),
-        "probe_detected_or_supported": sum(1 for x in ["E23", "E24", "E25"] if details[x]["detected"]),
+        "rule_surface_rate": round(
+            sum(1 for x in surface if details[x]["detected"]) / len(surface), 4
+        ),
+        "probe_detected_or_supported": sum(
+            1 for x in ["E23", "E24", "E25"] if details[x]["detected"]
+        ),
         "probe_total": 3,
     }
 
@@ -442,8 +535,16 @@ def stage2_qa() -> dict[str, Any]:
     for i, q in enumerate(read_json(DATA / "04_答案卷" / "qa_questions.json"), start=1):
         query = q["q"]
         name = f"q{i:02d}_{safe_id(query)[:20]}"
-        c = run_cli(f"stage2_context_{i:02d}", ["context-pack", "--content-root", str(CONTENT), "--query", query], RUN / "stage2_qa" / f"{name}_context.json")
-        a = run_cli(f"stage2_ask_{i:02d}", ["ask", "--content-root", str(CONTENT), "--query", query, "--max-cost-usd", "0.01"], RUN / "stage2_qa" / f"{name}_ask.json")
+        c = run_cli(
+            f"stage2_context_{i:02d}",
+            ["context-pack", "--content-root", str(CONTENT), "--query", query],
+            RUN / "stage2_qa" / f"{name}_context.json",
+        )
+        a = run_cli(
+            f"stage2_ask_{i:02d}",
+            ["ask", "--content-root", str(CONTENT), "--query", query, "--max-cost-usd", "0.01"],
+            RUN / "stage2_qa" / f"{name}_ask.json",
+        )
         cp = c.get("parsed") or {}
         ap = a.get("parsed") or {}
         ans = ap.get("answer") or {}
@@ -462,7 +563,9 @@ def stage2_qa() -> dict[str, Any]:
                 "answer": ans,
                 "citations_in_context": all(x in refs for x in citations),
                 "refusal_correct": bool(ans.get("refused")) == bool(q.get("refuse")),
-                "semantic_contains_expected_term": any(x in str(ans.get("answer") or "") for x in expect_terms[:4]),
+                "semantic_contains_expected_term": any(
+                    x in str(ans.get("answer") or "") for x in expect_terms[:4]
+                ),
                 "ask_duration_sec": a["duration_sec"],
             }
         )
@@ -471,8 +574,12 @@ def stage2_qa() -> dict[str, Any]:
         "context_non_empty": sum(x["context_hit_count"] > 0 for x in results),
         "citation_valid": sum(x["citations_in_context"] for x in results),
         "refusal_correct": sum(x["refusal_correct"] for x in results),
-        "semantic_contains_expected_term": sum(x["semantic_contains_expected_term"] for x in results),
-        "mean_ask_duration_sec": round(sum(x["ask_duration_sec"] for x in results) / len(results), 4),
+        "semantic_contains_expected_term": sum(
+            x["semantic_contains_expected_term"] for x in results
+        ),
+        "mean_ask_duration_sec": round(
+            sum(x["ask_duration_sec"] for x in results) / len(results), 4
+        ),
         "results": results,
         "observation": "CLI ask uses OfflineQAProvider; answers are generic cited smoke-test outputs, not factual Chinese answers.",
     }
@@ -484,7 +591,16 @@ def stage3_increment(baseline: AuditBaseline) -> tuple[dict[str, Any], list[Issu
     path = DATA / "03_新版本提交" / "支线_雾隐走私案_v0610.xlsx"
     mapping = FieldMapping(
         default_kind="quest",
-        columns={"任务ID": "id", "任务名": "title", "接取NPC": "giver_npc", "发生地点": "location", "前置任务": "prerequisites", "任务目标": "objective", "对白引用": "dialogue_refs", "文本Key": "localization_keys"},
+        columns={
+            "任务ID": "id",
+            "任务名": "title",
+            "接取NPC": "giver_npc",
+            "发生地点": "location",
+            "前置任务": "prerequisites",
+            "任务目标": "objective",
+            "对白引用": "dialogue_refs",
+            "文本Key": "localization_keys",
+        },
     )
     t0 = time.perf_counter()
     dry = ingest_paths([path], store=ContentStore(CONTENT), dry_run=True, field_mapping=mapping)
@@ -500,7 +616,11 @@ def stage3_increment(baseline: AuditBaseline) -> tuple[dict[str, Any], list[Issu
             applied.append(q.id)
     store.save(bundle)
     audit, audit_sec = audit_bundle(bundle, baseline=baseline)
-    gate = run_cli("stage3_cli_audit_gate", ["audit", "--content-root", str(CONTENT), "--baseline", str(BASELINE), "--fail-on-error"], RUN / "stage3_cli_audit_gate.json")
+    gate = run_cli(
+        "stage3_cli_audit_gate",
+        ["audit", "--content-root", str(CONTENT), "--baseline", str(BASELINE), "--fail-on-error"],
+        RUN / "stage3_cli_audit_gate.json",
+    )
     out = {
         "duration_sec_ingest": round(ingest_sec, 4),
         "duration_sec_audit": round(audit_sec, 4),
@@ -523,8 +643,31 @@ def stage4_patch() -> dict[str, Any]:
     raw = json.dumps(
         {
             "candidates": [
-                {"ops": [{"op": "add", "path": "/quests/q_200210/localization_keys/-", "value": "QUEST_200210_NAME"}, {"op": "replace", "path": "/regions/reg_heifengling/level_min", "value": 18}], "rationale": "Fix E04/E17"},
-                {"ops": [{"op": "replace", "path": "/quests/q_200210/giver_npc", "value": "npc_missing_patch"}], "rationale": "Bad candidate"},
+                {
+                    "ops": [
+                        {
+                            "op": "add",
+                            "path": "/quests/q_200210/localization_keys/-",
+                            "value": "QUEST_200210_NAME",
+                        },
+                        {
+                            "op": "replace",
+                            "path": "/regions/reg_heifengling/level_min",
+                            "value": 18,
+                        },
+                    ],
+                    "rationale": "Fix E04/E17",
+                },
+                {
+                    "ops": [
+                        {
+                            "op": "replace",
+                            "path": "/quests/q_200210/giver_npc",
+                            "value": "npc_missing_patch",
+                        }
+                    ],
+                    "rationale": "Bad candidate",
+                },
             ]
         },
         ensure_ascii=False,
@@ -556,10 +699,26 @@ def stage4_patch() -> dict[str, Any]:
         "rollback_restored_content_hash": before_hash == content_hash(after_rollback),
         "candidate_count": len(candidates),
         "valid_candidate_count": len(valid),
-        "validations": [{"valid": v.valid, "introduced_errors": v.introduced_errors, "resolved_errors": v.resolved_errors, "candidate": v.candidate} for v in validations],
+        "validations": [
+            {
+                "valid": v.valid,
+                "introduced_errors": v.introduced_errors,
+                "resolved_errors": v.resolved_errors,
+                "candidate": v.candidate,
+            }
+            for v in validations
+        ],
         "applied_candidate_status": applied.candidate.status.value,
-        "issue_presence_after_apply": {"E04": has(after_audit.issues, "MISSING_LOCALIZATION_KEY", "quest:q_200210"), "E17": has(after_audit.issues, "REGION_LEVEL_BOUNDS_INVALID", "region:reg_heifengling")},
-        "issue_presence_after_rollback": {"E04": has(rollback_audit.issues, "MISSING_LOCALIZATION_KEY", "quest:q_200210"), "E17": has(rollback_audit.issues, "REGION_LEVEL_BOUNDS_INVALID", "region:reg_heifengling")},
+        "issue_presence_after_apply": {
+            "E04": has(after_audit.issues, "MISSING_LOCALIZATION_KEY", "quest:q_200210"),
+            "E17": has(after_audit.issues, "REGION_LEVEL_BOUNDS_INVALID", "region:reg_heifengling"),
+        },
+        "issue_presence_after_rollback": {
+            "E04": has(rollback_audit.issues, "MISSING_LOCALIZATION_KEY", "quest:q_200210"),
+            "E17": has(
+                rollback_audit.issues, "REGION_LEVEL_BOUNDS_INVALID", "region:reg_heifengling"
+            ),
+        },
     }
     write_json(RUN / "stage4_patch_results.json", out)
     return out
@@ -570,24 +729,59 @@ def stage5_impact() -> dict[str, Any]:
     try:
         analyzer = ImpactAnalyzer(project.graph)
         scenarios = {
-            "S1_delete_lu_wang": ChangeSet(changes=[Change(change_type=ChangeType.ENTITY_DELETE, target_ref="entity:npc_lu_wang")]),
-            "S2_change_canglang_faction": ChangeSet(changes=[Change(change_type=ChangeType.RELATION_CHANGE, target_ref="entity:fac_canglang")]),
-            "S3_rename_poi_node": ChangeSet(changes=[Change(change_type=ChangeType.ENTITY_RENAME, target_ref="poi:poi_wuyin_dock")]),
-            "S3_rename_poi_entity_mirror": ChangeSet(changes=[Change(change_type=ChangeType.ENTITY_RENAME, target_ref="entity:poi_wuyin_dock")]),
+            "S1_delete_lu_wang": ChangeSet(
+                changes=[
+                    Change(change_type=ChangeType.ENTITY_DELETE, target_ref="entity:npc_lu_wang")
+                ]
+            ),
+            "S2_change_canglang_faction": ChangeSet(
+                changes=[
+                    Change(change_type=ChangeType.RELATION_CHANGE, target_ref="entity:fac_canglang")
+                ]
+            ),
+            "S3_rename_poi_node": ChangeSet(
+                changes=[
+                    Change(change_type=ChangeType.ENTITY_RENAME, target_ref="poi:poi_wuyin_dock")
+                ]
+            ),
+            "S3_rename_poi_entity_mirror": ChangeSet(
+                changes=[
+                    Change(change_type=ChangeType.ENTITY_RENAME, target_ref="entity:poi_wuyin_dock")
+                ]
+            ),
         }
         results = {k: analyzer.analyze(v).model_dump(mode="json") for k, v in scenarios.items()}
     finally:
         project.close()
-    expected = {"quest:q_100101", "quest:q_100102", "quest:q_200204", "quest:q_200210", "dialogue:dlg_100101_01", "dialogue:dlg_200204_01"}
-    actual = {x["target_ref"] for x in results["S1_delete_lu_wang"]["items"] if x["level"] == "must_change"}
+    expected = {
+        "quest:q_100101",
+        "quest:q_100102",
+        "quest:q_200204",
+        "quest:q_200210",
+        "dialogue:dlg_100101_01",
+        "dialogue:dlg_200204_01",
+    }
+    actual = {
+        x["target_ref"]
+        for x in results["S1_delete_lu_wang"]["items"]
+        if x["level"] == "must_change"
+    }
     out = {
         "results": results,
         "recall_checks": {
             "S1_must_expected": sorted(expected),
             "S1_must_actual": sorted(actual),
             "S1_must_recall": round(len(expected & actual) / len(expected), 4),
-            "S3_poi_node_actual_must": sorted(x["target_ref"] for x in results["S3_rename_poi_node"]["items"] if x["level"] == "must_change"),
-            "S3_entity_mirror_actual_must": sorted(x["target_ref"] for x in results["S3_rename_poi_entity_mirror"]["items"] if x["level"] == "must_change"),
+            "S3_poi_node_actual_must": sorted(
+                x["target_ref"]
+                for x in results["S3_rename_poi_node"]["items"]
+                if x["level"] == "must_change"
+            ),
+            "S3_entity_mirror_actual_must": sorted(
+                x["target_ref"]
+                for x in results["S3_rename_poi_entity_mirror"]["items"]
+                if x["level"] == "must_change"
+            ),
         },
         "observation": "Relation edges are not first-class change targets; quest.location currently reaches entity:poi_* mirror rather than poi:* node.",
     }
@@ -597,13 +791,53 @@ def stage5_impact() -> dict[str, Any]:
 
 def stage6_gate() -> dict[str, Any]:
     store = ContentStore(CONTENT)
-    fix = apply_patch_to_store(store, PatchCandidate(ops=[PatchOperation(op=PatchOp.REPLACE, path="/quests/q_200302/giver_npc", value="npc_bai_susu")]), applied_by="wuyin_experiment")
-    green = run_cli("stage6_gate_after_e26_fix", ["audit", "--content-root", str(CONTENT), "--baseline", str(BASELINE), "--fail-on-error"], RUN / "stage6_gate_after_e26_fix.json")
-    broken = apply_patch_to_store(store, PatchCandidate(ops=[PatchOperation(op=PatchOp.REPLACE, path="/quests/q_200301/giver_npc", value="npc_missing_gate")]), applied_by="wuyin_experiment")
-    red = run_cli("stage6_gate_after_break", ["audit", "--content-root", str(CONTENT), "--baseline", str(BASELINE), "--fail-on-error"], RUN / "stage6_gate_after_break.json")
+    fix = apply_patch_to_store(
+        store,
+        PatchCandidate(
+            ops=[
+                PatchOperation(
+                    op=PatchOp.REPLACE, path="/quests/q_200302/giver_npc", value="npc_bai_susu"
+                )
+            ]
+        ),
+        applied_by="wuyin_experiment",
+    )
+    green = run_cli(
+        "stage6_gate_after_e26_fix",
+        ["audit", "--content-root", str(CONTENT), "--baseline", str(BASELINE), "--fail-on-error"],
+        RUN / "stage6_gate_after_e26_fix.json",
+    )
+    broken = apply_patch_to_store(
+        store,
+        PatchCandidate(
+            ops=[
+                PatchOperation(
+                    op=PatchOp.REPLACE, path="/quests/q_200301/giver_npc", value="npc_missing_gate"
+                )
+            ]
+        ),
+        applied_by="wuyin_experiment",
+    )
+    red = run_cli(
+        "stage6_gate_after_break",
+        ["audit", "--content-root", str(CONTENT), "--baseline", str(BASELINE), "--fail-on-error"],
+        RUN / "stage6_gate_after_break.json",
+    )
     rollback_patch_in_store(store, broken.rollback_ops)
-    green2 = run_cli("stage6_gate_after_restore", ["audit", "--content-root", str(CONTENT), "--baseline", str(BASELINE), "--fail-on-error"], RUN / "stage6_gate_after_restore.json")
-    out = {"fix_e26_status": fix.candidate.status.value, "after_fix_exit_code": green["exit_code"], "after_break_exit_code": red["exit_code"], "after_restore_exit_code": green2["exit_code"], "red_green_deterministic": green["exit_code"] == 0 and red["exit_code"] == 1 and green2["exit_code"] == 0}
+    green2 = run_cli(
+        "stage6_gate_after_restore",
+        ["audit", "--content-root", str(CONTENT), "--baseline", str(BASELINE), "--fail-on-error"],
+        RUN / "stage6_gate_after_restore.json",
+    )
+    out = {
+        "fix_e26_status": fix.candidate.status.value,
+        "after_fix_exit_code": green["exit_code"],
+        "after_break_exit_code": red["exit_code"],
+        "after_restore_exit_code": green2["exit_code"],
+        "red_green_deterministic": green["exit_code"] == 0
+        and red["exit_code"] == 1
+        and green2["exit_code"] == 0,
+    }
     write_json(RUN / "stage6_gate_results.json", out)
     return out
 
@@ -623,21 +857,68 @@ def stage7_generation() -> dict[str, Any]:
     try:
         dtel = TelemetryCollector()
         draft_gateway = LLMGateway(
-            providers={"cheap": FixedProvider({"id": "q_ai_wuyin_infiltration", "title": "雾隐潜声", "giver_npc": "npc_bai_susu", "location": "poi_wuyin_dock", "objective": "潜入雾隐渡口,探查私盐快船的出航暗号。", "prerequisites": ["q_100102"], "timeline_order": 23, "localization_keys": ["QUEST_AI_WUYIN_INFILTRATION_NAME"], "dialogue_refs": [], "tags": ["side", "infiltration"]}, 120, 80)},
+            providers={
+                "cheap": FixedProvider(
+                    {
+                        "id": "q_ai_wuyin_infiltration",
+                        "title": "雾隐潜声",
+                        "giver_npc": "npc_bai_susu",
+                        "location": "poi_wuyin_dock",
+                        "objective": "潜入雾隐渡口,探查私盐快船的出航暗号。",
+                        "prerequisites": ["q_100102"],
+                        "timeline_order": 23,
+                        "localization_keys": ["QUEST_AI_WUYIN_INFILTRATION_NAME"],
+                        "dialogue_refs": [],
+                        "tags": ["side", "infiltration"],
+                    },
+                    120,
+                    80,
+                )
+            },
             router=StaticRouter(mapping={"quest_draft": "cheap"}),
             cache=NoOpCache(),
             telemetry=dtel,
         )
-        draft = QuestDraftService(gateway=draft_gateway, context_builder=project.context_builder, audit_runner=AuditRunner(build_default_rule_registry()), bundle=project.bundle).draft_quest("雾隐泽潜入支线")
+        draft = QuestDraftService(
+            gateway=draft_gateway,
+            context_builder=project.context_builder,
+            audit_runner=AuditRunner(build_default_rule_registry()),
+            bundle=project.bundle,
+        ).draft_quest("雾隐泽潜入支线")
         btel = TelemetryCollector()
         bark_gateway = LLMGateway(
-            providers={"cheap": FixedProvider({"variants": ["站住,报上来路。", "雾里别乱走。", "陆忘的人也敢来?", "想靠氪金买命?", "这句台词故意写得非常非常非常非常长超过限制", "把船灯压低。", "刀收好,别惊了水。", "白素素在此。"]}, 80, 60)},
+            providers={
+                "cheap": FixedProvider(
+                    {
+                        "variants": [
+                            "站住,报上来路。",
+                            "雾里别乱走。",
+                            "陆忘的人也敢来?",
+                            "想靠氪金买命?",
+                            "这句台词故意写得非常非常非常非常长超过限制",
+                            "把船灯压低。",
+                            "刀收好,别惊了水。",
+                            "白素素在此。",
+                        ]
+                    },
+                    80,
+                    60,
+                )
+            },
             router=StaticRouter(mapping={"barks_batch": "cheap"}),
             cache=NoOpCache(),
             telemetry=btel,
         )
         queue = ReviewQueue()
-        barks = BarkBatchService(gateway=bark_gateway, bundle=project.bundle, review_queue=queue).generate(speaker_ids=["npc_bai_susu"], topic="发现入侵者", variants_per_speaker=8, max_chars=30, allowed_entity_ids={"npc_bai_susu"})
+        barks = BarkBatchService(
+            gateway=bark_gateway, bundle=project.bundle, review_queue=queue
+        ).generate(
+            speaker_ids=["npc_bai_susu"],
+            topic="发现入侵者",
+            variants_per_speaker=8,
+            max_chars=30,
+            allowed_entity_ids={"npc_bai_susu"},
+        )
         if queue.list_pending():
             queue.mark(queue.list_pending()[0].id, "approved")
     finally:
@@ -660,20 +941,37 @@ def stage7_generation() -> dict[str, Any]:
 
 
 def stage8_export() -> dict[str, Any]:
-    export = run_cli("stage8_export_unity", ["export", "--content-root", str(CONTENT), "--output-dir", str(EXPORTS), "--target-engine", "unity"], RUN / "stage8_export_cli.json")
+    export = run_cli(
+        "stage8_export_unity",
+        [
+            "export",
+            "--content-root",
+            str(CONTENT),
+            "--output-dir",
+            str(EXPORTS),
+            "--target-engine",
+            "unity",
+        ],
+        RUN / "stage8_export_cli.json",
+    )
     manifest_path = EXPORTS / "unity" / "manifest.json"
     bundle_path = EXPORTS / "unity" / "content_bundle.json"
     manifest = read_json(manifest_path)
     file_sha = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
     recorded = manifest["files"][0]["sha256"] if manifest.get("files") else None
-    golden = run_cli("stage8_eval_golden", ["eval-golden", "--workspace", str(RUN / "golden_workspace")], RUN / "stage8_eval_golden.json")
+    golden = run_cli(
+        "stage8_eval_golden",
+        ["eval-golden", "--workspace", str(RUN / "golden_workspace")],
+        RUN / "stage8_eval_golden.json",
+    )
     out = {
         "export_exit_code": export["exit_code"],
         "manifest_path": str(manifest_path),
         "bundle_path": str(bundle_path),
         "manifest": manifest,
         "content_hash_now": content_hash(ContentStore(CONTENT).load()),
-        "manifest_content_hash_matches_current": manifest.get("content_hash") == content_hash(ContentStore(CONTENT).load()),
+        "manifest_content_hash_matches_current": manifest.get("content_hash")
+        == content_hash(ContentStore(CONTENT).load()),
         "manifest_recorded_sha": recorded,
         "actual_bundle_file_sha256": file_sha,
         "manifest_file_sha_matches_bytes": recorded == file_sha,
@@ -740,7 +1038,9 @@ def write_report(summary: dict[str, Any]) -> None:
         "- 当前 `ask` 是离线 smoke test provider，返回泛化引用句，不生成事实答案；语义准确率因此失败。",
     ]
     for item in summary["stage2_qa"]["results"]:
-        lines.append(f"- Q{item['index']:02d} {item['type']}: hits={item['context_hit_count']}, refused={item['answer'].get('refused')}, citation_ok={item['citations_in_context']}, semantic_hit={item['semantic_contains_expected_term']}")
+        lines.append(
+            f"- Q{item['index']:02d} {item['type']}: hits={item['context_hit_count']}, refused={item['answer'].get('refused')}, citation_ok={item['citations_in_context']}, semantic_hit={item['semantic_contains_expected_term']}"
+        )
     lines += [
         "",
         "## 幕三 周版本增量提交",
@@ -810,10 +1110,40 @@ def main() -> int:
     RUN.mkdir(parents=True, exist_ok=True)
     reset_dir(CONTENT)
     reset_dir(EXPORTS)
-    write_json(RUN / "environment.json", {"python": sys.version, "root": ROOT, "data": DATA, "content": CONTENT, "reports": REPORTS, "exports": EXPORTS})
+    write_json(
+        RUN / "environment.json",
+        {
+            "python": sys.version,
+            "root": ROOT,
+            "data": DATA,
+            "content": CONTENT,
+            "reports": REPORTS,
+            "exports": EXPORTS,
+        },
+    )
 
-    run_cli("stage1_cli_md_dryrun", ["ingest", "--content-root", str(CONTENT), "--input", str(DATA / "01_设定文档" / "雾隐山河_世界观总纲.md")], RUN / "stage1_cli_md_dryrun.json")
-    run_cli("stage1_cli_xlsx_raw_dryrun", ["ingest", "--content-root", str(CONTENT), "--input", str(DATA / "02_配置表" / "阵营表.xlsx")], RUN / "stage1_cli_xlsx_raw_dryrun.json")
+    run_cli(
+        "stage1_cli_md_dryrun",
+        [
+            "ingest",
+            "--content-root",
+            str(CONTENT),
+            "--input",
+            str(DATA / "01_设定文档" / "雾隐山河_世界观总纲.md"),
+        ],
+        RUN / "stage1_cli_md_dryrun.json",
+    )
+    run_cli(
+        "stage1_cli_xlsx_raw_dryrun",
+        [
+            "ingest",
+            "--content-root",
+            str(CONTENT),
+            "--input",
+            str(DATA / "02_配置表" / "阵营表.xlsx"),
+        ],
+        RUN / "stage1_cli_xlsx_raw_dryrun.json",
+    )
     luban_raw = parse_paths([DATA / "02_配置表" / "NPC表_luban风格.xlsx"])
     luban_norm = normalize_raw_objects(luban_raw)
     luban = {
@@ -862,7 +1192,9 @@ def main() -> int:
         "totals": first.run.totals,
         "baseline_delta": first.run.baseline_delta,
         "issues": [flat(x) for x in first.issues],
-        "unexpected_issues": [flat(x) for x in first.issues if (x.rule_code, x.target_ref) not in expected_targets],
+        "unexpected_issues": [
+            flat(x) for x in first.issues if (x.rule_code, x.target_ref) not in expected_targets
+        ],
     }
     write_json(RUN / "stage1_audit_first.json", first_payload)
 
@@ -873,7 +1205,13 @@ def main() -> int:
     write_json(BASELINE, baseline)
     write_json(RUN / "stage1_baseline.json", baseline)
     bl, bl_sec = audit_bundle(bundle, baseline)
-    bl_payload = {"duration_sec": round(bl_sec, 4), "open_errors": len(bl.open_errors), "totals": bl.run.totals, "baseline_delta": bl.run.baseline_delta, "issues": [flat(x) for x in bl.issues]}
+    bl_payload = {
+        "duration_sec": round(bl_sec, 4),
+        "open_errors": len(bl.open_errors),
+        "totals": bl.run.totals,
+        "baseline_delta": bl.run.baseline_delta,
+        "issues": [flat(x) for x in bl.issues],
+    }
     write_json(RUN / "stage1_audit_with_baseline.json", bl_payload)
 
     qa = stage2_qa()
@@ -887,7 +1225,12 @@ def main() -> int:
     write_json(RUN / "seeded_error_evaluation.json", seeds)
 
     summary = {
-        "stage1": {"adapter_notes": notes, "audit_first": first_payload, "audit_with_baseline": bl_payload, "luban_probe": luban},
+        "stage1": {
+            "adapter_notes": notes,
+            "audit_first": first_payload,
+            "audit_with_baseline": bl_payload,
+            "luban_probe": luban,
+        },
         "stage2_qa": qa,
         "stage3_increment": stage3,
         "stage4_patch": stage4,
@@ -903,7 +1246,16 @@ def main() -> int:
     write_json(REPORTS / "experiment_summary_latest.json", summary)
     write_json(RUN / "command_log.json", COMMANDS)
     write_report(summary)
-    print(json.dumps({"run_dir": str(RUN), "report": str(RUN / "实验结果记录.md"), "summary": str(RUN / "experiment_summary.json")}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "run_dir": str(RUN),
+                "report": str(RUN / "实验结果记录.md"),
+                "summary": str(RUN / "experiment_summary.json"),
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 

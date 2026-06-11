@@ -1,5 +1,10 @@
 """Audit rule implementations."""
 
+from .dialogue_rules import (
+    DialogueTreeBrokenLinkRule,
+    DialogueTreeUnknownSpeakerRule,
+    DialogueTreeUnreachableNodeRule,
+)
 from .graph_rules import (
     DuplicateRelationRule,
     FactionConflictRule,
@@ -37,6 +42,9 @@ from .trust_rules import UnreviewedAIContentRule
 
 __all__ = [
     "CharacterStateContradictionRule",
+    "DialogueTreeBrokenLinkRule",
+    "DialogueTreeUnknownSpeakerRule",
+    "DialogueTreeUnreachableNodeRule",
     "DeprecatedEntityReferenceRule",
     "DuplicateRelationRule",
     "EventResultReferencedTooEarlyRule",

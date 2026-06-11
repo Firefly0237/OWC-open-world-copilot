@@ -6,6 +6,9 @@ from .registry import RuleRegistry
 from .rules import (
     CharacterStateContradictionRule,
     DeprecatedEntityReferenceRule,
+    DialogueTreeBrokenLinkRule,
+    DialogueTreeUnknownSpeakerRule,
+    DialogueTreeUnreachableNodeRule,
     DuplicateRelationRule,
     EventResultReferencedTooEarlyRule,
     FactionConflictRule,
@@ -54,6 +57,9 @@ def build_default_rule_registry() -> RuleRegistry:
             POILevelOutOfBoundsRule(),
             POIWithoutNarrativePurposeRule(),
             RegionBannedContentRule(),
+            DialogueTreeBrokenLinkRule(),
+            DialogueTreeUnknownSpeakerRule(),
+            DialogueTreeUnreachableNodeRule(),
             PromptInjectionRule(),
             UnreviewedAIContentRule(),
         ]

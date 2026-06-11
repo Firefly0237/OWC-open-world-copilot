@@ -16,9 +16,7 @@ def test_impact_analyzer_marks_direct_refs_as_must_change() -> None:
 
     result = ImpactAnalyzer(graph).analyze(
         ChangeSet(
-            changes=[
-                Change(change_type=ChangeType.ENTITY_RENAME, target_ref="entity:npc_aldric")
-            ]
+            changes=[Change(change_type=ChangeType.ENTITY_RENAME, target_ref="entity:npc_aldric")]
         )
     )
 
@@ -63,9 +61,7 @@ def test_impact_analyzer_ignores_unknown_change_target() -> None:
 
     result = ImpactAnalyzer(graph).analyze(
         ChangeSet(
-            changes=[
-                Change(change_type=ChangeType.ENTITY_DELETE, target_ref="entity:missing")
-            ]
+            changes=[Change(change_type=ChangeType.ENTITY_DELETE, target_ref="entity:missing")]
         )
     )
 

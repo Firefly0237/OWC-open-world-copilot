@@ -38,9 +38,7 @@ def test_project_context_reload_rebuilds_indexes_after_content_changes(tmp_path)
     try:
         store.save(
             ContentBundle(
-                entities={
-                    "npc_mara": Entity(id="npc_mara", name="Mara", type=EntityType.NPC)
-                }
+                entities={"npc_mara": Entity(id="npc_mara", name="Mara", type=EntityType.NPC)}
             )
         )
 

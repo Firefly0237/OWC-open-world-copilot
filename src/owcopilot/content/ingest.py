@@ -141,9 +141,7 @@ def merge_bundles(
 ) -> ContentBundle:
     merged = existing.model_copy(deep=True)
     conflicts = {
-        issue.target_ref
-        for issue in detect_import_conflicts(existing, incoming)
-        if skip_conflicts
+        issue.target_ref for issue in detect_import_conflicts(existing, incoming) if skip_conflicts
     }
     for object_type, old, new in _object_maps(merged, incoming):
         for object_id, value in new.items():

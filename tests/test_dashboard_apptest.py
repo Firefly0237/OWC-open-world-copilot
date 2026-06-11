@@ -23,9 +23,7 @@ from owcopilot.content.models import (  # noqa: E402
 )
 from owcopilot.content.store import ContentStore  # noqa: E402
 
-_DASHBOARD = str(
-    Path(__file__).resolve().parents[1] / "src" / "owcopilot" / "app" / "dashboard.py"
-)
+_DASHBOARD = str(Path(__file__).resolve().parents[1] / "src" / "owcopilot" / "app" / "dashboard.py")
 
 
 def _seed_project(tmp_path: Path) -> str:

@@ -16,6 +16,7 @@ from .models import (
     POI,
     ContentBundle,
     DialogueRef,
+    DialogueTree,
     Entity,
     LocalizedText,
     Quest,
@@ -47,6 +48,8 @@ class ContentStore:
             bundle.pois[poi.id] = poi
         for dialogue in self._load_json_dir(self.root / "dialogues", DialogueRef):
             bundle.dialogues[dialogue.id] = dialogue
+        for tree in self._load_json_dir(self.root / "dialogues" / "trees", DialogueTree):
+            bundle.dialogue_trees[tree.id] = tree
         for text in self._load_json_dir(self.root / "localization" / "texts", LocalizedText):
             bundle.localized_texts[text.id] = text
         for term in self._load_terms():
@@ -64,6 +67,7 @@ class ContentStore:
         self._write_json_dir(self.root / "quests", bundle.quests)
         self._write_json_dir(self.root / "pois", bundle.pois)
         self._write_json_dir(self.root / "dialogues", bundle.dialogues)
+        self._write_json_dir(self.root / "dialogues" / "trees", bundle.dialogue_trees)
         self._write_json_dir(self.root / "localization" / "texts", bundle.localized_texts)
         self._write_terms(bundle.terms)
         self._write_style_guides(bundle.style_guides)

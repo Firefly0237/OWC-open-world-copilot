@@ -44,8 +44,7 @@ def _term_issues(text: str, bundle: ContentBundle) -> list[AssistLintIssue]:
                     AssistLintIssue(
                         code="TERM_INCONSISTENT",
                         message=(
-                            f"Forbidden term '{forbidden}' used; use canonical "
-                            f"'{term.canonical}'"
+                            f"Forbidden term '{forbidden}' used; use canonical '{term.canonical}'"
                         ),
                         target=term.id,
                     )

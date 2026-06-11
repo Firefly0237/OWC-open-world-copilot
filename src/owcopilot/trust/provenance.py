@@ -65,6 +65,9 @@ def _objects(bundle: ContentBundle) -> list[tuple[str, str, ProvenanceMixin]]:
     objects.extend(("poi", object_id, obj) for object_id, obj in bundle.pois.items())
     objects.extend(("dialogue", object_id, obj) for object_id, obj in bundle.dialogues.items())
     objects.extend(
+        ("dialogue_tree", object_id, obj) for object_id, obj in bundle.dialogue_trees.items()
+    )
+    objects.extend(
         ("localized_text", object_id, obj) for object_id, obj in bundle.localized_texts.items()
     )
     objects.extend(("term", object_id, obj) for object_id, obj in bundle.terms.items())
@@ -73,7 +76,6 @@ def _objects(bundle: ContentBundle) -> list[tuple[str, str, ProvenanceMixin]]:
     )
     objects.extend((("relation", str(index), obj) for index, obj in enumerate(bundle.relations)))
     objects.extend(
-        ("quest_event_ref", object_id, obj)
-        for object_id, obj in bundle.quest_event_refs.items()
+        ("quest_event_ref", object_id, obj) for object_id, obj in bundle.quest_event_refs.items()
     )
     return objects

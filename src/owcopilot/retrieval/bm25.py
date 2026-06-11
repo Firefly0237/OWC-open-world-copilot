@@ -42,9 +42,7 @@ class BM25Retriever:
         if len(hits) < limit:
             seen = {hit.ref for hit in hits}
             hits.extend(
-                hit
-                for hit in self._fallback_search(query, limit=limit)
-                if hit.ref not in seen
+                hit for hit in self._fallback_search(query, limit=limit) if hit.ref not in seen
             )
         return hits[:limit]
 

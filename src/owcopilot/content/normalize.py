@@ -158,9 +158,7 @@ def _quest_event_ref_from_raw(raw: RawObject) -> QuestEventReference:
     quest_id = str(raw.data.get("quest_id") or "").strip()
     event_id = str(raw.data.get("event_id") or raw.data.get("event") or "").strip()
     ref_kind = _event_ref_kind(raw.data)
-    ref_id = str(
-        raw.data.get("id") or f"{quest_id}:{event_id}:{ref_kind.value}"
-    ).strip()
+    ref_id = str(raw.data.get("id") or f"{quest_id}:{event_id}:{ref_kind.value}").strip()
     return QuestEventReference(
         id=ref_id,
         quest_id=quest_id,
@@ -405,19 +403,13 @@ def _list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     if isinstance(value, str):
-        return [
-            item.strip()
-            for item in re.split(r"[;,；、|]", value)
-            if item.strip()
-        ]
+        return [item.strip() for item in re.split(r"[;,；、|]", value) if item.strip()]
     return [str(value).strip()] if str(value).strip() else []
 
 
 def _metadata(data: dict[str, Any], *, exclude: set[str]) -> dict[str, Any]:
     return {
-        key: value
-        for key, value in data.items()
-        if key not in exclude and value not in (None, "")
+        key: value for key, value in data.items() if key not in exclude and value not in (None, "")
     }
 
 
@@ -469,11 +461,15 @@ def _derive_relations(bundle: ContentBundle) -> None:
             )
             existing.add((entity.id, "member_of", faction))
     for poi in bundle.pois.values():
-        if poi.controlling_faction and (
-            poi.id,
-            "controlled_by",
-            poi.controlling_faction,
-        ) not in existing:
+        if (
+            poi.controlling_faction
+            and (
+                poi.id,
+                "controlled_by",
+                poi.controlling_faction,
+            )
+            not in existing
+        ):
             bundle.relations.append(
                 Relation(
                     source=poi.id,

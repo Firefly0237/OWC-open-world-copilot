@@ -72,9 +72,7 @@ class RelationshipConflictRule:
 
     def check(self, ctx: AuditContext) -> Iterable[Issue]:
         allied = {
-            _pair(r.source, r.target)
-            for r in ctx.bundle.relations
-            if r.kind == "allied_with"
+            _pair(r.source, r.target) for r in ctx.bundle.relations if r.kind == "allied_with"
         }
         enemies = {_pair(r.source, r.target) for r in ctx.bundle.relations if r.kind == "enemy_of"}
         for source, target in sorted(allied & enemies):
@@ -177,8 +175,7 @@ def _is_main_quest(quest: object) -> bool:
     tags = {str(tag).strip().lower() for tag in getattr(quest, "tags", [])}
     metadata = getattr(quest, "metadata", {}) or {}
     metadata_values = {
-        str(metadata.get(key, "")).strip().lower()
-        for key in ("type", "quest_type", "category")
+        str(metadata.get(key, "")).strip().lower() for key in ("type", "quest_type", "category")
     }
     return bool({"main", "mainline", "主线"} & (tags | metadata_values))
 
