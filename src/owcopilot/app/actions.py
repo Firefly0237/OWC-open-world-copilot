@@ -1,4 +1,9 @@
-"""UI actions that execute project workflow steps without importing Streamlit."""
+"""UI actions that execute project workflow steps without importing Streamlit.
+
+Each action opens the project, delegates to the same `pipeline/*` workflows the CLI and REST
+layers use, and returns a plain JSON-able dict. Keeping this layer Streamlit-free means the
+whole Workbench behaviour is unit-testable in core CI, and the dashboard file stays a thin shell.
+"""
 
 from __future__ import annotations
 
@@ -7,10 +12,32 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from ..assist.barks import BarkBatchService
+from ..assist.drafts import QuestDraftService
+from ..assist.offline import OfflineBarksProvider, OfflineQuestDraftProvider
+from ..assist.review_queue import ReviewQueue
+from ..audit.baseline import issue_fingerprint
+from ..audit.report import render_audit_markdown
+from ..content.hash import content_hash
 from ..exporters import EngineTarget, export_content_bundle
+from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
+from ..llm.cache import NoOpCache
+from ..llm.gateway import LLMGateway, OpenAICompatProvider
+from ..llm.router import StaticRouter
+from ..llm.telemetry import TelemetryCollector
 from ..pipeline.audit import run_full_audit
+from ..pipeline.patches import (
+    apply_patch_workflow,
+    find_issue,
+    rollback_patch_workflow,
+    suggest_for_issue,
+)
 from ..pipeline.project import ProjectContext
-from ..telemetry import deterministic_step, summarize_workflow
+from ..pipeline.review import decide_review_item
+from ..qa.offline import OfflineQAProvider
+from ..qa.service import LoreQAService
+from ..telemetry import deterministic_step, llm_step, summarize_workflow
+from ..util import load_dotenv
 
 
 def run_project_audit_action(
@@ -25,7 +52,325 @@ def run_project_audit_action(
             "audit_run": result.run.model_dump(mode="json"),
             "issues": [issue.model_dump(mode="json") for issue in result.issues],
             "open_errors": len(result.open_errors),
+            "markdown_report": render_audit_markdown(
+                result, content_hash=content_hash(project.bundle)
+            ),
             "cost_budget": _deterministic_cost_budget("audit_project"),
+        }
+
+
+def list_project_issues_action(
+    content_root: str | Path,
+    *,
+    sqlite_path: str | None = None,
+    severity: str | None = None,
+    rule_code: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        issues = project.sqlite_store.list_issues(
+            severity=severity, rule_code=rule_code, status=status
+        )
+        return {
+            "count": len(issues),
+            "issues": [issue.model_dump(mode="json") for issue in issues],
+            "cost_budget": _deterministic_cost_budget("list_issues"),
+        }
+
+
+def run_ask_action(
+    content_root: str | Path,
+    *,
+    query: str,
+    sqlite_path: str | None = None,
+    budget_tokens: int = 800,
+    llm_mode: str = "offline",
+    llm_model: str = "deepseek-v4-flash",
+    max_cost_usd: float | None = None,
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        gateway, telemetry = _gateway(
+            task="qa_answer",
+            llm_mode=llm_mode,
+            llm_model=llm_model,
+            offline_provider=OfflineQAProvider(),
+        )
+        answer = LoreQAService(
+            gateway=gateway,
+            context_builder=project.context_builder,
+            bundle=project.bundle,
+        ).ask(query, budget_tokens=budget_tokens)
+        telemetry_summary = telemetry.summary()
+        return {
+            "answer": answer.model_dump(mode="json"),
+            "llm_mode": llm_mode,
+            "telemetry": telemetry_summary,
+            "cost_budget": summarize_workflow(
+                [llm_step("ask_lore", telemetry_summary)], budget_usd=max_cost_usd
+            ).budget.model_dump(mode="json"),
+        }
+
+
+def run_impact_action(
+    content_root: str | Path,
+    *,
+    changes: list[dict[str, str]],
+    sqlite_path: str | None = None,
+    max_depth: int = 2,
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        parsed = [
+            Change(
+                change_type=ChangeType(str(spec["change_type"])),
+                target_ref=str(spec["target_ref"]),
+            )
+            for spec in changes
+        ]
+        result = ImpactAnalyzer(project.graph).analyze(
+            ChangeSet(changes=parsed), max_depth=max_depth
+        )
+        return {
+            "must_change": [
+                item.model_dump(mode="json")
+                for item in result.by_level(ImpactLevel.MUST_CHANGE)
+            ],
+            "suggest_check": [
+                item.model_dump(mode="json")
+                for item in result.by_level(ImpactLevel.SUGGEST_CHECK)
+            ],
+            "total": len(result.items),
+            "cost_budget": _deterministic_cost_budget("impact_of"),
+        }
+
+
+def run_suggest_action(
+    content_root: str | Path,
+    *,
+    issue_id: str,
+    sqlite_path: str | None = None,
+    max_candidates: int = 3,
+    budget_tokens: int = 600,
+    llm_mode: str = "offline",
+    llm_model: str = "deepseek-v4-flash",
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        issue = find_issue(project, issue_id)
+        gateway = None
+        telemetry = TelemetryCollector()
+        if llm_mode == "real":
+            gateway, telemetry = _gateway(
+                task="patch_suggest",
+                llm_mode=llm_mode,
+                llm_model=llm_model,
+                offline_provider=None,
+            )
+        result = suggest_for_issue(
+            project,
+            issue,
+            gateway=gateway,
+            max_candidates=max_candidates,
+            budget_tokens=budget_tokens,
+        )
+        telemetry_summary = telemetry.summary()
+        return {
+            "issue_id": issue_id,
+            "candidates": [
+                {
+                    "patch_id": ranked.candidate.id,
+                    "source": ranked.source,
+                    "target_resolved": ranked.target_resolved,
+                    "resolved_error_count": len(ranked.resolved_errors),
+                    "ops": [op.model_dump(mode="json") for op in ranked.candidate.ops],
+                    "rationale": ranked.candidate.rationale,
+                }
+                for ranked in result.candidates
+            ],
+            "rejected_count": result.rejected_count,
+            "parse_failed": result.parse_failed,
+            "used_llm": result.used_llm,
+            "telemetry": telemetry_summary,
+            "cost_budget": (
+                summarize_workflow([llm_step("patch_suggest", telemetry_summary)]).budget
+                if result.used_llm
+                else summarize_workflow([deterministic_step("patch_suggest")]).budget
+            ).model_dump(mode="json"),
+        }
+
+
+def list_patches_action(
+    content_root: str | Path,
+    *,
+    sqlite_path: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        patches = project.sqlite_store.list_patches(status=status)
+        return {
+            "count": len(patches),
+            "patches": patches,
+            "cost_budget": _deterministic_cost_budget("list_patches"),
+        }
+
+
+def run_apply_action(
+    content_root: str | Path,
+    *,
+    patch_id: str,
+    operator: str,
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        outcome = apply_patch_workflow(project, patch_id, operator=operator)
+        return {
+            "applied": outcome.applied,
+            "patch_id": outcome.patch_id,
+            "reason": outcome.reason,
+            "introduced_errors": outcome.introduced_errors,
+            "resolved_errors": outcome.resolved_errors,
+            "post_audit_open_errors": outcome.post_audit_open_errors,
+            "cost_budget": _deterministic_cost_budget("apply_patch"),
+        }
+
+
+def run_rollback_action(
+    content_root: str | Path,
+    *,
+    patch_id: str,
+    operator: str,
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        outcome = rollback_patch_workflow(project, patch_id, operator=operator)
+        return {
+            "rolled_back": outcome.rolled_back,
+            "patch_id": outcome.patch_id,
+            "post_audit_open_errors": outcome.post_audit_open_errors,
+            "cost_budget": _deterministic_cost_budget("rollback_patch"),
+        }
+
+
+def run_draft_action(
+    content_root: str | Path,
+    *,
+    brief: str,
+    sqlite_path: str | None = None,
+    budget_tokens: int = 800,
+    llm_mode: str = "offline",
+    llm_model: str = "deepseek-v4-flash",
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        gateway, telemetry = _gateway(
+            task="quest_draft",
+            llm_mode=llm_mode,
+            llm_model=llm_model,
+            offline_provider=OfflineQuestDraftProvider(),
+        )
+        result = QuestDraftService(
+            gateway=gateway,
+            context_builder=project.context_builder,
+            audit_runner=project.audit_runner,
+            bundle=project.bundle,
+        ).draft_quest(brief, budget_tokens=budget_tokens)
+        item = ReviewQueue(project.sqlite_store).add_quest_draft(
+            result.quest.model_dump(mode="json", exclude_none=True),
+            issue_refs=[issue_fingerprint(issue) for issue in result.issues],
+        )
+        telemetry_summary = telemetry.summary()
+        return {
+            "quest": result.quest.model_dump(mode="json", exclude_none=True),
+            "issues": [issue.model_dump(mode="json") for issue in result.issues],
+            "review_item_id": item.id,
+            "telemetry": telemetry_summary,
+            "cost_budget": summarize_workflow(
+                [llm_step("quest_draft", telemetry_summary)]
+            ).budget.model_dump(mode="json"),
+        }
+
+
+def run_barks_action(
+    content_root: str | Path,
+    *,
+    speaker_ids: list[str],
+    topic: str,
+    sqlite_path: str | None = None,
+    variants_per_speaker: int = 4,
+    max_chars: int = 40,
+    llm_mode: str = "offline",
+    llm_model: str = "deepseek-v4-flash",
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        unknown = [sid for sid in speaker_ids if sid not in project.bundle.entities]
+        if unknown:
+            raise ValueError(f"unknown speaker entities: {', '.join(unknown)}")
+        gateway, telemetry = _gateway(
+            task="barks_batch",
+            llm_mode=llm_mode,
+            llm_model=llm_model,
+            offline_provider=OfflineBarksProvider(),
+        )
+        result = BarkBatchService(
+            gateway=gateway,
+            bundle=project.bundle,
+            review_queue=ReviewQueue(project.sqlite_store),
+        ).generate(
+            speaker_ids=speaker_ids,
+            topic=topic,
+            variants_per_speaker=variants_per_speaker,
+            max_chars=max_chars,
+            allowed_entity_ids=set(speaker_ids),
+        )
+        telemetry_summary = telemetry.summary()
+        return {
+            "accepted": [
+                {"speaker_id": variant.speaker_id, "text": variant.text}
+                for variant in result.accepted
+            ],
+            "rejected": [
+                {
+                    "speaker_id": rejected.speaker_id,
+                    "text": rejected.text,
+                    "issues": [issue.code for issue in rejected.issues],
+                }
+                for rejected in result.rejected
+            ],
+            "review_item_ids": [item.id for item in result.review_items],
+            "telemetry": telemetry_summary,
+            "cost_budget": summarize_workflow(
+                [llm_step("barks_batch", telemetry_summary)]
+            ).budget.model_dump(mode="json"),
+        }
+
+
+def list_review_items_action(
+    content_root: str | Path,
+    *,
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        pending = ReviewQueue(project.sqlite_store).list_pending()
+        return {
+            "count": len(pending),
+            "items": [item.model_dump(mode="json") for item in pending],
+            "cost_budget": _deterministic_cost_budget("review_list"),
+        }
+
+
+def decide_review_action(
+    content_root: str | Path,
+    *,
+    item_id: str,
+    decision: str,
+    operator: str,
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    with _project(content_root, sqlite_path) as project:
+        outcome = decide_review_item(project, item_id, decision=decision, operator=operator)
+        return {
+            "decision": outcome.decision,
+            "item": outcome.item.model_dump(mode="json"),
+            "written_ref": outcome.written_ref,
+            "post_audit_open_errors": outcome.post_audit_open_errors,
+            "cost_budget": _deterministic_cost_budget("review_decide"),
         }
 
 
@@ -45,6 +390,27 @@ def run_project_export_action(
             "manifest": manifest.model_dump(mode="json"),
             "cost_budget": _deterministic_cost_budget("export_project"),
         }
+
+
+def _gateway(
+    *, task: str, llm_mode: str, llm_model: str, offline_provider: Any
+) -> tuple[LLMGateway, TelemetryCollector]:
+    telemetry = TelemetryCollector()
+    real = llm_mode == "real"
+    if real:
+        load_dotenv()  # pick up provider keys from .env; shell env wins
+        provider: Any = OpenAICompatProvider(model=llm_model)
+    else:
+        provider = offline_provider
+    gateway = LLMGateway(
+        providers={"cheap": provider},
+        router=StaticRouter(mapping={task: "cheap"}),
+        cache=NoOpCache(),
+        telemetry=telemetry,
+        max_retries=1 if real else 0,
+        retry_backoff_seconds=1.0 if real else 0.0,
+    )
+    return gateway, telemetry
 
 
 @contextmanager

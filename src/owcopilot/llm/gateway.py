@@ -55,6 +55,7 @@ class OpenAICompatProvider:
         api_key_env: str = "OPENAI_API_KEY",
         json_mode: bool = True,
         timeout: float | None = None,
+        max_output_tokens: int | None = None,
     ):
         self.model = model
         self.base_url = os.getenv(base_url_env)
@@ -64,6 +65,15 @@ class OpenAICompatProvider:
             timeout
             if timeout is not None
             else float(os.getenv("OWCOPILOT_PROVIDER_TIMEOUT_SEC", "30"))
+        )
+        # Cap runaway completions (cost + latency guard). Round-2 real testing saw a verbose
+        # draft burn 2238 output tokens / ~24s; the default leaves headroom above that while
+        # stopping multi-thousand-token runaways. A truncated JSON fails parsing and falls into
+        # the existing tolerant/retry paths, which is the intended trade.
+        self.max_output_tokens = (
+            max_output_tokens
+            if max_output_tokens is not None
+            else int(os.getenv("OWCOPILOT_MAX_OUTPUT_TOKENS", "3000"))
         )
 
     def _wants_json(self, system: str, user: str) -> bool:
@@ -80,6 +90,8 @@ class OpenAICompatProvider:
         kwargs: dict[str, Any] = (
             {"response_format": {"type": "json_object"}} if self._wants_json(system, user) else {}
         )
+        if self.max_output_tokens > 0:
+            kwargs["max_tokens"] = self.max_output_tokens
         resp = client.chat.completions.create(
             model=self.model,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],

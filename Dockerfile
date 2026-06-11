@@ -14,10 +14,11 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY src ./src
 
-# Build a self-contained venv with the API extra. No `dev`/`live`/`app` (streamlit) here.
+# Build a self-contained venv with the API + UI extras (one image serves both compose roles).
+# `dev`/`live` stay out: tests don't ship, and the real provider SDK is only pulled when needed.
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --upgrade pip \
- && /opt/venv/bin/pip install ".[serve]"
+ && /opt/venv/bin/pip install ".[serve,app,live]"
 
 # ---------- runtime ----------
 FROM python:3.12-slim AS runtime
@@ -34,9 +35,11 @@ WORKDIR /app
 # Non-root user (don't run the service as root).
 RUN useradd --create-home --uid 10001 appuser
 COPY --from=builder /opt/venv /opt/venv
+# Workbench theme travels with the image so `streamlit run` picks it up from the workdir.
+COPY .streamlit /app/.streamlit
 USER appuser
 
-EXPOSE 8000
+EXPOSE 8000 8501
 
 # Container-level healthcheck hits the app's /health (no extra tooling: use python's stdlib).
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

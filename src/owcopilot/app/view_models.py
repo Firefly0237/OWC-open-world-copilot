@@ -16,6 +16,7 @@ from ..content.hash import content_hash
 from ..exporters import EngineTarget, load_export_manifest
 from ..pipeline.project import ProjectContext
 from ..telemetry import deterministic_step, summarize_workflow
+from ..trust import summarize_provenance
 
 
 def build_project_overview(
@@ -42,6 +43,7 @@ def build_project_overview(
                 "nodes": len(project.graph.node_refs()),
                 "edges": len(project.graph.edge_refs()),
             },
+            "provenance": summarize_provenance(bundle).model_dump(mode="json"),
         }
 
 

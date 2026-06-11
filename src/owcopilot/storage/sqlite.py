@@ -23,6 +23,11 @@ class SQLiteStore:
         self.path = str(path)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
+        # WAL lets the Workbench read while the CLI writes (and vice versa); busy_timeout keeps
+        # short lock contention from surfacing as immediate "database is locked" errors.
+        # On :memory: databases WAL is a no-op and SQLite just reports "memory".
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.initialize()
 
     def close(self) -> None:
@@ -83,6 +88,11 @@ class SQLiteStore:
                 decided_by TEXT,
                 decided_at TEXT
             );
+
+            CREATE INDEX IF NOT EXISTS idx_patches_status ON patches(status);
+            CREATE INDEX IF NOT EXISTS idx_patches_issue_id ON patches(issue_id);
+            CREATE INDEX IF NOT EXISTS idx_review_items_status ON review_items(status);
+            CREATE INDEX IF NOT EXISTS idx_review_items_type ON review_items(item_type);
 
             CREATE TABLE IF NOT EXISTS content_index (
                 ref TEXT PRIMARY KEY,

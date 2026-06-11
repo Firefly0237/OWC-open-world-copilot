@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "owcopilot"
-version = "0.1.0"
-description = "Open-world game development AI copilot — engine-agnostic core with a consistency hub and a cost-engineering seam."
+version = "0.2.0"
+description = "Open-world game content workbench — content graph, deterministic consistency audits, cited lore QA, constrained AI assist with a human review gate, and engine-friendly exports."
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]

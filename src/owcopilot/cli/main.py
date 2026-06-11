@@ -13,7 +13,7 @@ from typing import Any
 from ..assist.barks import BarkBatchService
 from ..assist.drafts import QuestDraftService
 from ..assist.offline import OfflineBarksProvider, OfflineQuestDraftProvider
-from ..assist.review_queue import ReviewItemType, ReviewQueue
+from ..assist.review_queue import ReviewQueue
 from ..audit.baseline import AuditBaseline, issue_fingerprint
 from ..audit.default_rules import build_default_rule_registry
 from ..audit.models import IssueStatus
@@ -22,7 +22,6 @@ from ..audit.runner import AuditRunner
 from ..content.hash import content_hash
 from ..content.ingest import ingest_raw_objects, parse_paths
 from ..content.mapping import FieldMapping, apply_field_mapping
-from ..content.models import Quest, ReviewStatus
 from ..evaluation import run_acceptance_evaluation, run_golden_evaluation
 from ..exporters import EngineTarget, export_content_bundle
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
@@ -39,6 +38,7 @@ from ..pipeline.patches import (
     suggest_for_issue,
 )
 from ..pipeline.project import ProjectContext
+from ..pipeline.review import decide_review_item
 from ..qa.offline import OfflineQAProvider
 from ..qa.service import LoreQAService
 from ..telemetry import deterministic_step, llm_step, summarize_workflow
@@ -119,7 +119,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_project_args(ask)
     ask.add_argument("--query", required=True)
     ask.add_argument("--budget-tokens", type=int, default=800)
-    ask.add_argument("--max-cost-usd", type=float)
     _add_llm_args(ask)
     ask.set_defaults(handler=_cmd_ask)
 
@@ -259,6 +258,11 @@ def _add_llm_args(parser: argparse.ArgumentParser) -> None:
         "--llm-model",
         default=os.getenv("OWCOPILOT_CHEAP_MODEL", "deepseek-v4-flash"),
         help="Model id for --llm-mode real.",
+    )
+    parser.add_argument(
+        "--max-cost-usd",
+        type=float,
+        help="Soft budget: the cost_budget output flags over_budget when exceeded.",
     )
 
 
@@ -541,7 +545,9 @@ def _cmd_suggest(args: argparse.Namespace) -> int:
         )
         telemetry_summary = telemetry.summary()
         cost_budget = (
-            summarize_workflow([llm_step("patch_suggest", telemetry_summary)]).budget
+            summarize_workflow(
+                [llm_step("patch_suggest", telemetry_summary)], budget_usd=args.max_cost_usd
+            ).budget
             if result.used_llm
             else summarize_workflow([deterministic_step("patch_suggest")]).budget
         )
@@ -642,7 +648,7 @@ def _cmd_draft(args: argparse.Namespace) -> int:
                 "llm_mode": args.llm_mode,
                 "telemetry": telemetry_summary,
                 "cost_budget": summarize_workflow(
-                    [llm_step("quest_draft", telemetry_summary)]
+                    [llm_step("quest_draft", telemetry_summary)], budget_usd=args.max_cost_usd
                 ).budget.model_dump(mode="json"),
             },
             args,
@@ -694,7 +700,7 @@ def _cmd_barks(args: argparse.Namespace) -> int:
                 "llm_mode": args.llm_mode,
                 "telemetry": telemetry_summary,
                 "cost_budget": summarize_workflow(
-                    [llm_step("barks_batch", telemetry_summary)]
+                    [llm_step("barks_batch", telemetry_summary)], budget_usd=args.max_cost_usd
                 ).budget.model_dump(mode="json"),
             },
             args,
@@ -703,50 +709,27 @@ def _cmd_barks(args: argparse.Namespace) -> int:
 
 def _cmd_review(args: argparse.Namespace) -> int:
     with _project(args) as project:
-        queue = ReviewQueue(project.sqlite_store)
         if args.accept and args.reject:
             raise ValueError("--accept and --reject are mutually exclusive")
         if args.accept or args.reject:
             if not args.operator:
                 raise ValueError("--operator is required with --accept/--reject")
-        if args.accept:
-            item = queue.get(args.accept)
-            if item.item_type is ReviewItemType.PATCH_CANDIDATE:
-                raise ValueError(
-                    "patch candidates are applied with `owcopilot apply --patch-id ...`"
-                )
-            written_ref: str | None = None
-            if item.item_type is ReviewItemType.QUEST_DRAFT:
-                quest = Quest.model_validate(item.payload)
-                quest = quest.model_copy(update={"review_status": ReviewStatus.APPROVED})
-                bundle = project.content_store.load()
-                bundle.quests[quest.id] = quest
-                project.content_store.save(bundle)
-                project.reload()
-                written_ref = f"quest:{quest.id}"
-            decided = queue.mark(item.id, "accepted", decided_by=args.operator)
-            audit = run_full_audit(project, persist=True)
-            return _emit(
-                {
-                    "decision": "accepted",
-                    "item": decided.model_dump(mode="json"),
-                    "written_ref": written_ref,
-                    "post_audit_open_errors": len(audit.open_errors),
-                    "cost_budget": _deterministic_cost_budget("review_decide"),
-                },
-                args,
+            outcome = decide_review_item(
+                project,
+                args.accept or args.reject,
+                decision="accepted" if args.accept else "rejected",
+                operator=args.operator,
             )
-        if args.reject:
-            decided = queue.mark(args.reject, "rejected", decided_by=args.operator)
-            return _emit(
-                {
-                    "decision": "rejected",
-                    "item": decided.model_dump(mode="json"),
-                    "cost_budget": _deterministic_cost_budget("review_decide"),
-                },
-                args,
-            )
-        pending = queue.list_pending()
+            payload: dict[str, Any] = {
+                "decision": outcome.decision,
+                "item": outcome.item.model_dump(mode="json"),
+                "cost_budget": _deterministic_cost_budget("review_decide"),
+            }
+            if outcome.decision == "accepted":
+                payload["written_ref"] = outcome.written_ref
+                payload["post_audit_open_errors"] = outcome.post_audit_open_errors
+            return _emit(payload, args)
+        pending = ReviewQueue(project.sqlite_store).list_pending()
         return _emit(
             {
                 "count": len(pending),

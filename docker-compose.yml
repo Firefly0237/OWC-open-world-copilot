@@ -40,6 +40,28 @@ services:
         required: false
     restart: unless-stopped
 
+  # The Workbench UI (Streamlit), sharing the api image. Mount your content repos under /data
+  # so the sidebar "内容仓目录" can point at e.g. /data/content. The dashboard ships inside the
+  # installed package, so the command resolves its path at start ($$ defers to the container shell).
+  ui:
+    image: owcopilot-api:latest
+    depends_on:
+      - api
+    ports:
+      - "8501:8501"
+    environment:
+      OWCOPILOT_LLM_MODE: "${OWCOPILOT_LLM_MODE:-offline}"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./content:/data/content
+    command: >
+      sh -c "streamlit run
+      $$(python -c 'import owcopilot.app.dashboard as d; print(d.__file__)')
+      --server.port 8501 --server.address 0.0.0.0"
+    restart: unless-stopped
+
   # ---------------------------------------------------------------------------------------------
   # Optional: a shared cache for multi-instance deploys.
   # Uncomment this block and switch OWCOPILOT_CACHE_MODE to `redis` or `redis+semantic` when you want

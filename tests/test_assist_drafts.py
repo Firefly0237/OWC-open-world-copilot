@@ -68,6 +68,26 @@ def test_parse_quest_draft_converts_reward_mapping() -> None:
     assert quest.rewards[0].value == "75"
 
 
+def test_parse_quest_draft_aliases_reward_type_and_amount() -> None:
+    """Round-3 real run: reward objects shaped {'type': ..., 'amount': ...}."""
+    quest = parse_quest_draft(
+        json.dumps(
+            {
+                "title": "T",
+                "objective": "O",
+                "rewards": [
+                    {"type": "experience", "amount": 100},
+                    {"type": "currency", "amount": 50},
+                ],
+            }
+        )
+    )
+    assert quest.rewards[0].kind == "experience"
+    assert quest.rewards[0].value == "100"
+    assert quest.rewards[0].amount == 100
+    assert quest.rewards[1].kind == "currency"
+
+
 def test_parse_quest_draft_tolerates_null_lists_and_stage_aliases() -> None:
     """Second real run drift: prerequisites=null and stages using `description` for `summary`."""
     quest = parse_quest_draft(

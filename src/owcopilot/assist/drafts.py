@@ -103,12 +103,17 @@ def _normalize_quest_payload(data: dict) -> dict:
     elif isinstance(rewards, dict):
         if not rewards:
             normalized["rewards"] = []
-        elif "kind" in rewards or "value" in rewards:
+        elif "kind" in rewards or "value" in rewards or "type" in rewards:
             normalized["rewards"] = [rewards]
         else:  # {"gold": 75} style
             normalized["rewards"] = [
                 {"kind": str(kind), "value": str(value)} for kind, value in rewards.items()
             ]
+    if isinstance(normalized.get("rewards"), list):
+        normalized["rewards"] = [
+            _normalize_reward(reward) for reward in normalized["rewards"]
+            if isinstance(reward, dict)
+        ]
     stages = normalized.get("stages")
     if stages is None and "stages" in normalized:
         normalized["stages"] = []
@@ -123,6 +128,17 @@ def _normalize_quest_payload(data: dict) -> dict:
         ]
     if not isinstance(normalized.get("metadata"), dict):
         normalized.pop("metadata", None)
+    return normalized
+
+
+def _normalize_reward(reward: dict) -> dict:
+    """Round-3 real run: models say `{"type": "experience", "amount": 100}` — alias `type` to
+    `kind` and fall back to `amount` when `value` is absent."""
+    normalized = dict(reward)
+    if "kind" not in normalized and "type" in normalized:
+        normalized["kind"] = str(normalized.pop("type"))
+    if "value" not in normalized:
+        normalized["value"] = str(normalized.get("amount", ""))
     return normalized
 
 

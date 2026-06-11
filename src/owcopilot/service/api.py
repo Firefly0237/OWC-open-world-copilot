@@ -1,19 +1,27 @@
-"""FastAPI service exposing the consistency pipeline as a web API.
+"""FastAPI service: the v2 content-workbench API plus the legacy quest endpoints.
 
-The deployable surface: `intent` + a World Bible -> generate -> validate -> repair -> a
-lore-consistent Quest, plus the issues that were caught and the cost telemetry. It **reuses** the
-existing kernel (`build_grounded_app` -> orchestrator -> `LLMGateway`); the API layer only parses
-the request, calls the kernel, and serialises the result — no pipeline logic is duplicated here
-(guardrail #1: every model call still goes through the gateway).
+The v2 surface is resource-oriented per registered project (`OWCOPILOT_PROJECTS_JSON` maps
+project ids to content roots; request bodies never carry filesystem paths):
 
-What is intentionally NOT exposed: **engine landing** (`UnrealAdapter` / `UnityAdapter`). Those
-need a UE5/Unity editor running on the caller's machine, so they can't be a pure web endpoint
-The service returns the consistent Quest artifact; the local/desktop step imports it into the
-engine. See `project_docs/详细设计文档.md`.
+    POST /projects/{p}/audits                       deterministic audit (persist optional)
+    GET  /projects/{p}/issues                       persisted issues with filters
+    POST /projects/{p}/context:pack                 hybrid retrieval context pack
+    POST /projects/{p}/ask                          cited lore QA (refuses when ungrounded)
+    POST /projects/{p}/impact:analyze               change blast-radius (pure graph)
+    POST /projects/{p}/issues/{id}/suggestions      shadow-validated fix candidates
+    POST /projects/{p}/patches/{id}:apply|:rollback human write path, operator recorded
+    POST /projects/{p}/contents/quests:draft        AI draft -> review queue (never direct write)
+    POST /projects/{p}/assist/barks:batch           lint-filtered bark variants -> review queue
+    POST /projects/{p}/exports                      engine files under the project runtime dir
 
-Offline by default ($0, no keys) so it runs in CI and a `docker run` smoke test. Set
-`OWCOPILOT_LLM_MODE=real` (+ `OPENAI_BASE_URL` / `OPENAI_API_KEY`) to drive a real
-OpenAI-compatible provider with LLM-backed repair.
+Every model call goes through the single `LLMGateway` chokepoint backed by the app-lifetime
+cache, so cost control and telemetry stay uniform. Offline by default ($0, no keys; deterministic
+providers) for CI and the docker smoke test. Real mode is fail-closed twice over: the legacy
+global `OWCOPILOT_LLM_MODE=real` requires full provider + API-key config at startup, and the
+per-request `llm_mode=real` on v2 endpoints refuses unless `OWCOPILOT_API_KEY` gates the service.
+
+The legacy `POST /quests:generate` / `:batch_generate` endpoints (intent + World Bible -> a
+validated, repaired Quest) are kept for compatibility with earlier demos and the docker smoke.
 """
 
 from __future__ import annotations
@@ -43,12 +51,11 @@ from ..audit.default_rules import build_default_rule_registry
 from ..audit.runner import AuditRunner
 from ..content.hash import content_hash
 from ..content.models import ContentBundle
-from ..demo import load_dotenv
 from ..evaluation.quality import evaluate_quest_quality
 from ..exporters import EngineTarget, export_content_bundle
 from ..graph.index import build_content_graph
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
-from ..llm.cache import NoOpCache, build_cache_backend
+from ..llm.cache import build_cache_backend
 from ..llm.gateway import LLMGateway, LLMGatewayError, OpenAICompatProvider, StructuredFakeProvider
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
@@ -69,6 +76,7 @@ from ..retrieval.vector import VectorRetriever
 from ..storage import SQLiteStore
 from ..telemetry import deterministic_step, llm_step, summarize_workflow
 from ..trust.security import PathSecurityError, resolve_under_root
+from ..util import load_dotenv
 from ..worldbible.ingest import parse_worldbible_md
 from ..worldbible.models import WorldBible, world_bible_hash
 from ..worldbible.security import (
@@ -78,7 +86,7 @@ from ..worldbible.security import (
     validate_world_bible_text,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 # --------------------------------------------------------------------------- settings (env-driven)
@@ -321,6 +329,7 @@ class ProjectImpactResponse(BaseModel):
 class _LLMModeRequest(BaseModel):
     llm_mode: str = Field(default="offline", pattern="^(offline|real)$")
     llm_model: str | None = None
+    max_cost_usd: float | None = Field(default=None, ge=0)
 
 
 class ProjectSuggestRequest(_LLMModeRequest):
@@ -991,7 +1000,7 @@ def create_app() -> FastAPI:
         gateway = LLMGateway(
             providers={"cheap": OfflineQAProvider()},
             router=StaticRouter(mapping={"qa_answer": "cheap"}),
-            cache=NoOpCache(),
+            cache=service_cache,  # app-lifetime L1/L2: repeated lore questions cost $0
             telemetry=telemetry,
         )
         try:
@@ -1033,9 +1042,26 @@ def create_app() -> FastAPI:
         req: _LLMModeRequest, *, task: str, offline_provider: Any
     ) -> tuple[LLMGateway | None, TelemetryCollector]:
         """Per-request gateway for v2 assist tasks. `offline_provider=None` with offline mode
-        means the caller runs deterministically without any gateway (suggest)."""
+        means the caller runs deterministically without any gateway (suggest).
+
+        Real mode is fail-closed: it spends money, so it refuses to run unless the service is
+        key-gated AND a provider is configured. The shared app-lifetime cache backs every
+        request, so repeated questions/briefs hit L1/L2 instead of the provider."""
         telemetry = TelemetryCollector()
         if req.llm_mode == "real":
+            if not os.getenv("OWCOPILOT_API_KEY"):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "llm_mode=real over the API requires OWCOPILOT_API_KEY to be "
+                        "configured (fail-closed: real mode spends provider credit)"
+                    ),
+                )
+            if not os.getenv("OPENAI_API_KEY"):
+                raise HTTPException(
+                    status_code=503,
+                    detail="real provider is not configured (OPENAI_BASE_URL / OPENAI_API_KEY)",
+                )
             model: str = (
                 req.llm_model or os.getenv("OWCOPILOT_CHEAP_MODEL") or "deepseek-v4-flash"
             )
@@ -1047,7 +1073,7 @@ def create_app() -> FastAPI:
         gateway = LLMGateway(
             providers={"cheap": provider},
             router=StaticRouter(mapping={task: "cheap"}),
-            cache=NoOpCache(),
+            cache=service_cache,
             telemetry=telemetry,
             max_retries=1 if req.llm_mode == "real" else 0,
             retry_backoff_seconds=1.0 if req.llm_mode == "real" else 0.0,
@@ -1131,7 +1157,10 @@ def create_app() -> FastAPI:
             )
             telemetry_summary = telemetry.summary()
             cost_budget = (
-                summarize_workflow([llm_step("patch_suggest", telemetry_summary)]).budget
+                summarize_workflow(
+                    [llm_step("patch_suggest", telemetry_summary)],
+                    budget_usd=req.max_cost_usd,
+                ).budget
                 if result.used_llm
                 else summarize_workflow([deterministic_step("patch_suggest")]).budget
             )
@@ -1268,7 +1297,8 @@ def create_app() -> FastAPI:
                 review_item_id=item.id,
                 telemetry=telemetry_summary,
                 cost_budget=summarize_workflow(
-                    [llm_step("quest_draft", telemetry_summary)]
+                    [llm_step("quest_draft", telemetry_summary)],
+                    budget_usd=req.max_cost_usd,
                 ).budget.model_dump(mode="json"),
             )
         finally:
@@ -1331,7 +1361,8 @@ def create_app() -> FastAPI:
                 review_item_ids=[item.id for item in result.review_items],
                 telemetry=telemetry_summary,
                 cost_budget=summarize_workflow(
-                    [llm_step("barks_batch", telemetry_summary)]
+                    [llm_step("barks_batch", telemetry_summary)],
+                    budget_usd=req.max_cost_usd,
                 ).budget.model_dump(mode="json"),
             )
         finally:

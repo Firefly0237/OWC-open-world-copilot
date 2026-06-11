@@ -1,0 +1,16 @@
+# OWCopilot Workbench theme — dark "ink & bronze" with parchment text.
+# Palette intent: ink night-sky background (game-tool ambience, easy on long sessions),
+# bronze-gold primary for actions (the "seal/stamp" accent), parchment-tinted text.
+[theme]
+base = "dark"
+primaryColor = "#c9a227"
+backgroundColor = "#0f1115"
+secondaryBackgroundColor = "#171a21"
+textColor = "#e8e2d0"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

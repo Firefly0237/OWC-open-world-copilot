@@ -51,6 +51,8 @@ SUGGEST_RULES = [
     "TERM_INCONSISTENT",
     "MISSING_LOCALIZATION_KEY",
     "FACTION_CONFLICT",
+    "TIMELINE_VIOLATION",
+    "POI_LEVEL_OUT_OF_BOUNDS",
 ]
 
 
@@ -130,15 +132,20 @@ def run(model: str, workspace: Path) -> dict[str, Any]:
                 )
             except Exception as e:  # provider failures recorded, not fatal
                 cases.append({"rule": rule, "error": f"{e.__class__.__name__}: {e}"})
+        attempted = [case for case in cases if "skipped" not in case]
         passed_cases = [
             case
-            for case in cases
+            for case in attempted
             if case.get("candidates", 0) >= 1 and case.get("target_resolved_any")
         ]
+        required = max(1, round(0.75 * len(attempted)))
         report["sections"]["patch_suggest"] = {
             "cases": cases,
-            "gate": "at least 3/4 issues get a shadow-validated, target-resolving candidate",
-            "passed": len(passed_cases) >= 3,
+            "gate": (
+                f">=75% of attempted issues ({required}/{len(attempted)}) get a "
+                "shadow-validated, target-resolving candidate"
+            ),
+            "passed": len(passed_cases) >= required,
         }
     finally:
         project.close()

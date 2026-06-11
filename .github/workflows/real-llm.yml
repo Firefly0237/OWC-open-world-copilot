@@ -1,0 +1,46 @@
+name: Real-LLM validation (manual)
+
+# Spends real provider money, so it never runs automatically. Trigger it from the Actions tab
+# before a release; the offline acceptance benchmark in ci.yml remains the every-push gate.
+# Required repository secrets: OPENAI_BASE_URL, OPENAI_API_KEY.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Model id for the OpenAI-compatible provider
+        default: deepseek-v4-flash
+        required: true
+
+jobs:
+  real-llm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install (live extra for the real provider)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[live]"
+
+      - name: Run the real-LLM validation suite
+        env:
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python scripts/run_real_llm_round2.py \
+            --model "${{ inputs.model }}" \
+            --workspace .tmp/real_llm_ci \
+            --output .tmp/real_llm_ci/report.json
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-llm-report
+          path: .tmp/real_llm_ci/report.json

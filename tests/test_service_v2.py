@@ -127,11 +127,26 @@ def test_project_ask_returns_grounded_answer_and_telemetry() -> None:
     assert body["telemetry"]["calls"] == 1
     assert body["cost_budget"]["over_budget"] is False
 
-    over_budget = client.post(
+    # Repeating the SAME question is now an app-lifetime cache hit ($0), so it can no longer
+    # trip the budget. A distinct question misses the cache and exercises over_budget.
+    cached = client.post(
         "/projects/demo/ask",
         json={
             "content": _content_bundle(),
             "query": "Who is Aldric?",
+            "budget_tokens": 120,
+            "max_cost_usd": 0,
+        },
+    )
+    assert cached.status_code == 200
+    assert cached.json()["cost_budget"]["over_budget"] is False
+    assert cached.json()["telemetry"]["cache_hit_rate"] == 1.0
+
+    over_budget = client.post(
+        "/projects/demo/ask",
+        json={
+            "content": _content_bundle(),
+            "query": "Where is Northwatch located?",
             "budget_tokens": 120,
             "max_cost_usd": 0,
         },
