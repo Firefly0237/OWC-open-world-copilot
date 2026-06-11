@@ -20,3 +20,5 @@ dist/
 .tmp/
 # runtime DBs are rebuildable indexes; content files + baselines stay tracked
 *.sqlite
+# experiment data packs stay local (rebuildable from F:/wuyin)
+/*.zip
