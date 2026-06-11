@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from typing import Any
 import altair as alt
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from owcopilot.app.actions import (
     add_reference_action,
@@ -37,6 +39,7 @@ from owcopilot.app.actions import (
     list_project_issues_action,
     list_references_action,
     list_review_items_action,
+    probe_llm_connection_action,
     run_apply_action,
     run_ask_action,
     run_barks_action,
@@ -46,20 +49,25 @@ from owcopilot.app.actions import (
     run_flavor_action,
     run_impact_action,
     run_ingest_action,
+    run_lorebook_export_action,
     run_project_audit_action,
     run_project_export_action,
+    run_prose_check_action,
     run_rollback_action,
     run_suggest_action,
     run_world_seed_action,
     search_references_action,
     submit_extraction_action,
 )
+from owcopilot.app.genesis_templates import GENESIS_TEMPLATES
 from owcopilot.app.view_models import build_content_inventory, build_project_overview
+from owcopilot.app.workspaces import load_recent_workspaces, remember_workspace
 from owcopilot.content.models import ContentBundle
 from owcopilot.content.store import ContentStore
 from owcopilot.extraction import decode_document_bytes as decode_manuscript_bytes
 from owcopilot.impact import ChangeType
 from owcopilot.inspiration import decode_reference_bytes
+from owcopilot.llm.gateway import LLMGatewayError
 
 # ------------------------------------------------------------------------------ labels
 _VERSION = "v0.2.0"
@@ -113,6 +121,21 @@ _ENGINE_META = {
     "unity": ("Unity", "每任务 camelCase JSON + index 清单。"),
 }
 _FLAVOR_CATEGORY_LABEL = {"item": "物品", "skill": "技能", "achievement": "成就"}
+_PROVIDER_PRESETS = {
+    "DeepSeek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"},
+    "OpenAI": {"base_url": "https://api.openai.com/v1", "model": ""},
+    "Moonshot Kimi": {"base_url": "https://api.moonshot.cn/v1", "model": ""},
+    "智谱 GLM": {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": ""},
+    "自定义": {"base_url": "", "model": ""},
+}
+_PROBE_ERROR_TEXT = {
+    "auth": "鉴权失败（401）：请检查 API Key 是否正确、是否有该模型的权限。",
+    "rate_limit": "限流（429）：请求太频繁或额度受限，稍后再试。",
+    "timeout": "连接超时：检查网络，或确认 Base URL 是否正确。",
+    "connection": "无法连接：Base URL 可能不对，或网络不通。",
+    "missing_dependency": "未安装真实模型依赖：pip install owcopilot[live]",
+    "provider_error": "服务商返回错误：检查模型 ID 与账户状态。",
+}
 _GRAPH_NODE_COLOR = {
     "npc": "#3f6fae",
     "faction": "#a8842c",
@@ -453,11 +476,32 @@ def _show_cost(result: dict[str, Any]) -> None:
     st.caption(f"本次 ${used:.6f}{note} ｜ 会话累计 ${session_total:.6f}")
 
 
+def _call(label: str, fn, /, *args, **kwargs):
+    """Run an action under a themed spinner so long model calls feel alive."""
+    with st.spinner(label):
+        return fn(*args, **kwargs)
+
+
 def _fail(e: Exception) -> None:
-    st.error(f"{e.__class__.__name__}: {e}")
+    """Translate raw exceptions into actionable Chinese guidance (A7)."""
+    if isinstance(e, LLMGatewayError):
+        friendly = _PROBE_ERROR_TEXT.get(e.category, "模型调用失败，请稍后重试。")
+        st.error(f"{friendly}（任务：{e.task}，已重试 {e.attempts} 次）")
+    elif isinstance(e, json.JSONDecodeError):
+        st.error("模型返回的内容不是有效 JSON（可能被截断）。可以重试一次，或换更强的模型。")
+    elif isinstance(e, FileNotFoundError):
+        st.error("找不到目标文件或目录：请确认左侧内容仓路径是否正确。")
+    elif isinstance(e, ModuleNotFoundError):
+        st.error("缺少依赖：真实模式需要 pip install owcopilot[live]。")
+    elif isinstance(e, ValueError):
+        st.error(str(e))
+    else:
+        st.error(f"操作失败：{e}")
+    with st.expander("技术细节"):
+        st.code(f"{e.__class__.__name__}: {e}")
 
 
-def _dark_axes(chart: alt.Chart) -> alt.Chart:
+def _dark_axes(chart: Any) -> Any:
     return (
         chart.configure_axis(
             labelColor="#7b7261",
@@ -498,6 +542,26 @@ def _hbar_chart(rows: list[dict[str, Any]], *, y: str, x: str, height: int = 240
         .properties(height=height)
     )
     st.altair_chart(_dark_axes(chart), use_container_width=True)
+
+
+def _timeline_chart(rows: list[dict[str, Any]]) -> None:
+    df = pd.DataFrame(rows).sort_values("order")
+    base = alt.Chart(df).encode(
+        x=alt.X("order:Q", axis=alt.Axis(title=None, tickMinStep=1)),
+        y=alt.Y(
+            "title:N",
+            sort=alt.EncodingSortField("order"),
+            axis=alt.Axis(title=None),
+        ),
+        tooltip=["order", "title"],
+    )
+    chart = base.mark_line(color="#cfc4a6", strokeWidth=2) + base.mark_point(
+        filled=True, size=110, color="#b78f2e"
+    )
+    st.altair_chart(
+        _dark_axes(chart.properties(height=max(140, 28 * len(rows)))),
+        use_container_width=True,
+    )
 
 
 def _dot_graph(
@@ -620,6 +684,183 @@ def _initialize_content_root(content_root: str) -> None:
     ContentStore(root).save(ContentBundle())
 
 
+_TOUR_JS = """
+(function () {
+  const doc = window.parent.document;
+  if (doc.getElementById("ow-tour-ring")) { return; }
+  const style = doc.createElement("style");
+  style.id = "ow-tour-style";
+  style.textContent =
+    "#ow-tour-card{position:fixed;z-index:99999;width:330px;max-width:86vw;" +
+    "background:#fffdf7;border:1px solid #cfc4a6;border-radius:12px;" +
+    "box-shadow:0 8px 30px rgba(45,38,24,.28);padding:14px 16px;" +
+    "font-family:system-ui,sans-serif;color:#2d2618;transition:all .25s ease;}" +
+    "#ow-tour-card .t{font-weight:700;font-size:15px;margin-bottom:6px;color:#8a6a1e;}" +
+    "#ow-tour-card .b{font-size:13px;line-height:1.65;margin-bottom:10px;}" +
+    "#ow-tour-card .f{display:flex;justify-content:space-between;align-items:center;" +
+    "font-size:12px;color:#7b7261;}" +
+    "#ow-tour-card button{margin-left:6px;border:1px solid #cfc4a6;border-radius:8px;" +
+    "background:#f7f3e9;color:#2d2618;padding:4px 10px;font-size:12px;cursor:pointer;}" +
+    "#ow-tour-card button.primary{background:linear-gradient(180deg,#e7c873,#b78f2e);" +
+    "border-color:#a8842c;color:#2a2008;font-weight:600;}" +
+    "#ow-tour-shield{position:fixed;inset:0;z-index:99997;background:transparent;}" +
+    "#ow-tour-ring{position:fixed;z-index:99998;pointer-events:none;" +
+    "border:2px solid #b78f2e;border-radius:10px;transition:all .3s ease;" +
+    "box-shadow:0 0 0 9999px rgba(45,38,24,.45),0 0 18px rgba(183,143,46,.8);}";
+  doc.head.appendChild(style);
+  const shield = doc.createElement("div");
+  shield.id = "ow-tour-shield";
+  const ring = doc.createElement("div");
+  ring.id = "ow-tour-ring";
+  const card = doc.createElement("div");
+  card.id = "ow-tour-card";
+  doc.body.appendChild(shield);
+  doc.body.appendChild(ring);
+  doc.body.appendChild(card);
+  function findEl(spec) {
+    if (!spec) { return null; }
+    if (spec.kind === "tab" || spec.kind === "button") {
+      const sel = spec.kind === "tab" ? 'button[data-baseweb="tab"]' : "button";
+      const nodes = doc.querySelectorAll(sel);
+      for (const b of nodes) {
+        if (b.innerText.includes(spec.text)) { return b; }
+      }
+      return null;
+    }
+    if (spec.kind === "testid") {
+      return doc.querySelector('[data-testid="' + spec.value + '"]');
+    }
+    return doc.querySelector(spec.value || "");
+  }
+  function cleanup() {
+    [card, ring, shield, style].forEach(function (n) { if (n) { n.remove(); } });
+  }
+  function place(idx) {
+    const s = STEPS[idx];
+    const el = findEl(s.find);
+    if (!el) { next(idx + 1); return; }
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    setTimeout(function () {
+      const r = el.getBoundingClientRect();
+      ring.style.left = (r.left - 6) + "px";
+      ring.style.top = (r.top - 6) + "px";
+      ring.style.width = (r.width + 12) + "px";
+      ring.style.height = (r.height + 12) + "px";
+      const winH = window.parent.innerHeight;
+      const winW = window.parent.innerWidth;
+      const below = r.bottom + 14;
+      const top = below + 220 < winH ? below : Math.max(12, r.top - 224);
+      card.style.top = top + "px";
+      card.style.left = Math.min(Math.max(12, r.left), winW - 350) + "px";
+      const last = idx === STEPS.length - 1;
+      card.innerHTML =
+        '<div class="t">' + s.title + "</div>" +
+        '<div class="b">' + s.body + "</div>" +
+        '<div class="f"><span>' + (idx + 1) + " / " + STEPS.length + "</span><span>" +
+        '<button id="owt-prev">上一步</button>' +
+        '<button id="owt-skip">跳过</button>' +
+        '<button id="owt-next" class="primary">' + (last ? "完成" : "下一步") +
+        "</button></span></div>";
+      doc.getElementById("owt-prev").onclick = function () { next(idx - 1); };
+      doc.getElementById("owt-skip").onclick = cleanup;
+      doc.getElementById("owt-next").onclick = function () {
+        if (last) { cleanup(); } else { next(idx + 1); }
+      };
+    }, 360);
+  }
+  function next(idx) {
+    if (idx < 0) { idx = 0; }
+    if (idx >= STEPS.length) { cleanup(); return; }
+    const s = STEPS[idx];
+    if (s.click) {
+      const c = findEl(s.click);
+      if (c) { c.click(); }
+      setTimeout(function () { place(idx); }, 380);
+    } else {
+      place(idx);
+    }
+  }
+  doc.addEventListener(
+    "keydown",
+    function (ev) { if (ev.key === "Escape") { cleanup(); } },
+    { once: true }
+  );
+  next(0);
+})();
+"""
+
+
+def _render_tour() -> None:
+    """Game-style guided tour: a same-origin component script drives the parent DOM
+    (dimming cutout + highlight ring + step card). Tab switches are client-side in
+    Streamlit, so the tour can walk every page without rerunning the app; a missing
+    anchor degrades by skipping forward."""
+    steps = [
+        {
+            "find": {"kind": "testid", "value": "stSidebar"},
+            "title": "欢迎来到 OWCopilot",
+            "body": (
+                "左侧是控制台：选择世界档案目录、切换离线/真实模式、"
+                "填入你自己的 API Key。离线模式零费用，可以先把全流程走一遍。"
+            ),
+        },
+        {
+            "find": {"kind": "tab", "text": "创世工坊"},
+            "click": {"kind": "tab", "text": "创世工坊"},
+            "title": "创世工坊",
+            "body": (
+                "一句话生成完整世界草案；或把小说、剧本丢进「文稿提炼」"
+                "变成结构化设定；现成的策划表走「表格导入」。"
+            ),
+        },
+        {
+            "find": {"kind": "tab", "text": "创作工坊"},
+            "click": {"kind": "tab", "text": "创作工坊"},
+            "title": "创作工坊",
+            "body": "任务草稿、分支对话树、台词变体、物案文本——全部基于你的档案约束生成。",
+        },
+        {
+            "find": {"kind": "tab", "text": "审阅台"},
+            "click": {"kind": "tab", "text": "审阅台"},
+            "title": "审阅台",
+            "body": "AI 产物的唯一落盘通道：采纳才写入档案，驳回即丢弃，每个决定都有署名记录。",
+        },
+        {
+            "find": {"kind": "tab", "text": "世界问答"},
+            "click": {"kind": "tab", "text": "世界问答"},
+            "title": "世界问答",
+            "body": "随时问设定，回答逐条带引用；查不到的设定会明确拒答，不会编造。",
+        },
+        {
+            "find": {"kind": "tab", "text": "审计与修复"},
+            "click": {"kind": "tab", "text": "审计与修复"},
+            "title": "审计与修复",
+            "body": (
+                "一键体检 26 条一致性规则；新写的章节可以在「文稿体检」里"
+                "和档案对一遍；问题还能生成修复补丁。"
+            ),
+        },
+        {
+            "find": {"kind": "tab", "text": "导出交付"},
+            "click": {"kind": "tab", "text": "导出交付"},
+            "title": "导出交付",
+            "body": (
+                "交付引擎数据表（Unreal/Unity/JSON），或导出可阅读的世界设定集（Markdown/Word）。"
+            ),
+        },
+        {
+            "find": {"kind": "testid", "value": "stMetric"},
+            "title": "成本看得见",
+            "body": "每一步的花费都会展示在这里，还可以设置会话成本上限。教程结束，开始创造吧！",
+        },
+    ]
+    payload = json.dumps(steps, ensure_ascii=False)
+    components.html(
+        "<script>const STEPS = " + payload + ";\n" + _TOUR_JS + "</script>",
+        height=0,
+    )
+
+
 # ------------------------------------------------------------------------------ sidebar
 with st.sidebar:
     st.markdown(
@@ -632,6 +873,20 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     _section("工作区")
+    _recents = load_recent_workspaces()
+    if _recents:
+        _recent_pick = st.selectbox(
+            "最近打开",
+            ["（手动输入路径）"] + _recents,
+            help="最近使用过的世界档案，一键切换。",
+        )
+        if (
+            _recent_pick != "（手动输入路径）"
+            and st.session_state.get("_applied_recent") != _recent_pick
+        ):
+            st.session_state["_applied_recent"] = _recent_pick
+            st.session_state["content_root"] = _recent_pick
+            st.rerun()
     content_root = st.text_input(
         "内容仓目录",
         value=st.session_state.get("content_root", _default_content_root()),
@@ -653,9 +908,54 @@ with st.sidebar:
         options=["offline", "real"],
         horizontal=True,
         format_func=lambda m: "离线 · $0" if m == "offline" else "真实 · 计费",
-        help="离线：确定性应答器；真实：OpenAI 兼容模型（读取 .env）。",
+        help="离线：确定性应答器，零费用走全流程；真实：用你自己的 Key 调用模型。",
     )
-    llm_model = st.text_input("真实模型 ID", value="deepseek-v4-flash", disabled=llm_mode != "real")
+    with st.expander("🔑 模型接入（自备 Key）", expanded=False):
+        provider_preset = st.selectbox("服务商", list(_PROVIDER_PRESETS))
+        _preset = _PROVIDER_PRESETS[provider_preset]
+        base_url = st.text_input(
+            "Base URL", value=_preset["base_url"], key=f"base_url_{provider_preset}"
+        )
+        api_key = st.text_input(
+            "API Key",
+            type="password",
+            key="byo_api_key",
+            help="仅保存在本机本次会话的内存中；调用直连服务商，不经过任何中间服务器。",
+        )
+        llm_model = st.text_input(
+            "模型 ID",
+            value=_preset["model"] or "deepseek-v4-flash",
+            key=f"llm_model_{provider_preset}",
+            help="该服务商的具体模型名称。",
+        )
+        if base_url.strip():
+            os.environ["OPENAI_BASE_URL"] = base_url.strip()
+        if api_key.strip():
+            os.environ["OPENAI_API_KEY"] = api_key.strip()
+        if st.button("🔌 测试连接", use_container_width=True):
+            with st.spinner("正在测试连接…"):
+                probe = probe_llm_connection_action(
+                    base_url=base_url, api_key=api_key, model=llm_model
+                )
+            if probe["ok"]:
+                st.success(f"连接成功 · {probe['latency_ms']:.0f}ms")
+            else:
+                st.error(
+                    _PROBE_ERROR_TEXT.get(
+                        str(probe.get("category", "")),
+                        str(probe.get("message", "连接失败")),
+                    )
+                )
+    st.session_state.setdefault("session_cap", 0.0)
+    with st.expander("💰 成本护栏"):
+        st.number_input(
+            "会话成本上限（USD，0 = 不限）",
+            min_value=0.0,
+            step=0.05,
+            format="%.2f",
+            key="session_cap",
+            help="达到上限后真实模式的生成按钮会锁定，避免超支。",
+        )
     operator = st.text_input(
         "操作者署名",
         value=st.session_state.get("operator", ""),
@@ -663,9 +963,17 @@ with st.sidebar:
     )
     st.session_state["operator"] = operator
 
-    st.metric("本会话模型成本", f"${st.session_state.get('session_cost_usd', 0.0):.6f}")
-    if llm_mode == "real":
-        st.warning("真实模式会产生模型费用。", icon="💰")
+    _session_cost = st.session_state.get("session_cost_usd", 0.0)
+    _session_cap = float(st.session_state.get("session_cap", 0.0))
+    _llm_locked = llm_mode == "real" and _session_cap > 0 and _session_cost >= _session_cap
+    st.metric("本会话模型成本", f"${_session_cost:.6f}")
+    if _llm_locked:
+        st.error("已达会话成本上限，真实模式已锁定。调高上限或切回离线。", icon="🔒")
+    elif llm_mode == "real":
+        st.warning("真实模式按你的 Key 计费。", icon="💰")
+
+    if st.button("📖 新手引导", use_container_width=True):
+        st.session_state["start_tour"] = True
 
     with st.expander("高级设置"):
         sqlite_override = st.text_input(
@@ -678,6 +986,12 @@ with st.sidebar:
 
 # ------------------------------------------------------------------------------ hero
 _ready = _project_ready(content_root)
+if _ready and st.session_state.get("_remembered_root") != content_root:
+    try:
+        remember_workspace(content_root)
+    except OSError:
+        pass
+    st.session_state["_remembered_root"] = content_root
 _root_name = Path(content_root).name if content_root.strip() else "未选择"
 if llm_mode == "offline":
     _mode_chip = _chip("离线 · $0", kind="green")
@@ -706,6 +1020,9 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+if st.session_state.pop("start_tour", False):
+    _render_tour()
 
 inventory: dict[str, Any] | None = None
 if _ready:
@@ -830,6 +1147,15 @@ with tab_overview:
                         st.warning(f"{len(unreviewed)} 项 AI 内容未过人审：{preview}…")
                     else:
                         st.success("所有 AI 产物均已通过人工审核。")
+            if inventory is not None:
+                timeline_rows = [
+                    {"order": row["timeline_order"], "title": row["title"]}
+                    for row in inventory["quests"]
+                    if row.get("timeline_order") is not None
+                ]
+                if timeline_rows:
+                    _section("任务年表", "按时间序排列的故事脉络")
+                    _timeline_chart(timeline_rows)
             st.caption(f"内容指纹：`{overview['content_hash']}`")
 
 # ------------------------------------------------------------------------------ archive
@@ -1052,6 +1378,24 @@ with tab_genesis:
         )
         # ---------------------------------------------------------------- world seed
         with seed_tab:
+            picked_tpl = st.selectbox(
+                "从模板开始",
+                ["自定义"] + list(GENESIS_TEMPLATES),
+                help="选择题材模板一键填表，再随意修改。",
+            )
+            if picked_tpl != "自定义" and st.session_state.get("_tpl_applied") != picked_tpl:
+                _tpl = GENESIS_TEMPLATES[picked_tpl]
+                st.session_state["seed_idea"] = str(_tpl["idea"])
+                st.session_state["seed_genre"] = str(_tpl["game_genre"])
+                st.session_state["seed_fantasy"] = str(_tpl["player_fantasy"])
+                st.session_state["seed_styles"] = [str(s) for s in _tpl["world_styles"]]
+                st.session_state["seed_tone"] = str(_tpl["tone"])
+                st.session_state["seed_era"] = str(_tpl["era"])
+                st.session_state["seed_conflict"] = str(_tpl["core_conflict"])
+                st.session_state["seed_notes"] = str(_tpl["notes"])
+                st.session_state["_tpl_applied"] = picked_tpl
+                st.rerun()
+            st.session_state.setdefault("seed_styles", ["蒸汽朋克"])
             with st.form("world_seed_form"):
                 _section("核心设定")
                 idea = st.text_area(
@@ -1061,13 +1405,18 @@ with tab_genesis:
                         "玩家要在工会、王室和旧神信徒之间选择立场。"
                     ),
                     height=110,
+                    key="seed_idea",
                 )
                 c1, c2, c3 = st.columns(3)
                 medium = c1.selectbox(
                     "载体", ["开放世界游戏", "RPG", "视觉小说", "剧本", "小说设定"]
                 )
-                game_genre = c2.text_input("玩法/类型", placeholder="开放世界 RPG / 叙事冒险")
-                player_fantasy = c3.text_input("玩家身份", placeholder="流亡调查员 / 新任领主")
+                game_genre = c2.text_input(
+                    "玩法/类型", placeholder="开放世界 RPG / 叙事冒险", key="seed_genre"
+                )
+                player_fantasy = c3.text_input(
+                    "玩家身份", placeholder="流亡调查员 / 新任领主", key="seed_fantasy"
+                )
                 _section("风格与基调")
                 style_choices = st.multiselect(
                     "世界风格",
@@ -1081,14 +1430,18 @@ with tab_genesis:
                         "赛博朋克",
                         "历史架空",
                     ],
-                    default=["蒸汽朋克"],
+                    key="seed_styles",
                 )
                 c4, c5, c6 = st.columns(3)
                 other_style = c4.text_input("其他风格")
-                tone = c5.text_input("基调", placeholder="克制、悬疑、史诗")
-                era = c6.text_input("时代/技术水平", placeholder="工业革命早期 / 近未来")
+                tone = c5.text_input("基调", placeholder="克制、悬疑、史诗", key="seed_tone")
+                era = c6.text_input(
+                    "时代/技术水平", placeholder="工业革命早期 / 近未来", key="seed_era"
+                )
                 core_conflict = st.text_input(
-                    "核心冲突", placeholder="能源枯竭、王权更替、旧神复苏"
+                    "核心冲突",
+                    placeholder="能源枯竭、王权更替、旧神复苏",
+                    key="seed_conflict",
                 )
                 _section("参考用法")
                 c7, c8 = st.columns(2)
@@ -1107,16 +1460,21 @@ with tab_genesis:
                 npc_count = counts_cols[2].slider("角色", 1, 24, 8)
                 quest_count = counts_cols[3].slider("任务", 1, 16, 5)
                 term_count = counts_cols[4].slider("术语", 0, 24, 5)
-                notes = st.text_area("补充要求", height=70)
+                notes = st.text_area("补充要求", height=70, key="seed_notes")
                 submitted = st.form_submit_button(
-                    "🌍 生成世界草案", type="primary", use_container_width=True
+                    "🌍 生成世界草案",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=_llm_locked,
                 )
             if submitted and idea.strip():
                 styles = list(style_choices)
                 if other_style.strip():
                     styles.append(other_style.strip())
                 try:
-                    result = run_world_seed_action(
+                    result = _call(
+                        "正在推演世界草案…",
+                        run_world_seed_action,
                         content_root,
                         brief={
                             "idea": idea.strip(),
@@ -1188,7 +1546,7 @@ with tab_genesis:
                 manuscript_title = st.text_input("来源标题", placeholder="默认用文件名")
                 source_kind = st.selectbox("文稿类型", ["小说", "剧本", "设定笔记", "其他文稿"])
                 max_chunks = st.slider("最多处理分块", 1, 24, 12, help="每块约 3500 字")
-            if st.button("✒️ 开始提炼", type="primary"):
+            if st.button("✒️ 开始提炼", type="primary", disabled=_llm_locked):
                 raw_text = ""
                 title = manuscript_title.strip()
                 try:
@@ -1203,7 +1561,9 @@ with tab_genesis:
                     if not raw_text.strip():
                         st.warning("请先上传文件或粘贴文本。")
                     else:
-                        result = run_extraction_action(
+                        result = _call(
+                            "正在研读文稿、提炼设定…",
+                            run_extraction_action,
                             content_root,
                             title=title,
                             text=raw_text,
@@ -1275,9 +1635,11 @@ with tab_genesis:
                 gaps = draft.get("gaps") or []
                 if gaps:
                     _section("待补缺口", "逐项填写，或交给 AI 先补一版再确认")
-                    if st.button("🪄 AI 补全全部缺口"):
+                    if st.button("🪄 AI 补全全部缺口", disabled=_llm_locked):
                         try:
-                            filled = fill_extraction_gaps_action(
+                            filled = _call(
+                                "正在为缺口拟写建议…",
+                                fill_extraction_gaps_action,
                                 content_root,
                                 draft=draft,
                                 sqlite_path=sqlite_path,
@@ -1308,7 +1670,9 @@ with tab_genesis:
                         gap["ref"]: st.session_state.get(f"gap_{gap['ref']}", "") for gap in gaps
                     }
                     try:
-                        submit_result = submit_extraction_action(
+                        submit_result = _call(
+                            "正在整理草案、提交审阅…",
+                            submit_extraction_action,
                             content_root,
                             draft=draft,
                             answers=answers,
@@ -1347,8 +1711,13 @@ with tab_genesis:
                     target.write_bytes(file.getvalue())
                     saved.append(str(target))
                 try:
-                    ingest_dry = run_ingest_action(
-                        content_root, paths=saved, sqlite_path=sqlite_path, dry_run=True
+                    ingest_dry = _call(
+                        "正在解析表格…",
+                        run_ingest_action,
+                        content_root,
+                        paths=saved,
+                        sqlite_path=sqlite_path,
+                        dry_run=True,
                     )
                 except Exception as e:
                     _fail(e)
@@ -1391,7 +1760,9 @@ with tab_genesis:
                 allow_partial = commit_cols[0].checkbox("跳过冲突对象，写入其余", value=False)
                 if commit_cols[1].button("📥 执行导入", type="primary"):
                     try:
-                        committed = run_ingest_action(
+                        committed = _call(
+                            "正在写入档案…",
+                            run_ingest_action,
                             content_root,
                             paths=preview_state["paths"],
                             sqlite_path=sqlite_path,
@@ -1537,7 +1908,9 @@ with tab_ask:
 
         def _submit_question(question: str) -> None:
             try:
-                result = run_ask_action(
+                result = _call(
+                    "正在翻阅世界档案…",
+                    run_ask_action,
                     content_root,
                     query=question,
                     sqlite_path=sqlite_path,
@@ -1570,7 +1943,7 @@ with tab_ask:
             if suggestions:
                 cols = st.columns(len(suggestions))
                 for idx, suggestion in enumerate(suggestions):
-                    if cols[idx].button(suggestion, key=f"sug_q_{idx}"):
+                    if cols[idx].button(suggestion, key=f"sug_q_{idx}", disabled=_llm_locked):
                         _submit_question(suggestion)
         for entry in st.session_state["ask_history"]:
             with st.chat_message("user"):
@@ -1584,7 +1957,7 @@ with tab_ask:
         placeholder = "问问你的世界……"
         if inventory is not None and inventory["entities"]:
             placeholder = f"例如：{inventory['entities'][0]['name']}的背景是什么？"
-        question = st.chat_input(placeholder)
+        question = st.chat_input(placeholder, disabled=_llm_locked)
         if question:
             _submit_question(question)
 
@@ -1598,12 +1971,17 @@ with tab_audit:
             issues_listing = list_project_issues_action(content_root, sqlite_path=sqlite_path)
         except Exception as e:
             _fail(e)
-        check_tab, forge_tab = st.tabs(["🛡️ 一致性体检", "⚒️ 修复工坊"])
+        check_tab, forge_tab, prose_tab = st.tabs(["🛡️ 一致性体检", "⚒️ 修复工坊", "✍️ 文稿体检"])
         with check_tab:
             run_clicked = st.button("🛡️ 运行全量审计", type="primary")
             if run_clicked:
                 try:
-                    result = run_project_audit_action(content_root, sqlite_path=sqlite_path)
+                    result = _call(
+                        "正在执行一致性体检…",
+                        run_project_audit_action,
+                        content_root,
+                        sqlite_path=sqlite_path,
+                    )
                 except Exception as e:
                     _fail(e)
                 else:
@@ -1705,9 +2083,11 @@ with tab_audit:
                     options=issue_options,
                     format_func=lambda i: issue_label.get(i, i),
                 )
-                if st.button("⚒️ 生成修复候选", type="primary") and issue_id:
+                if st.button("⚒️ 生成修复候选", type="primary", disabled=_llm_locked) and issue_id:
                     try:
-                        result = run_suggest_action(
+                        result = _call(
+                            "正在锻造修复候选…",
+                            run_suggest_action,
                             content_root,
                             issue_id=issue_id,
                             sqlite_path=sqlite_path,
@@ -1751,7 +2131,9 @@ with tab_audit:
                                 disabled=apply_disabled,
                             ):
                                 try:
-                                    applied = run_apply_action(
+                                    applied = _call(
+                                        "正在应用补丁并复跑审计…",
+                                        run_apply_action,
                                         content_root,
                                         patch_id=candidate["patch_id"],
                                         operator=operator,
@@ -1788,7 +2170,9 @@ with tab_audit:
                         "回滚", key=f"rb_{patch['id']}", disabled=not operator.strip()
                     ):
                         try:
-                            rolled = run_rollback_action(
+                            rolled = _call(
+                                "正在回滚…",
+                                run_rollback_action,
                                 content_root,
                                 patch_id=patch["id"],
                                 operator=operator,
@@ -1799,6 +2183,60 @@ with tab_audit:
                         else:
                             st.success(f"已回滚 `{rolled['patch_id']}`。")
                             st.rerun()
+
+        with prose_tab:
+            st.caption("贴一段新章节，检查它和世界档案有没有打架——零模型成本。")
+            prose_text = st.text_area(
+                "文稿内容",
+                height=220,
+                key="prose_text",
+                placeholder="把新写的章节、对白或任务文本粘贴到这里…",
+            )
+            if st.button("✍️ 开始体检", type="primary") and prose_text.strip():
+                try:
+                    prose_result = _call(
+                        "正在比对文稿与档案…",
+                        run_prose_check_action,
+                        content_root,
+                        text=prose_text,
+                        sqlite_path=sqlite_path,
+                    )
+                except Exception as e:
+                    _fail(e)
+                else:
+                    _track_cost(prose_result)
+                    stats = prose_result["stats"]
+                    _chips(
+                        _chip("字数 ", strong=str(stats["chars"])),
+                        _chip(
+                            "识别到的设定 ",
+                            strong=str(stats["resolved_mentions"]),
+                            kind="green",
+                        ),
+                        _chip("禁用写法 ", strong=str(stats["forbidden_terms"]), kind="red"),
+                        _chip("未知名词 ", strong=str(stats["unknown_mentions"]), kind="amber"),
+                    )
+                    if prose_result["resolved_mentions"]:
+                        _chips(
+                            *(
+                                _chip(f"{m['name']} ", strong=str(m["count"]), kind="gold")
+                                for m in prose_result["resolved_mentions"][:12]
+                            )
+                        )
+                    if not prose_result["issues"]:
+                        st.success("没有发现与档案冲突的地方。")
+                    for issue in prose_result["issues"]:
+                        with st.container(border=True):
+                            kind_label = (
+                                "🟥 禁用写法"
+                                if issue["kind"] == "forbidden_term"
+                                else "🟨 未知名词"
+                            )
+                            st.markdown(f"{kind_label} ｜ {issue['message']}")
+                            st.caption(issue["excerpt"])
+                            if issue["suggestion"]:
+                                st.write(f"建议：{issue['suggestion']}")
+                    _show_cost(prose_result)
 
 # ------------------------------------------------------------------------------ impact
 with tab_impact:
@@ -1842,7 +2280,9 @@ with tab_impact:
             submitted = st.form_submit_button("🕸️ 分析影响", type="primary")
         if submitted and target_ref:
             try:
-                result = run_impact_action(
+                result = _call(
+                    "正在遍历影响图谱…",
+                    run_impact_action,
                     content_root,
                     changes=[{"change_type": change_type, "target_ref": target_ref}],
                     sqlite_path=sqlite_path,
@@ -1894,9 +2334,11 @@ with tab_create:
                 poi = inventory["pois"][0]
                 draft_placeholder = f"例如：为{poi['name']}写一个调查异常事件的支线任务。"
             brief = st.text_area("任务简报", placeholder=draft_placeholder, height=100)
-            if st.button("📜 起草任务", type="primary") and brief.strip():
+            if st.button("📜 起草任务", type="primary", disabled=_llm_locked) and brief.strip():
                 try:
-                    result = run_draft_action(
+                    result = _call(
+                        "正在起草任务…",
+                        run_draft_action,
                         content_root,
                         brief=brief.strip(),
                         sqlite_path=sqlite_path,
@@ -1943,12 +2385,14 @@ with tab_create:
                 tree_max_nodes = cols[0].slider("最大节点数", 4, 24, 12)
                 tree_max_chars = cols[1].slider("单句最大字数", 20, 200, 120)
                 if (
-                    st.button("🌳 生成对话树", type="primary")
+                    st.button("🌳 生成对话树", type="primary", disabled=_llm_locked)
                     and participants
                     and tree_brief.strip()
                 ):
                     try:
-                        result = run_dialogue_tree_action(
+                        result = _call(
+                            "正在编织对话树…",
+                            run_dialogue_tree_action,
                             content_root,
                             participant_ids=participants,
                             brief=tree_brief.strip(),
@@ -1989,9 +2433,15 @@ with tab_create:
             cols = st.columns(2)
             variants = cols[0].slider("每人变体数", 1, 10, 4)
             max_chars = cols[1].slider("单条最大字数", 8, 200, 40)
-            if st.button("💬 批量生成台词", type="primary") and speaker_ids and topic.strip():
+            if (
+                st.button("💬 批量生成台词", type="primary", disabled=_llm_locked)
+                and speaker_ids
+                and topic.strip()
+            ):
                 try:
-                    result = run_barks_action(
+                    result = _call(
+                        "正在批量撰写台词…",
+                        run_barks_action,
                         content_root,
                         speaker_ids=speaker_ids,
                         topic=topic.strip(),
@@ -2039,9 +2489,11 @@ with tab_create:
             flavor_theme = cols[0].text_input("主题/风味", placeholder="雾隐城异象 / 旧王朝遗物")
             flavor_max_chars = cols[1].slider("风味文本最大字数", 20, 300, 120)
             names = [line.strip() for line in flavor_names.splitlines() if line.strip()]
-            if st.button("🏺 批量生成物案", type="primary") and names:
+            if st.button("🏺 批量生成物案", type="primary", disabled=_llm_locked) and names:
                 try:
-                    result = run_flavor_action(
+                    result = _call(
+                        "正在为物案润色…",
+                        run_flavor_action,
                         content_root,
                         category=label_to_cat[category_label],
                         names=names,
@@ -2172,7 +2624,9 @@ with tab_review:
                             disabled=decide_disabled,
                         ):
                             try:
-                                decided = decide_review_action(
+                                decided = _call(
+                                    "正在写入档案…",
+                                    decide_review_action,
                                     content_root,
                                     item_id=item["id"],
                                     decision="accepted",
@@ -2221,7 +2675,9 @@ with tab_export:
         with cols[1]:
             if export_clicked:
                 try:
-                    result = run_project_export_action(
+                    result = _call(
+                        "正在打包导出…",
+                        run_project_export_action,
                         content_root,
                         output_dir=output_dir,
                         target_engine=engine,
@@ -2247,3 +2703,32 @@ with tab_export:
                     _show_cost(result)
             else:
                 st.caption("选择引擎与输出目录后导出。")
+
+        st.divider()
+        _section("设定集导出", "可阅读的世界书（Markdown / Word）")
+        lb_cols = st.columns([2, 2, 1])
+        lb_title = lb_cols[0].text_input("设定集标题", value="世界设定集")
+        lb_formats = lb_cols[1].multiselect(
+            "格式",
+            ["md", "docx"],
+            default=["md", "docx"],
+            format_func=lambda f: "Markdown" if f == "md" else "Word (.docx)",
+        )
+        if lb_cols[2].button("📖 导出设定集", type="primary") and lb_formats:
+            try:
+                lb_result = _call(
+                    "正在装订设定集…",
+                    run_lorebook_export_action,
+                    content_root,
+                    output_dir=Path(output_dir) / "lorebook",
+                    formats=tuple(lb_formats),
+                    title=lb_title.strip() or "世界设定集",
+                    sqlite_path=sqlite_path,
+                )
+            except Exception as e:
+                _fail(e)
+            else:
+                _track_cost(lb_result)
+                st.success(f"已导出到 `{lb_result['output_dir']}`")
+                for row in lb_result["files"]:
+                    st.write(f"- `{row['path']}` `sha256:{row['sha256'][:12]}…`")

@@ -1,0 +1,60 @@
+# Release pipeline: tag vX.Y.Z -> run the full gate suite -> build sdist+wheel ->
+# publish to PyPI (Trusted Publishing / OIDC; falls back to skipping when not configured)
+# -> create the GitHub Release with artifacts attached.
+#
+# One-time setup on PyPI: project Settings -> Publishing -> add this repo as a
+# Trusted Publisher (no long-lived token needed). Until that is configured the
+# publish step is skipped and the workflow still produces a GitHub Release.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write # PyPI Trusted Publishing (OIDC)
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[serve,dev,redis,app]"
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Type-check
+        run: mypy src/owcopilot
+      - name: Tests (offline, $0)
+        run: pytest -q
+      - name: Acceptance benchmark
+        run: python -m owcopilot.cli.main eval-acceptance --workspace .tmp/acc
+
+  build-publish:
+    needs: gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: |
+          pip install build
+          python -m build
+      - name: Publish to PyPI (Trusted Publishing)
+        # Skipped gracefully when the repo is not yet registered as a trusted publisher.
+        continue-on-error: true
+        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

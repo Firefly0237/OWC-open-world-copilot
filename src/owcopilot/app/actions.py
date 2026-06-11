@@ -7,6 +7,7 @@ whole Workbench behaviour is unit-testable in core CI, and the dashboard file st
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,6 +18,7 @@ from ..assist.dialogue_trees import DialogueTreeService, OfflineDialogueTreeProv
 from ..assist.drafts import QuestDraftService
 from ..assist.flavor import FlavorBatchService, OfflineFlavorProvider
 from ..assist.offline import OfflineBarksProvider, OfflineQuestDraftProvider
+from ..assist.prose_check import check_prose
 from ..assist.review_queue import ReviewQueue
 from ..audit.baseline import issue_fingerprint
 from ..audit.context import AuditContext
@@ -24,6 +26,7 @@ from ..audit.report import render_audit_markdown
 from ..content.hash import content_hash
 from ..content.models import ContentBundle
 from ..exporters import EngineTarget, export_content_bundle
+from ..exporters.lorebook import write_lorebook
 from ..extraction import (
     ExtractionDraft,
     ExtractionService,
@@ -781,4 +784,99 @@ def run_ingest_action(
             "content_hash_before": result.content_hash_before,
             "content_hash_after": result.content_hash_after,
             "cost_budget": _deterministic_cost_budget("ingest"),
+        }
+
+
+def probe_llm_connection_action(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    timeout: float = 12.0,
+    provider: Any | None = None,
+) -> dict[str, Any]:
+    """Probe the configured provider with a minimal completion (BYO-key onboarding).
+
+    The key is used in-process only; env vars are restored afterwards. `provider` is
+    injectable so tests run offline.
+    """
+    import time
+
+    from ..llm.gateway import _classify_provider_error
+
+    overrides = {"OPENAI_BASE_URL": base_url.strip(), "OPENAI_API_KEY": api_key.strip()}
+    saved = {key: os.environ.get(key) for key in overrides}
+    try:
+        for key, value in overrides.items():
+            if value:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+        probe = provider or OpenAICompatProvider(model=model, timeout=timeout, max_output_tokens=16)
+        started = time.perf_counter()
+        result = probe.complete(
+            system="You are a connectivity probe.",
+            user="Reply with the single word: pong",
+            model="cheap",
+        )
+        latency_ms = (time.perf_counter() - started) * 1000
+        text = str(result[0]) if result else ""
+        return {
+            "ok": True,
+            "model": model,
+            "latency_ms": round(latency_ms, 1),
+            "sample": text[:60],
+        }
+    except ModuleNotFoundError:
+        return {
+            "ok": False,
+            "category": "missing_dependency",
+            "message": "未安装真实模型依赖：pip install owcopilot[live]",
+        }
+    except Exception as e:  # classified, never raised: the UI shows a friendly verdict
+        return {
+            "ok": False,
+            "category": _classify_provider_error(e),
+            "message": str(e)[:200],
+        }
+    finally:
+        for env_key, previous in saved.items():
+            if previous is None:
+                os.environ.pop(env_key, None)
+            else:
+                os.environ[env_key] = previous
+
+
+def run_lorebook_export_action(
+    content_root: str | Path,
+    *,
+    output_dir: str | Path,
+    formats: tuple[str, ...] = ("md", "docx"),
+    title: str = "世界设定集",
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    """Export the readable lore book (creator-facing deliverable, deterministic)."""
+    with _project(content_root, sqlite_path) as project:
+        files = write_lorebook(project.bundle, output_dir, title=title, formats=formats)
+        return {
+            "output_dir": str(Path(output_dir)),
+            "files": files,
+            "cost_budget": _deterministic_cost_budget("lorebook_export"),
+        }
+
+
+def run_prose_check_action(
+    content_root: str | Path,
+    *,
+    text: str,
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    """Check a pasted chapter against the archive: mentions, forbidden terms, unknowns."""
+    with _project(content_root, sqlite_path) as project:
+        report = check_prose(text, project.bundle)
+        return {
+            "resolved_mentions": [m.model_dump(mode="json") for m in report.resolved_mentions],
+            "issues": [issue.model_dump(mode="json") for issue in report.issues],
+            "stats": report.stats,
+            "cost_budget": _deterministic_cost_budget("prose_check"),
         }

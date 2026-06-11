@@ -40,10 +40,12 @@ python -m venv .venv && .\.venv\Scripts\pip install -e ".[dev,serve,app]"
 ### 启动工作台
 
 ```powershell
-.\.venv\Scripts\python.exe -m streamlit run src/owcopilot/app/dashboard.py
+owcopilot ui          # 一条命令打开工作台（等价于 streamlit run …）
 ```
 
-侧边栏填入内容仓目录（如上面的 `acceptance_world`），即可使用八个页面：世界概览（含 AI 参与度溯源）、一致性审计、待审队列、世界问答、影响分析、修复工坊、生成工坊、导出。模型模式默认 offline（$0）；切换 real 后所有生成/问答走真实模型并实时回显成本。
+首次使用建议点侧边栏的 **「📖 新手引导」**：游戏式教程会高亮界面元素、带你逛完全部九个页面（世界总览 / 设定档案 / 创世工坊 / 世界问答 / 审计与修复 / 影响分析 / 创作工坊 / 审阅台 / 导出交付）。
+
+**用自己的 API Key（可选）**：离线模式 $0 即可体验全流程；要用真实模型，在侧边栏「🔑 模型接入」选择服务商（DeepSeek / OpenAI / Kimi / 智谱 / 自定义 Base URL）、粘贴你的 Key、点「测试连接」确认连通。**Key 只保存在本机进程内存中，调用直连服务商，没有任何中间服务器**；可在「💰 成本护栏」设置会话花费上限，达到上限后真实模式自动锁定。每个操作的花费都会实时回显。
 
 ### CLI 日常闭环
 

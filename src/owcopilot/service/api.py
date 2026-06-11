@@ -42,7 +42,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..assembly import PrefixMode, RouterMode, build_grounded_pipeline
 from ..assist.barks import BarkBatchService
+from ..assist.dialogue_trees import DialogueTreeService, OfflineDialogueTreeProvider
 from ..assist.drafts import QuestDraftService
+from ..assist.flavor import FlavorBatchService, OfflineFlavorProvider
 from ..assist.offline import OfflineBarksProvider, OfflineQuestDraftProvider
 from ..assist.review_queue import ReviewQueue
 from ..audit.baseline import issue_fingerprint
@@ -53,6 +55,13 @@ from ..content.hash import content_hash
 from ..content.models import ContentBundle
 from ..evaluation.quality import evaluate_quest_quality
 from ..exporters import EngineTarget, export_content_bundle
+from ..extraction import (
+    ExtractionDraft,
+    ExtractionService,
+    OfflineExtractionProvider,
+    apply_gap_answers,
+    quests_from_beats,
+)
 from ..graph.index import build_content_graph
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
 from ..llm.cache import build_cache_backend
@@ -371,6 +380,73 @@ class ProjectPatchRollbackResponse(BaseModel):
     rolled_back: bool
     patch_id: str
     post_audit_open_errors: int = 0
+    cost_budget: dict[str, Any]
+
+
+class ProjectExtractionRunRequest(_LLMModeRequest):
+    title: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=400_000)
+    source_kind: str = Field(default="文稿", max_length=40)
+    max_chunks: int = Field(default=12, ge=1, le=24)
+
+
+class ProjectExtractionRunResponse(BaseModel):
+    request_id: str
+    project: str
+    draft: dict[str, Any]
+    stats: dict[str, int]
+    telemetry: dict[str, Any]
+    cost_budget: dict[str, Any]
+
+
+class ProjectExtractionSubmitRequest(BaseModel):
+    draft: dict[str, Any]
+    answers: dict[str, str] = Field(default_factory=dict)
+    include_beats_as_quests: bool = False
+
+
+class ProjectExtractionSubmitResponse(BaseModel):
+    request_id: str
+    project: str
+    review_item_id: str
+    open_gaps: int
+    issues: list[dict[str, Any]]
+
+
+class ProjectDialogueTreeRequest(_LLMModeRequest):
+    participant_ids: list[str] = Field(min_length=1, max_length=6)
+    brief: str = Field(min_length=1, max_length=2000)
+    quest_id: str | None = None
+    max_nodes: int = Field(default=12, ge=4, le=24)
+    max_chars: int = Field(default=120, ge=20, le=400)
+
+
+class ProjectDialogueTreeResponse(BaseModel):
+    request_id: str
+    project: str
+    tree: dict[str, Any]
+    lint_issues: list[dict[str, Any]]
+    structure_problems: list[str]
+    review_item_id: str | None
+    telemetry: dict[str, Any]
+    cost_budget: dict[str, Any]
+
+
+class ProjectFlavorRequest(_LLMModeRequest):
+    category: str = Field(pattern="^(item|skill|achievement)$")
+    names: list[str] = Field(min_length=1, max_length=50)
+    theme: str = Field(default="", max_length=200)
+    max_chars: int = Field(default=120, ge=20, le=400)
+
+
+class ProjectFlavorResponse(BaseModel):
+    request_id: str
+    project: str
+    batch_id: str
+    accepted: list[dict[str, Any]]
+    rejected: list[dict[str, Any]]
+    review_item_id: str | None
+    telemetry: dict[str, Any]
     cost_budget: dict[str, Any]
 
 
@@ -1354,6 +1430,192 @@ def create_app() -> FastAPI:
                 telemetry=telemetry_summary,
                 cost_budget=summarize_workflow(
                     [llm_step("barks_batch", telemetry_summary)],
+                    budget_usd=req.max_cost_usd,
+                ).budget.model_dump(mode="json"),
+            )
+        finally:
+            project_context.close()
+
+    @app.post("/projects/{project}/extractions:run", response_model=ProjectExtractionRunResponse)
+    def run_project_extraction(
+        project: str,
+        req: ProjectExtractionRunRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> ProjectExtractionRunResponse:
+        request_id = str(uuid.uuid4())
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        project_context = _registered_project(project)
+        try:
+            gateway, telemetry = _task_gateway(
+                req, task="extract_lore", offline_provider=OfflineExtractionProvider()
+            )
+            assert gateway is not None
+            draft = ExtractionService(gateway=gateway, bundle=project_context.bundle).extract(
+                title=req.title,
+                text=req.text,
+                source_kind=req.source_kind,
+                max_chunks=req.max_chunks,
+            )
+            telemetry_summary = telemetry.summary()
+            return ProjectExtractionRunResponse(
+                request_id=request_id,
+                project=project,
+                draft=draft.model_dump(mode="json", exclude_none=True),
+                stats=draft.stats,
+                telemetry=telemetry_summary,
+                cost_budget=summarize_workflow(
+                    [llm_step("extract_lore", telemetry_summary)],
+                    budget_usd=req.max_cost_usd,
+                ).budget.model_dump(mode="json"),
+            )
+        finally:
+            project_context.close()
+
+    @app.post(
+        "/projects/{project}/extractions:submit",
+        response_model=ProjectExtractionSubmitResponse,
+    )
+    def submit_project_extraction(
+        project: str,
+        req: ProjectExtractionSubmitRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> ProjectExtractionSubmitResponse:
+        request_id = str(uuid.uuid4())
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        try:
+            parsed = ExtractionDraft.model_validate(req.draft)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"invalid extraction draft: {e}") from e
+        if req.answers:
+            parsed = apply_gap_answers(parsed, req.answers)
+        if req.include_beats_as_quests:
+            parsed.bundle.quests.update(quests_from_beats(parsed))
+        project_context = _registered_project(project)
+        try:
+            issues = project_context.audit_runner.run(
+                AuditContext.from_bundle(parsed.bundle)
+            ).issues
+            item = ReviewQueue(project_context.sqlite_store).add_import_draft(
+                {
+                    "id": parsed.id,
+                    "source_title": parsed.source_title,
+                    "source_kind": parsed.source_kind,
+                    "summary": parsed.summary,
+                    "bundle": parsed.bundle.model_dump(mode="json", exclude_none=True),
+                    "plot_beats": [b.model_dump(mode="json") for b in parsed.plot_beats],
+                    "open_gaps": [g.model_dump(mode="json") for g in parsed.gaps],
+                },
+                issue_refs=[issue_fingerprint(issue) for issue in issues],
+            )
+            return ProjectExtractionSubmitResponse(
+                request_id=request_id,
+                project=project,
+                review_item_id=item.id,
+                open_gaps=len(parsed.gaps),
+                issues=[issue.model_dump(mode="json") for issue in issues],
+            )
+        finally:
+            project_context.close()
+
+    @app.post(
+        "/projects/{project}/assist/dialogue_trees:draft",
+        response_model=ProjectDialogueTreeResponse,
+    )
+    def draft_project_dialogue_tree(
+        project: str,
+        req: ProjectDialogueTreeRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> ProjectDialogueTreeResponse:
+        request_id = str(uuid.uuid4())
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        project_context = _registered_project(project)
+        try:
+            unknown = [
+                pid for pid in req.participant_ids if pid not in project_context.bundle.entities
+            ]
+            if unknown:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"unknown participant entities: {', '.join(unknown)}",
+                )
+            gateway, telemetry = _task_gateway(
+                req, task="dialogue_tree", offline_provider=OfflineDialogueTreeProvider()
+            )
+            assert gateway is not None
+            result = DialogueTreeService(
+                gateway=gateway,
+                bundle=project_context.bundle,
+                review_queue=ReviewQueue(project_context.sqlite_store),
+            ).generate(
+                participant_ids=req.participant_ids,
+                brief=req.brief,
+                quest_id=req.quest_id,
+                max_nodes=req.max_nodes,
+                max_chars=req.max_chars,
+            )
+            telemetry_summary = telemetry.summary()
+            return ProjectDialogueTreeResponse(
+                request_id=request_id,
+                project=project,
+                tree=result.tree.model_dump(mode="json", exclude_none=True),
+                lint_issues=[i.model_dump(mode="json") for i in result.lint_issues],
+                structure_problems=result.structure_problems,
+                review_item_id=result.review_item.id if result.review_item else None,
+                telemetry=telemetry_summary,
+                cost_budget=summarize_workflow(
+                    [llm_step("dialogue_tree", telemetry_summary)],
+                    budget_usd=req.max_cost_usd,
+                ).budget.model_dump(mode="json"),
+            )
+        finally:
+            project_context.close()
+
+    @app.post("/projects/{project}/assist/flavor:batch", response_model=ProjectFlavorResponse)
+    def batch_project_flavor(
+        project: str,
+        req: ProjectFlavorRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> ProjectFlavorResponse:
+        request_id = str(uuid.uuid4())
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        project_context = _registered_project(project)
+        try:
+            gateway, telemetry = _task_gateway(
+                req, task="flavor_batch", offline_provider=OfflineFlavorProvider()
+            )
+            assert gateway is not None
+            result = FlavorBatchService(
+                gateway=gateway,
+                bundle=project_context.bundle,
+                review_queue=ReviewQueue(project_context.sqlite_store),
+            ).generate(
+                category=req.category,
+                names=req.names,
+                theme=req.theme,
+                max_chars=req.max_chars,
+            )
+            telemetry_summary = telemetry.summary()
+            return ProjectFlavorResponse(
+                request_id=request_id,
+                project=project,
+                batch_id=result.batch_id,
+                accepted=[e.model_dump(mode="json") for e in result.accepted],
+                rejected=[
+                    {"name": r.name, "text": r.text, "issues": [i.code for i in r.issues]}
+                    for r in result.rejected
+                ],
+                review_item_id=result.review_item.id if result.review_item else None,
+                telemetry=telemetry_summary,
+                cost_budget=summarize_workflow(
+                    [llm_step("flavor_batch", telemetry_summary)],
                     budget_usd=req.max_cost_usd,
                 ).budget.model_dump(mode="json"),
             )

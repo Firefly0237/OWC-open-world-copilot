@@ -179,6 +179,17 @@ def build_parser() -> argparse.ArgumentParser:
     _add_llm_args(draft)
     draft.set_defaults(handler=_cmd_draft)
 
+    ui = subparsers.add_parser(
+        "ui", help="Launch the Workbench UI in the browser (wraps `streamlit run`)."
+    )
+    ui.add_argument("--port", type=int, default=8501)
+    ui.add_argument(
+        "--print-cmd",
+        action="store_true",
+        help="Print the launch command as JSON instead of running it (CI/debug).",
+    )
+    ui.set_defaults(handler=_cmd_ui)
+
     extract = subparsers.add_parser(
         "extract",
         help=(
@@ -640,6 +651,39 @@ def _cmd_rollback(args: argparse.Namespace) -> int:
             },
             args,
         )
+
+
+def _cmd_ui(args: argparse.Namespace) -> int:
+    """Zero-config launcher: `owcopilot ui` opens the Workbench without remembering paths."""
+    import importlib.util
+    import subprocess
+
+    spec = importlib.util.find_spec("owcopilot.app.dashboard")
+    if spec is None or not spec.origin:
+        print(json.dumps({"error": "dashboard module not found; install owcopilot[app]"}))
+        return 2
+    try:
+        importlib.util.find_spec("streamlit")
+    except ModuleNotFoundError:
+        spec_streamlit = None
+    else:
+        spec_streamlit = importlib.util.find_spec("streamlit")
+    if spec_streamlit is None:
+        print(json.dumps({"error": "streamlit is not installed; pip install owcopilot[app]"}))
+        return 2
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        spec.origin,
+        "--server.port",
+        str(args.port),
+    ]
+    if args.print_cmd:
+        print(json.dumps({"command": cmd}, ensure_ascii=False))
+        return 0
+    return subprocess.call(cmd)
 
 
 def _cmd_extract(args: argparse.Namespace) -> int:
