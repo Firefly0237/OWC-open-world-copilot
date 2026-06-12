@@ -1,0 +1,95 @@
+/* 星海之卷 design tokens — ported 1:1 from the Streamlit theme so both frontends
+   stay the same product. */
+@import url("https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap");
+
+:root {
+  --ow-gold: #d9b56c;
+  --ow-gold-bright: #f0d28a;
+  --ow-gold-deep: #a8853f;
+  --ow-gold-soft: rgba(217, 181, 108, 0.34);
+  --ow-gold-faint: rgba(217, 181, 108, 0.08);
+  --ow-night: #0f1530;
+  --ow-night-deep: #0a0e24;
+  --ow-panel: rgba(20, 27, 56, 0.72);
+  --ow-panel-2: rgba(13, 18, 42, 0.55);
+  --ow-edge: rgba(217, 181, 108, 0.26);
+  --ow-line: #2e3658;
+  --ow-ink: #ece5d3;
+  --ow-muted: #9d97ad;
+  --ow-cyan: #8fd6e8;
+  --ow-serif: "Noto Serif SC", Georgia, "Songti SC", "SimSun", serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  min-height: 100vh;
+}
+
+body {
+  color: var(--ow-ink);
+  font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background:
+    radial-gradient(1100px 560px at 86% -12%, rgba(138, 123, 200, 0.14), transparent 60%),
+    radial-gradient(900px 480px at -6% 4%, rgba(143, 214, 232, 0.08), transparent 55%),
+    linear-gradient(168deg, #141b3e 0%, var(--ow-night) 46%, var(--ow-night-deep) 100%);
+  background-attachment: fixed;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--ow-serif);
+  letter-spacing: 0.02em;
+  color: var(--ow-ink);
+}
+
+a {
+  color: var(--ow-cyan);
+}
+
+.pane {
+  background: var(--ow-panel);
+  border: 1px solid var(--ow-edge);
+  border-radius: 0.9rem;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.35),
+    0 6px 20px rgba(4, 7, 22, 0.45),
+    inset 0 1px 0 rgba(240, 210, 138, 0.07);
+}
+
+.section {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  margin: 0.4rem 0 0.6rem;
+}
+
+.section::before {
+  content: "✦";
+  color: var(--ow-gold);
+  font-size: 0.62rem;
+  align-self: center;
+}
+
+.section::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--ow-gold-soft), transparent);
+}
+
+.section .t {
+  font-family: var(--ow-serif);
+  font-weight: 700;
+  font-size: 1.02rem;
+}
+
+.muted {
+  color: var(--ow-muted);
+}
