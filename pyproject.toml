@@ -57,7 +57,7 @@ owcopilot = "owcopilot.cli.main:main"
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
-extend-exclude = ["build", "dist", "_wheelcheck"]   # build artifacts, never lint them
+extend-exclude = ["build", "dist", "_wheelcheck", ".tmp"]   # build artifacts + scratch codemods
 
 [tool.ruff.lint]
 # Pragmatic, widely-used starter set: pycodestyle errors, pyflakes, import sorting,
@@ -72,6 +72,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Tests deliberately import the app under test after a runtime importorskip guard.
 "tests/*" = ["E402"]
+# The dashboard flushes a boot splash before its heavy imports, so a cold start paints
+# starlight instead of a white page; imports therefore sit after the first st calls.
+"src/owcopilot/app/dashboard.py" = ["E402"]
 
 [tool.mypy]
 # Pragmatic start (per Round 5 §2.5): check our package, tolerate third-party stub gaps,

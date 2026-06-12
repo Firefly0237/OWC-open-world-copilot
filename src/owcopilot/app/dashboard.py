@@ -5,9 +5,12 @@ Launch with:
 
     streamlit run src/owcopilot/app/dashboard.py
 
-Design language: "晨光手稿" — a light parchment canvas in the same register as Genshin-style
-game UI (warm ivory paper, ink text, muted-gold seals, ornamental corner brackets, diamond
-section marks), with quiet 120-240ms micro-interactions that honor prefers-reduced-motion.
+Design language: "星海之卷" — an As-I've-Written-inspired starbound tome: deep-space
+blue canvas under faint nebula washes and star dust, crystal-glass panes edged with
+gilded hairlines, ivory ink, starlight-cyan accents. Restraint keeps it premium and
+readable: glow lives only on the primary CTA / active tab / hero emblem, decoration
+stays far below the content layer, and every motion (unfurl, slow orbit, star
+breathing, boot splash) honors prefers-reduced-motion.
 Copy stays minimal: the UI shows what to do, never argues why the feature exists.
 
 Voice: the UI speaks as a worldsmith's archive (创世/落墨/入档/朱批), Material Symbols
@@ -23,6 +26,82 @@ Product rules the layout encodes:
 
 from __future__ import annotations
 
+import streamlit as st
+
+st.set_page_config(
+    page_title="OWCopilot · 世界观工作台",
+    page_icon=":material/auto_stories:",
+    layout="wide",
+)
+
+# Boot veil: Streamlit flushes elements as the script produces them, so this paints before
+# the heavy imports below finish on a cold start — starlight instead of a long white page.
+# The main theme stylesheet (rendered after those imports) retires it via #ow-splash
+# override: signal-driven hand-off, no JS. The 30s animation is only a failsafe.
+_BOOT_SPLASH = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600&display=swap');
+#ow-splash { position: fixed; inset: 0; z-index: 999999; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 18px;
+  background:
+    radial-gradient(900px 480px at 82% -10%, rgba(138, 123, 200, .16), transparent 60%),
+    radial-gradient(800px 420px at -6% 8%, rgba(143, 214, 232, .09), transparent 55%),
+    linear-gradient(168deg, #141b3e 0%, #0f1530 46%, #0a0e24 100%);
+  animation: owSplashHold 30s linear forwards; }
+#ow-splash::before { content: ""; position: absolute; inset: 0; opacity: .8;
+  background-image:
+    radial-gradient(1px 1px at 17px 23px, rgba(236, 229, 211, .5) 60%, transparent),
+    radial-gradient(1px 1px at 89px 67px, rgba(143, 214, 232, .38) 60%, transparent),
+    radial-gradient(1.4px 1.4px at 143px 118px, rgba(240, 210, 138, .42) 60%, transparent),
+    radial-gradient(1px 1px at 201px 41px, rgba(236, 229, 211, .26) 60%, transparent),
+    radial-gradient(1.6px 1.6px at 311px 83px, rgba(236, 229, 211, .5) 60%, transparent);
+  background-size: 380px 240px; }
+#ow-splash .orb { animation: owSplashSpin 14s linear infinite;
+  transform-origin: center; transform-box: fill-box; }
+#ow-splash .core { animation: owSplashPulse 2.2s ease-in-out infinite;
+  transform-origin: center; transform-box: fill-box; }
+#ow-splash .t { font-family: "Noto Serif SC", Georgia, serif; color: #f0d28a;
+  font-size: 1.05rem; letter-spacing: .35em; text-indent: .35em; }
+#ow-splash .ln { position: relative; width: 180px; height: 1px; overflow: hidden;
+  background: rgba(217, 181, 108, .18); }
+#ow-splash .ln::after { content: ""; position: absolute; left: -40%; top: 0;
+  width: 40%; height: 100%;
+  background: linear-gradient(90deg, transparent, #f0d28a, transparent);
+  animation: owSplashSweep 1.4s ease-in-out infinite; }
+@keyframes owSplashSweep { to { left: 100%; } }
+@keyframes owSplashSpin { to { transform: rotate(360deg); } }
+@keyframes owSplashPulse {
+  0%, 100% { opacity: .72; transform: scale(.96); }
+  50% { opacity: 1; transform: scale(1.04); }
+}
+@keyframes owSplashHold {
+  0%, 96% { opacity: 1; visibility: visible; }
+  100% { opacity: 0; visibility: hidden; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #ow-splash .orb, #ow-splash .core, #ow-splash .ln::after { animation: none; }
+}
+</style>
+<div id="ow-splash" aria-hidden="true">
+  <svg width="84" height="84" viewBox="0 0 100 100" fill="none">
+    <circle class="orb" cx="50" cy="50" r="44" stroke="#8fd6e8" stroke-opacity=".35"
+            stroke-dasharray="3 6"/>
+    <circle cx="50" cy="50" r="34" stroke="#d9b56c" stroke-opacity=".4"/>
+    <path class="core" d="M50 14 L56.5 43.5 L86 50 L56.5 56.5 L50 86 L43.5 56.5 L14 50
+             L43.5 43.5 Z" fill="#d9b56c" fill-opacity=".25" stroke="#f0d28a"
+          stroke-opacity=".8"/>
+    <path class="core" d="M50 34 L52.8 47.2 L66 50 L52.8 52.8 L50 66 L47.2 52.8 L34 50
+             L47.2 47.2 Z" fill="#f0d28a" fill-opacity=".85"/>
+  </svg>
+  <div class="t">正在展卷</div>
+  <div class="ln"></div>
+</div>
+"""
+if not st.session_state.get("_booted"):
+    st.session_state["_booted"] = True
+    st.markdown(_BOOT_SPLASH, unsafe_allow_html=True)
+
 import html
 import json
 import os
@@ -32,7 +111,6 @@ from typing import Any
 
 import altair as alt
 import pandas as pd
-import streamlit as st
 import streamlit.components.v1 as components
 
 from owcopilot.app.actions import (
@@ -189,24 +267,19 @@ _PROBE_ERROR_TEXT = {
     "missing_dependency": "未安装真实模型依赖：pip install owcopilot[live]",
     "provider_error": "服务商返回错误：检查模型 ID 与账户状态。",
 }
+# Node border colors tuned for the night canvas (node fill #161e40, ivory labels).
 _GRAPH_NODE_COLOR = {
-    "npc": "#3f6fae",
-    "faction": "#a8842c",
-    "location": "#5e8c5a",
-    "region": "#6b7280",
-    "poi": "#3e8c7d",
-    "quest": "#8c5ea0",
-    "item": "#a0784a",
-    "event": "#b05656",
-    "skill": "#3e8c8c",
-    "achievement": "#9a8a3e",
+    "npc": "#7fa7e0",
+    "faction": "#d9b56c",
+    "location": "#8fc89a",
+    "region": "#8e96ad",
+    "poi": "#7fd0c0",
+    "quest": "#b89ad8",
+    "item": "#d0a878",
+    "event": "#e08585",
+    "skill": "#7fc8c8",
+    "achievement": "#d8c870",
 }
-
-st.set_page_config(
-    page_title="OWCopilot · 世界观工作台",
-    page_icon=":material/public:",
-    layout="wide",
-)
 
 # ------------------------------------------------------------------------------ theme css
 st.markdown(
@@ -215,37 +288,60 @@ st.markdown(
     @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap');
 
     :root {
-      --ow-gold: #a8842c;          /* seals, marks, active states */
-      --ow-gold-text: #8a6a1e;     /* gold that stays readable as text on paper */
-      --ow-gold-deep: #b78f2e;
-      --ow-gold-soft: rgba(168, 132, 44, .38);
-      --ow-gold-faint: rgba(168, 132, 44, .10);
-      --ow-paper: #f7f3e9;         /* bg/base: warm ivory, kinder than pure white */
-      --ow-surface: #fffdf7;       /* bg/surface: cards float brighter than the page */
-      --ow-surface-2: #f1ebdc;
-      --ow-line: #e3dac4;
-      --ow-ink: #2d2618;
-      --ow-muted: #7b7261;
-      --ow-shadow: 0 1px 3px rgba(45, 38, 24, .08), 0 4px 14px rgba(45, 38, 24, .05);
-      --ow-shadow-lift: 0 2px 6px rgba(45, 38, 24, .10), 0 10px 28px rgba(45, 38, 24, .08);
+      --ow-gold: #d9b56c;            /* gilded hairlines, marks, active states */
+      --ow-gold-bright: #f0d28a;     /* highlights, headline numerals, glints */
+      --ow-gold-deep: #a8853f;
+      --ow-gold-soft: rgba(217, 181, 108, .34);
+      --ow-gold-faint: rgba(217, 181, 108, .08);
+      --ow-night: #0f1530;           /* bg/base: deep-space blue */
+      --ow-night-deep: #0a0e24;
+      --ow-panel: rgba(20, 27, 56, .72);    /* crystal panes (no blur: cheap to paint) */
+      --ow-panel-2: rgba(13, 18, 42, .55);
+      --ow-edge: rgba(217, 181, 108, .26);  /* gilded pane edge */
+      --ow-line: #2e3658;                   /* neutral hairline on night */
+      --ow-ink: #ece5d3;             /* ivory body text */
+      --ow-muted: #9d97ad;           /* star-grey secondary text */
+      --ow-cyan: #8fd6e8;            /* starlight accent: links, code, info */
+      --ow-violet: #8a7bc8;
+      --ow-shadow: 0 1px 3px rgba(0, 0, 0, .35), 0 6px 20px rgba(4, 7, 22, .45);
+      --ow-shadow-lift: 0 2px 8px rgba(0, 0, 0, .4), 0 12px 34px rgba(4, 7, 22, .55);
       --ow-serif: "Noto Serif SC", Georgia, "Songti SC", "SimSun", serif;
     }
 
-    /* paper canvas with faint dawn washes */
+    /* boot veil hand-off: this stylesheet only arrives once the heavy imports and first
+       render are done, so its presence is the "app is ready" signal that retires the
+       splash — no JS, no guessed timers */
+    #ow-splash { animation: owSplashOut .7s ease .15s forwards; }
+    @keyframes owSplashOut { to { opacity: 0; visibility: hidden; } }
+
+    /* deep-space canvas: nebula washes + a fixed star-dust veil, far below the content */
     [data-testid="stAppViewContainer"] {
       background:
-        radial-gradient(1100px 540px at 88% -12%, rgba(183, 143, 46, .07), transparent 60%),
-        radial-gradient(900px 500px at -8% -2%, rgba(63, 111, 174, .05), transparent 55%),
-        radial-gradient(1000px 700px at 50% 115%, rgba(168, 132, 44, .06), transparent 60%),
-        var(--ow-paper);
+        radial-gradient(1100px 560px at 86% -12%, rgba(138, 123, 200, .14), transparent 60%),
+        radial-gradient(900px 480px at -6% 4%, rgba(143, 214, 232, .08), transparent 55%),
+        radial-gradient(1100px 720px at 52% 118%, rgba(217, 181, 108, .09), transparent 62%),
+        linear-gradient(168deg, #141b3e 0%, var(--ow-night) 46%, var(--ow-night-deep) 100%);
       background-attachment: fixed;
     }
+    [data-testid="stAppViewContainer"]::before {
+      content: ""; position: fixed; inset: 0; pointer-events: none;
+      background-image:
+        radial-gradient(1px 1px at 17px 23px, rgba(236, 229, 211, .5) 60%, transparent),
+        radial-gradient(1px 1px at 89px 67px, rgba(143, 214, 232, .38) 60%, transparent),
+        radial-gradient(1.4px 1.4px at 143px 118px, rgba(240, 210, 138, .42) 60%, transparent),
+        radial-gradient(1px 1px at 201px 41px, rgba(236, 229, 211, .26) 60%, transparent),
+        radial-gradient(1px 1px at 53px 141px, rgba(236, 229, 211, .32) 60%, transparent),
+        radial-gradient(1.6px 1.6px at 311px 83px, rgba(236, 229, 211, .5) 60%, transparent);
+      background-size: 380px 240px;
+      animation: owTwinkle 16s ease-in-out infinite alternate;
+    }
+    @keyframes owTwinkle { from { opacity: .5; } to { opacity: .9; } }
     [data-testid="stHeader"] { background: transparent; }
     .block-container { padding-top: 1.2rem; max-width: 1280px; }
 
     h1, h2, h3 { font-family: var(--ow-serif); letter-spacing: .02em; color: var(--ow-ink); }
 
-    /* entrance: one quiet fade-up for structural blocks (functional, not decorative) */
+    /* entrance: one quiet unfurl for structural blocks (functional, not decorative) */
     @keyframes owFadeUp {
       from { opacity: 0; transform: translateY(6px); }
       to   { opacity: 1; transform: translateY(0); }
@@ -258,56 +354,65 @@ st.markdown(
       animation: owFadeUp .24s ease-out both;
     }
 
-    /* hero: manuscript head with ornamental corner brackets */
+    /* hero: the tome's title page — crystal pane, gilded corner brackets, slow orbit */
     .ow-hero {
       position: relative; overflow: hidden;
       padding: 1.45rem 1.7rem 1.25rem; margin-bottom: 1rem;
-      border-radius: 1rem; border: 1px solid var(--ow-gold-soft);
+      border-radius: 1rem; border: 1px solid var(--ow-edge);
       background:
-        linear-gradient(120deg, rgba(183, 143, 46, .12) 0%,
-                        rgba(255, 253, 247, .9) 42%, rgba(247, 243, 233, .95) 100%);
-      box-shadow: var(--ow-shadow);
+        linear-gradient(125deg, rgba(217, 181, 108, .10) 0%,
+                        rgba(24, 32, 68, .72) 38%, rgba(12, 17, 40, .8) 100%);
+      backdrop-filter: blur(10px);
+      box-shadow: var(--ow-shadow), inset 0 1px 0 rgba(240, 210, 138, .12);
     }
     .ow-hero::before, .ow-hero::after {
       content: ""; position: absolute; width: 22px; height: 22px;
-      border: 2px solid rgba(168, 132, 44, .6);
+      border: 2px solid rgba(240, 210, 138, .55);
     }
     .ow-hero::before { top: 9px; left: 9px; border-right: none; border-bottom: none;
                        border-top-left-radius: 6px; }
     .ow-hero::after { bottom: 9px; right: 9px; border-left: none; border-top: none;
                       border-bottom-right-radius: 6px; }
-    .ow-hero h1 { margin: 0; font-size: 1.65rem; }
+    .ow-hero h1 {
+      margin: 0; font-size: 1.65rem;
+      background: linear-gradient(180deg, #f6e2a8 0%, #d9b56c 58%, #b08d4f 100%);
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: #e8c87a;
+    }
     .ow-hero .ow-tagline { margin: .3rem 0 .7rem; color: var(--ow-muted); font-size: .92rem; }
     .ow-hero .ow-mark {
       position: absolute; right: 1.15rem; top: 50%;
-      transform: translateY(-50%); opacity: .75; pointer-events: none;
-      filter: drop-shadow(0 1px 6px rgba(168, 132, 44, .35));
+      transform: translateY(-50%); opacity: .85; pointer-events: none;
+      filter: drop-shadow(0 0 10px rgba(217, 181, 108, .35));
     }
+    .ow-orbit { animation: owSpin 90s linear infinite;
+                transform-origin: center; transform-box: fill-box; }
+    @keyframes owSpin { to { transform: rotate(360deg); } }
 
-    /* chips */
+    /* chips: star-seal badges */
     .ow-chip {
       display: inline-flex; align-items: center; gap: .3rem;
       padding: .14rem .62rem; margin: 0 .4rem .3rem 0;
       border-radius: 999px; font-size: .78rem;
       border: 1px solid var(--ow-line);
-      background: var(--ow-surface); color: var(--ow-muted);
+      background: rgba(16, 22, 48, .6); color: var(--ow-muted);
       transition: border-color .15s ease, background .15s ease;
     }
     .ow-chip b { color: var(--ow-ink); font-weight: 600; }
-    .ow-chip.gold  { border-color: var(--ow-gold-soft); color: var(--ow-gold-text);
+    .ow-chip.gold  { border-color: var(--ow-gold-soft); color: var(--ow-gold-bright);
                      background: var(--ow-gold-faint); }
-    .ow-chip.red   { border-color: rgba(176, 52, 52, .4);  color: #a33636;
-                     background: rgba(176, 52, 52, .07); }
-    .ow-chip.amber { border-color: rgba(154, 107, 20, .4); color: #9a6b14;
-                     background: rgba(154, 107, 20, .08); }
-    .ow-chip.blue  { border-color: rgba(63, 111, 174, .4); color: #3f6fae;
-                     background: rgba(63, 111, 174, .07); }
-    .ow-chip.green { border-color: rgba(62, 125, 84, .4);  color: #3e7d54;
-                     background: rgba(62, 125, 84, .07); }
+    .ow-chip.red   { border-color: rgba(224, 133, 133, .45); color: #e89a9a;
+                     background: rgba(224, 133, 133, .08); }
+    .ow-chip.amber { border-color: rgba(224, 180, 106, .45); color: #e6c07e;
+                     background: rgba(224, 180, 106, .08); }
+    .ow-chip.blue  { border-color: rgba(143, 214, 232, .4); color: var(--ow-cyan);
+                     background: rgba(143, 214, 232, .07); }
+    .ow-chip.green { border-color: rgba(126, 200, 160, .42); color: #8ed4ac;
+                     background: rgba(126, 200, 160, .08); }
 
-    /* section heading: diamond mark + fading gold rule */
+    /* section heading: four-point star + a constellation rule that unfurls once */
     .ow-section { display: flex; align-items: baseline; gap: .55rem; margin: .35rem 0 .55rem; }
-    .ow-section::before { content: "◆"; color: var(--ow-gold); font-size: .6rem;
+    .ow-section::before { content: "✦"; color: var(--ow-gold); font-size: .62rem;
                           align-self: center; }
     .ow-section .t { font-family: var(--ow-serif); font-weight: 700;
                      font-size: 1.02rem; color: var(--ow-ink); }
@@ -315,23 +420,26 @@ st.markdown(
     .ow-section::after {
       content: ""; flex: 1; height: 1px;
       background: linear-gradient(90deg, var(--ow-gold-soft), transparent);
+      transform-origin: left center;
+      animation: owUnfurl .5s ease-out both;
     }
+    @keyframes owUnfurl { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 
     /* empty / onboarding state */
     .ow-empty {
-      border: 1px dashed rgba(168, 132, 44, .45); border-radius: 1rem;
+      border: 1px dashed rgba(217, 181, 108, .4); border-radius: 1rem;
       padding: 2rem 1.5rem 1.6rem; margin: .4rem 0 1rem;
-      text-align: center; background: var(--ow-surface);
+      text-align: center; background: var(--ow-panel-2);
       box-shadow: var(--ow-shadow);
     }
-    .ow-empty .icon { font-size: 2.1rem; }
+    .ow-empty .icon svg { filter: drop-shadow(0 0 8px rgba(240, 210, 138, .4)); }
     .ow-empty h3 { margin: .4rem 0 .25rem; }
     .ow-empty p { color: var(--ow-muted); margin: 0 0 1.05rem; }
     .ow-steps { display: flex; gap: .8rem; justify-content: center; flex-wrap: wrap; }
     .ow-step {
       width: 215px; text-align: left; padding: .7rem .9rem;
       border: 1px solid var(--ow-line); border-radius: .7rem;
-      background: var(--ow-paper);
+      background: rgba(12, 17, 40, .6);
       transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
     }
     .ow-step:hover { border-color: var(--ow-gold-soft); transform: translateY(-2px);
@@ -340,24 +448,24 @@ st.markdown(
       display: inline-flex; width: 1.35rem; height: 1.35rem; border-radius: 50%;
       align-items: center; justify-content: center; margin-bottom: .35rem;
       background: var(--ow-gold-faint); border: 1px solid var(--ow-gold-soft);
-      color: var(--ow-gold-text); font-size: .78rem;
+      color: var(--ow-gold-bright); font-size: .78rem;
     }
     .ow-step b { display: block; color: var(--ow-ink); font-size: .88rem;
                  margin-bottom: .15rem; }
     .ow-step span { color: var(--ow-muted); font-size: .78rem; line-height: 1.5; }
 
-    /* metric tiles: paper cards with a gold hairline */
+    /* metric tiles: night panes with a gilded hairline (dozens can share a page) */
     div[data-testid="stMetric"] {
       position: relative; overflow: hidden;
       border: 1px solid var(--ow-line); border-radius: .8rem;
       padding: .72rem .9rem .55rem;
-      background: var(--ow-surface);
+      background: var(--ow-panel-2);
       box-shadow: var(--ow-shadow);
       transition: border-color .15s ease, box-shadow .2s ease, transform .15s ease;
     }
     div[data-testid="stMetric"]::before {
-      content: ""; position: absolute; top: 0; left: 10%; right: 10%; height: 2px;
-      background: linear-gradient(90deg, transparent, var(--ow-gold-soft), transparent);
+      content: ""; position: absolute; top: 0; left: 10%; right: 10%; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(240, 210, 138, .5), transparent);
     }
     div[data-testid="stMetric"]:hover {
       border-color: var(--ow-gold-soft);
@@ -368,10 +476,10 @@ st.markdown(
       color: var(--ow-muted) !important; font-size: .8rem !important;
       letter-spacing: .08em;
     }
-    div[data-testid="stMetricValue"] { color: var(--ow-gold-text);
+    div[data-testid="stMetricValue"] { color: var(--ow-gold-bright);
                                        font-family: var(--ow-serif); }
 
-    /* tabs */
+    /* tabs: chapter bookmarks — the active one glints */
     div[data-baseweb="tab-list"] { gap: .1rem; border-bottom: 1px solid var(--ow-line); }
     button[data-baseweb="tab"] {
       background: transparent !important;
@@ -379,29 +487,31 @@ st.markdown(
       transition: background .15s ease;
     }
     button[data-baseweb="tab"]:hover { background: var(--ow-gold-faint) !important; }
+    button[data-baseweb="tab"] p { color: #b6b0c2 !important; }
     button[data-baseweb="tab"][aria-selected="true"] p {
-      color: var(--ow-gold-text) !important; font-weight: 600;
+      color: var(--ow-gold-bright) !important; font-weight: 600;
+      text-shadow: 0 0 12px rgba(240, 210, 138, .4);
     }
     div[data-baseweb="tab-highlight"] {
       background-color: var(--ow-gold);
-      box-shadow: 0 1px 4px rgba(168, 132, 44, .5);
+      box-shadow: 0 0 10px rgba(240, 210, 138, .7);
     }
     div[data-baseweb="tab-border"] { background: transparent; }
 
-    /* primary buttons: gilded seal (press = scale down, hover = lift) */
+    /* primary buttons: gilded seal (hover = bloom, press = settle) */
     button[data-testid="stBaseButton-primary"],
     div[data-testid="stFormSubmitButton"] button[kind="primary"],
     .stButton button[kind="primary"] {
-      background: linear-gradient(180deg, #e7c873 0%, var(--ow-gold-deep) 100%) !important;
-      color: #2a2008 !important; font-weight: 600;
-      border: 1px solid rgba(168, 132, 44, .7) !important;
-      box-shadow: 0 1px 3px rgba(45, 38, 24, .18), 0 0 10px rgba(183, 143, 46, .18);
+      background: linear-gradient(180deg, #f0d28a 0%, #b9924a 100%) !important;
+      color: #241a05 !important; font-weight: 600;
+      border: 1px solid rgba(240, 210, 138, .65) !important;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .4), 0 0 12px rgba(217, 181, 108, .2);
       transition: transform .12s ease, box-shadow .15s ease, filter .15s ease;
     }
     button[data-testid="stBaseButton-primary"]:hover,
     .stButton button[kind="primary"]:hover {
-      transform: translateY(-1px); filter: brightness(1.04);
-      box-shadow: 0 3px 8px rgba(45, 38, 24, .22), 0 0 16px rgba(183, 143, 46, .28);
+      transform: translateY(-1px); filter: brightness(1.05);
+      box-shadow: 0 3px 8px rgba(0, 0, 0, .45), 0 0 18px rgba(240, 210, 138, .35);
     }
     button[data-testid="stBaseButton-primary"]:active,
     .stButton button[kind="primary"]:active { transform: scale(.985); }
@@ -409,56 +519,104 @@ st.markdown(
                        border-color .15s ease; }
     .stButton button:hover { border-color: var(--ow-gold-soft); }
 
-    /* bordered containers read as paper cards */
+    /* bordered containers read as crystal panes */
     div[data-testid="stVerticalBlockBorderWrapper"] {
-      border-color: var(--ow-line) !important;
-      background: var(--ow-surface);
-      box-shadow: var(--ow-shadow);
+      border-color: var(--ow-edge) !important;
+      background: var(--ow-panel);
+      box-shadow: var(--ow-shadow), inset 0 1px 0 rgba(240, 210, 138, .07);
       transition: border-color .15s ease, box-shadow .2s ease;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:hover {
-      border-color: var(--ow-gold-soft) !important;
+      border-color: rgba(240, 210, 138, .42) !important;
       box-shadow: var(--ow-shadow-lift);
     }
 
     details[data-testid="stExpander"] {
       border: 1px solid var(--ow-line); border-radius: .6rem;
-      background: var(--ow-surface);
+      background: var(--ow-panel);
       transition: border-color .15s ease, box-shadow .2s ease;
     }
     details[data-testid="stExpander"]:hover { border-color: var(--ow-gold-soft); }
-    details[data-testid="stExpander"] summary:hover { color: var(--ow-gold-text); }
+    details[data-testid="stExpander"] summary:hover { color: var(--ow-gold-bright); }
 
     div[data-testid="stForm"] {
-      border: 1px solid var(--ow-line); border-radius: .9rem;
-      background: var(--ow-surface); padding: 1.05rem 1.15rem .85rem;
-      box-shadow: var(--ow-shadow);
+      border: 1px solid var(--ow-edge); border-radius: .9rem;
+      background: var(--ow-panel); padding: 1.05rem 1.15rem .85rem;
+      box-shadow: var(--ow-shadow), inset 0 1px 0 rgba(240, 210, 138, .07);
     }
 
-    section[data-testid="stSidebar"] { border-right: 1px solid #ddd3b8; }
+    /* the few frosted surfaces (sidebar / popover / hero only, so blur stays cheap) */
+    section[data-testid="stSidebar"] {
+      background: rgba(11, 15, 36, .92);
+      border-right: 1px solid #262e52;
+      backdrop-filter: blur(12px);
+    }
+    div[data-testid="stPopoverBody"] {
+      background: rgba(13, 18, 42, .94) !important;
+      border: 1px solid var(--ow-edge) !important;
+      backdrop-filter: blur(14px);
+      box-shadow: var(--ow-shadow-lift);
+    }
     .ow-brand { display: flex; gap: .6rem; align-items: center; padding: .15rem 0 .5rem; }
     .ow-brand .mark {
       width: 2.2rem; height: 2.2rem; border-radius: .65rem; font-size: 1.1rem;
       display: flex; align-items: center; justify-content: center;
-      background: linear-gradient(150deg, #f3e3b4, #e9d896);
+      background: linear-gradient(150deg, #1d2650, #11173a);
       border: 1px solid var(--ow-gold-soft);
-      box-shadow: 0 1px 4px rgba(45, 38, 24, .15);
+      box-shadow: 0 0 10px rgba(217, 181, 108, .18);
     }
     .ow-brand b { font-family: var(--ow-serif); font-size: 1.05rem;
                   color: var(--ow-ink); display: block; line-height: 1.2; }
     .ow-brand span { font-size: .72rem; color: var(--ow-muted); letter-spacing: .06em; }
 
     div[data-testid="stChatMessage"] {
-      background: var(--ow-surface);
+      background: var(--ow-panel);
       border: 1px solid var(--ow-line); border-radius: .85rem;
       box-shadow: var(--ow-shadow);
     }
 
-    [data-testid="stSpinner"] p { color: var(--ow-gold-text) !important; }
+    [data-testid="stSpinner"] p { color: var(--ow-gold-bright) !important; }
+    [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {
+      color: var(--ow-muted) !important;
+    }
+    [data-testid="stMarkdownContainer"] :not(pre) > code {
+      color: var(--ow-cyan); background: rgba(143, 214, 232, .08);
+    }
+
+    /* alerts: dark crystal tints (Streamlit's stock alert fills glare on the night bg) */
+    div[data-testid="stAlertContainer"] { border-radius: .7rem; }
+    div[data-testid="stAlertContainer"]:has([data-testid="stAlertContentInfo"]) {
+      background: rgba(143, 214, 232, .09) !important;
+      border: 1px solid rgba(143, 214, 232, .3);
+    }
+    div[data-testid="stAlertContainer"]:has([data-testid="stAlertContentInfo"]) * {
+      color: #a9d8e8 !important;
+    }
+    div[data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]) {
+      background: rgba(126, 200, 160, .09) !important;
+      border: 1px solid rgba(126, 200, 160, .3);
+    }
+    div[data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]) * {
+      color: #9ed8b8 !important;
+    }
+    div[data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]) {
+      background: rgba(224, 180, 106, .1) !important;
+      border: 1px solid rgba(224, 180, 106, .32);
+    }
+    div[data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]) * {
+      color: #e6c890 !important;
+    }
+    div[data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"]) {
+      background: rgba(224, 133, 133, .1) !important;
+      border: 1px solid rgba(224, 133, 133, .32);
+    }
+    div[data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"]) * {
+      color: #eaa9a9 !important;
+    }
 
     ::-webkit-scrollbar { width: 10px; height: 10px; }
-    ::-webkit-scrollbar-thumb { background: #d9cfb4; border-radius: 6px; }
-    ::-webkit-scrollbar-thumb:hover { background: #c8bb98; }
+    ::-webkit-scrollbar-thumb { background: #2c3458; border-radius: 6px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3a4470; }
 
     /* accessibility: honor the user's motion preference */
     @media (prefers-reduced-motion: reduce) {
@@ -506,7 +664,7 @@ def _empty_state(title: str, body: str, steps: list[tuple[str, str]]) -> None:
         <div class="ow-empty">
           <div class="icon"><svg width="38" height="38" viewBox="0 0 100 100"
                fill="none"><path d="M50 8 L58 42 L92 50 L58 58 L50 92 L42 58
-               L8 50 L42 42 Z" fill="#b78f2e" fill-opacity=".8"/></svg></div>
+               L8 50 L42 42 Z" fill="#f0d28a" fill-opacity=".85"/></svg></div>
           <h3>{html.escape(title)}</h3>
           <p>{html.escape(body)}</p>
           <div class="ow-steps">{cards}</div>
@@ -559,10 +717,10 @@ def _fail(e: Exception) -> None:
 def _dark_axes(chart: Any) -> Any:
     return (
         chart.configure_axis(
-            labelColor="#7b7261",
-            titleColor="#7b7261",
-            gridColor="#e8e0cc",
-            domainColor="#cfc4a6",
+            labelColor="#a8a2b8",
+            titleColor="#a8a2b8",
+            gridColor="#262e52",
+            domainColor="#3c4570",
         )
         .configure_view(strokeWidth=0)
         .configure(background="transparent")
@@ -573,7 +731,7 @@ def _bar_chart(rows: list[dict[str, Any]], *, x: str, y: str, height: int = 210)
     df = pd.DataFrame(rows)
     chart = (
         alt.Chart(df)
-        .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3, color="#b78f2e")
+        .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3, color="#d9b56c")
         .encode(
             x=alt.X(f"{x}:N", sort="-y", axis=alt.Axis(labelAngle=0, title=None)),
             y=alt.Y(f"{y}:Q", axis=alt.Axis(title=None, tickMinStep=1)),
@@ -588,7 +746,7 @@ def _hbar_chart(rows: list[dict[str, Any]], *, y: str, x: str, height: int = 240
     df = pd.DataFrame(rows)
     chart = (
         alt.Chart(df)
-        .mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3, color="#b78f2e")
+        .mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3, color="#d9b56c")
         .encode(
             y=alt.Y(f"{y}:N", sort="-x", axis=alt.Axis(title=None)),
             x=alt.X(f"{x}:Q", axis=alt.Axis(title=None, tickMinStep=1)),
@@ -610,8 +768,8 @@ def _timeline_chart(rows: list[dict[str, Any]]) -> None:
         ),
         tooltip=["order", "title"],
     )
-    chart = base.mark_line(color="#cfc4a6", strokeWidth=2) + base.mark_point(
-        filled=True, size=110, color="#b78f2e"
+    chart = base.mark_line(color="#4a5078", strokeWidth=2) + base.mark_point(
+        filled=True, size=110, color="#f0d28a"
     )
     st.altair_chart(
         _dark_axes(chart.properties(height=max(140, 28 * len(rows)))),
@@ -632,13 +790,13 @@ def _dot_graph(
     lines = [
         "digraph world {",
         '  bgcolor="transparent"; rankdir=LR; pad=0.2;',
-        '  node [shape=box style="rounded,filled" fillcolor="#fffdf7" color="#cfc4a6"',
-        '        fontcolor="#2d2618" fontsize=11 margin="0.16,0.08"];',
-        '  edge [color="#b3a787" fontcolor="#7b7261" fontsize=9 arrowsize=0.7];',
+        '  node [shape=box style="rounded,filled" fillcolor="#161e40" color="#3c4570"',
+        '        fontcolor="#ece5d3" fontsize=11 margin="0.16,0.08"];',
+        '  edge [color="#5a6388" fontcolor="#9d97ad" fontsize=9 arrowsize=0.7];',
     ]
     for node_id in sorted(node_ids):
         name, group = display.get(node_id, (node_id, ""))
-        color = _GRAPH_NODE_COLOR.get(group, "#cfc4a6")
+        color = _GRAPH_NODE_COLOR.get(group, "#6a7095")
         label = name.replace('"', "'")
         lines.append(f'  "{node_id}" [label="{label}" color="{color}"];')
     for edge in shown:
@@ -678,9 +836,9 @@ def _tree_dot(tree: dict[str, Any], name_of: dict[str, str]) -> str:
     lines = [
         "digraph dialogue {",
         '  bgcolor="transparent"; rankdir=TB; pad=0.2;',
-        '  node [shape=box style="rounded,filled" fillcolor="#fffdf7" color="#cfc4a6"',
-        '        fontcolor="#2d2618" fontsize=10 margin="0.14,0.1"];',
-        '  edge [color="#b3a787" fontcolor="#8a6a1e" fontsize=9 arrowsize=0.7];',
+        '  node [shape=box style="rounded,filled" fillcolor="#161e40" color="#3c4570"',
+        '        fontcolor="#ece5d3" fontsize=10 margin="0.14,0.1"];',
+        '  edge [color="#5a6388" fontcolor="#d9b56c" fontsize=9 arrowsize=0.7];',
     ]
     nodes = tree.get("nodes") or {}
     root = tree.get("root_node") or ""
@@ -691,7 +849,7 @@ def _tree_dot(tree: dict[str, Any], name_of: dict[str, str]) -> str:
         if len(text) > 26:
             text = text[:26] + "…"
         label = f"{speaker_name}\\n{text}" if speaker_name else text
-        extra = ' color="#a8842c" penwidth=2' if node_id == root else ""
+        extra = ' color="#f0d28a" penwidth=2' if node_id == root else ""
         lines.append(f'  "{node_id}" [label="{label}"{extra}];')
     for node_id, node in nodes.items():
         next_node = node.get("next_node")
@@ -749,25 +907,26 @@ _TOUR_JS = """
   const style = doc.createElement("style");
   style.id = "ow-tour-style";
   style.textContent =
-    "#ow-tour-card{position:fixed;z-index:99999;width:340px;max-width:86vw;" +
-    "background:#fffdf7;border:1px solid #cfc4a6;border-radius:12px;" +
-    "box-shadow:0 8px 30px rgba(45,38,24,.28);padding:14px 16px;" +
-    "font-family:system-ui,sans-serif;color:#2d2618;" +
+    "#ow-tour-card{position:fixed;z-index:9999998;width:340px;max-width:86vw;" +
+    "background:rgba(16,22,47,.97);border:1px solid rgba(240,210,138,.5);" +
+    "border-radius:12px;padding:14px 16px;" +
+    "box-shadow:0 8px 30px rgba(0,0,0,.55),0 0 18px rgba(217,181,108,.18);" +
+    "font-family:system-ui,sans-serif;color:#ece5d3;" +
     "transition:top .28s ease,left .28s ease,opacity .2s ease;}" +
     "#ow-tour-card.ow-moving{opacity:.25;}" +
-    "#ow-tour-card .t{font-weight:700;font-size:15px;margin-bottom:6px;color:#8a6a1e;}" +
+    "#ow-tour-card .t{font-weight:700;font-size:15px;margin-bottom:6px;color:#f0d28a;}" +
     "#ow-tour-card .b{font-size:13px;line-height:1.7;margin-bottom:10px;}" +
     "#ow-tour-card .f{display:flex;justify-content:space-between;align-items:center;" +
-    "font-size:12px;color:#7b7261;}" +
-    "#ow-tour-card button{margin-left:6px;border:1px solid #cfc4a6;border-radius:8px;" +
-    "background:#f7f3e9;color:#2d2618;padding:4px 10px;font-size:12px;cursor:pointer;}" +
-    "#ow-tour-card button.primary{background:linear-gradient(180deg,#e7c873,#b78f2e);" +
-    "border-color:#a8842c;color:#2a2008;font-weight:600;}" +
-    "#ow-tour-shield{position:fixed;inset:0;z-index:99997;background:transparent;}" +
-    "#ow-tour-ring{position:fixed;z-index:99998;pointer-events:none;" +
-    "border:2px solid #b78f2e;border-radius:10px;" +
+    "font-size:12px;color:#9d97ad;}" +
+    "#ow-tour-card button{margin-left:6px;border:1px solid #3c4570;border-radius:8px;" +
+    "background:#1a2348;color:#ece5d3;padding:4px 10px;font-size:12px;cursor:pointer;}" +
+    "#ow-tour-card button.primary{background:linear-gradient(180deg,#f0d28a,#b9924a);" +
+    "border-color:#d9b56c;color:#241a05;font-weight:600;}" +
+    "#ow-tour-shield{position:fixed;inset:0;z-index:9999996;background:transparent;}" +
+    "#ow-tour-ring{position:fixed;z-index:9999997;pointer-events:none;" +
+    "border:2px solid #f0d28a;border-radius:10px;" +
     "transition:all .28s ease;opacity:1;" +
-    "box-shadow:0 0 0 9999px rgba(45,38,24,.45),0 0 18px rgba(183,143,46,.8);}";
+    "box-shadow:0 0 0 9999px rgba(4,7,20,.6),0 0 18px rgba(240,210,138,.7);}";
   doc.head.appendChild(style);
   const shield = doc.createElement("div");
   shield.id = "ow-tour-shield";
@@ -858,6 +1017,16 @@ _TOUR_JS = """
     doc.getElementById("owt-next").onclick = function () {
       if (last) { cleanup(); } else { next(idx + 1); }
     };
+    // some anchors drift briefly after settling (e.g. the tab strip auto-scrolls the
+    // active tab into view) -> one delayed re-check snaps the card to its final spot
+    win.setTimeout(function () {
+      const el2 = findEl(STEPS[idx].find);
+      if (!el2) { return; }
+      const r2 = el2.getBoundingClientRect();
+      if (Math.abs(r2.left - r.left) > 4 || Math.abs(r2.top - r.top) > 4) {
+        place(idx, el2);
+      }
+    }, 260);
   }
   function next(idx) {
     if (idx < 0) { idx = 0; }
@@ -1005,7 +1174,7 @@ with st.sidebar:
           <div class="mark">
             <svg width="20" height="20" viewBox="0 0 100 100" fill="none">
               <path d="M50 8 L58 42 L92 50 L58 58 L50 92 L42 58 L8 50 L42 42 Z"
-                    fill="#a8842c" fill-opacity=".85"/>
+                    fill="#f0d28a" fill-opacity=".9"/>
             </svg>
           </div>
           <div><b>OWCopilot</b><span>世界观工作台</span></div>
@@ -1168,12 +1337,13 @@ st.markdown(
     f"""
     <div class="ow-hero">
       <svg class="ow-mark" width="120" height="120" viewBox="0 0 100 100" fill="none">
-        <circle cx="50" cy="50" r="41" stroke="#a8842c" stroke-opacity=".4"/>
-        <circle cx="50" cy="50" r="29" stroke="#a8842c" stroke-opacity=".25"/>
+        <circle cx="50" cy="50" r="41" stroke="#d9b56c" stroke-opacity=".45"/>
+        <circle class="ow-orbit" cx="50" cy="50" r="30" stroke="#8fd6e8"
+                stroke-opacity=".32" stroke-dasharray="3 6"/>
         <path d="M50 12 L57 43 L88 50 L57 57 L50 88 L43 57 L12 50 L43 43 Z"
-              fill="#b78f2e" fill-opacity=".18" stroke="#a8842c" stroke-opacity=".55"/>
+              fill="#d9b56c" fill-opacity=".16" stroke="#f0d28a" stroke-opacity=".6"/>
         <path d="M50 30 L53.5 46.5 L70 50 L53.5 53.5 L50 70 L46.5 53.5 L30 50 L46.5 46.5 Z"
-              fill="#b78f2e" fill-opacity=".3"/>
+              fill="#f0d28a" fill-opacity=".4"/>
       </svg>
       <h1>OWCopilot · 世界观工作台</h1>
       <p class="ow-tagline">执笔创世，落墨成史——每一条设定皆有出处，每一份草稿必经你手。</p>
