@@ -314,8 +314,11 @@ st.markdown(
     #ow-splash { animation: owSplashOut .7s ease .15s forwards; }
     @keyframes owSplashOut { to { opacity: 0; visibility: hidden; } }
 
-    /* deep-space canvas: nebula washes + a fixed star-dust veil, far below the content */
+    /* deep-space canvas: nebula washes + a fixed star-dust veil, far below the content.
+       isolation creates a stacking context so both star layers can sit at z=-1 —
+       guaranteed above the canvas, guaranteed below every piece of content. */
     [data-testid="stAppViewContainer"] {
+      isolation: isolate;
       background:
         radial-gradient(1100px 560px at 86% -12%, rgba(138, 123, 200, .14), transparent 60%),
         radial-gradient(900px 480px at -6% 4%, rgba(143, 214, 232, .08), transparent 55%),
@@ -324,7 +327,7 @@ st.markdown(
       background-attachment: fixed;
     }
     [data-testid="stAppViewContainer"]::before {
-      content: ""; position: fixed; inset: 0; pointer-events: none;
+      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: -1;
       background-image:
         radial-gradient(1px 1px at 17px 23px, rgba(236, 229, 211, .5) 60%, transparent),
         radial-gradient(1px 1px at 89px 67px, rgba(143, 214, 232, .38) 60%, transparent),
@@ -551,11 +554,27 @@ st.markdown(
       border-right: 1px solid #262e52;
       backdrop-filter: blur(12px);
     }
+    /* st.popover surfaces become centered crystal dialogs. The anchored placement walks
+       off the viewport when the trigger sits near an edge (measured: the settings panel
+       poked 92-116px past the top at 800x600) — fixed centering + vh caps make overflow
+       geometrically impossible. Selector note: stPopoverBody IS the positioned baseweb
+       element itself (no portal wrapper), so the override lands directly on it; selectbox
+       menus are separate popovers without this testid and keep anchored behavior. */
     div[data-testid="stPopoverBody"] {
-      background: rgba(13, 18, 42, .94) !important;
+      position: fixed !important;
+      top: 50% !important;
+      left: 50% !important;
+      transform: translate(-50%, -50%) !important;
+      z-index: 999995;
+      background: rgba(13, 18, 42, .96) !important;
       border: 1px solid var(--ow-edge) !important;
       backdrop-filter: blur(14px);
       box-shadow: var(--ow-shadow-lift);
+      /* a floating surface must never leave the viewport: cap it and scroll inside */
+      max-height: min(82vh, 720px) !important;
+      max-width: min(460px, 94vw) !important;
+      overflow-y: auto !important;
+      overscroll-behavior: contain;
     }
     .ow-brand { display: flex; gap: .6rem; align-items: center; padding: .15rem 0 .5rem; }
     .ow-brand .mark {
@@ -632,6 +651,53 @@ st.markdown(
 )
 
 
+def _spark_uri(tile_w: int, tile_h: int, px: float, x: int, y: int, fill: str, alpha: str) -> str:
+    """One small four-point star glint on a large transparent tile, as a CSS data URI.
+
+    The tile IS the spacing: background-size is set to the tile's intrinsic size (1:1),
+    so the star stays `px` pixels tall. Scaling a bare star SVG with background-size
+    stretches the star itself to the tile — screen-wide ghost shapes (round-10 bug).
+    """
+    scale = round(px / 14, 3)
+    return (
+        "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' "
+        f"width='{tile_w}' height='{tile_h}'%3E"
+        f"%3Cpath transform='translate({x} {y}) scale({scale})' "
+        "d='M7 0 L8.3 5.7 L14 7 L8.3 8.3 L7 14 L5.7 8.3 L0 7 L5.7 5.7 Z' "
+        f"fill='%23{fill}' fill-opacity='{alpha}'/%3E%3C/svg%3E\")"
+    )
+
+
+# The floating-stars layer: one four-point glint per large tile across four parallax
+# layers, drifting and glimmering on GPU-cheap transform/opacity only. z=-1 inside the
+# isolated app container keeps it above the canvas yet below every piece of content;
+# the global prefers-reduced-motion rule stills it.
+st.markdown(
+    "<style>"
+    '[data-testid="stAppViewContainer"]::after{'
+    "content:'';position:fixed;inset:-90px;pointer-events:none;z-index:-1;"
+    "background-image:"
+    + ",".join(
+        [
+            _spark_uri(660, 540, 14, 60, 80, "f0d28a", ".5"),
+            _spark_uri(900, 720, 8, 420, 300, "f0d28a", ".38"),
+            _spark_uri(780, 600, 10, 220, 160, "8fd6e8", ".4"),
+            _spark_uri(540, 460, 7, 100, 360, "ece5d3", ".32"),
+        ]
+    )
+    + ";"
+    "background-size:660px 540px,900px 720px,780px 600px,540px 460px;"
+    "background-position:0 0,0 0,0 0,0 0;"
+    "animation:owDrift 80s ease-in-out infinite alternate,"
+    "owGlimmer 9s ease-in-out infinite;}"
+    "@keyframes owDrift{from{transform:translate3d(0,0,0)}"
+    "to{transform:translate3d(-48px,-70px,0)}}"
+    "@keyframes owGlimmer{0%,100%{opacity:.5}50%{opacity:.95}}"
+    "</style>",
+    unsafe_allow_html=True,
+)
+
+
 # ------------------------------------------------------------------------------ ui helpers
 def _chip(text: str, *, kind: str = "", strong: str | None = None) -> str:
     cls = f"ow-chip {kind}".strip()
@@ -687,6 +753,47 @@ def _show_cost(result: dict[str, Any]) -> None:
     note = "（零模型成本）" if used == 0 else ""
     session_total = st.session_state.get("session_cost_usd", 0.0)
     st.caption(f"本次 ${used:.6f}{note} ｜ 会话累计 ${session_total:.6f}")
+
+
+def _flash(kind: str, text: str) -> None:
+    """Queue a notice that must survive the st.rerun() issued right after an action.
+
+    st.success() followed by st.rerun() never reaches the screen — the rerun interrupts
+    the flush. Anything the user must SEE after a state-changing action goes through here.
+    """
+    st.session_state.setdefault("_flash", []).append((kind, text))
+
+
+def _drain_flash() -> None:
+    icons = {
+        "success": ":material/done_all:",
+        "error": ":material/error:",
+        "warning": ":material/warning:",
+        "info": ":material/info:",
+    }
+    for kind, text in st.session_state.pop("_flash", []):
+        getattr(st, kind, st.info)(text, icon=icons.get(kind))
+
+
+def _set_extraction_draft(draft: dict[str, Any] | None) -> None:
+    """Swap the working draft atomically: gap_* answer widgets are keyed by gap ref, so
+    stale answers from a previous draft would silently pre-fill the next one."""
+    for key in [k for k in st.session_state if str(k).startswith("gap_")]:
+        del st.session_state[key]
+    if draft is None:
+        st.session_state.pop("extraction_draft", None)
+    else:
+        st.session_state["extraction_draft"] = draft
+
+
+def _prune_picker_state(key: str, valid: set[str]) -> None:
+    """Drop selections whose options no longer exist (entity deleted, world rolled back).
+    A keyed multiselect re-instantiated with stale values raises and kills the page."""
+    picked = st.session_state.get(key)
+    if isinstance(picked, list):
+        kept = [v for v in picked if v in valid]
+        if len(kept) != len(picked):
+            st.session_state[key] = kept
 
 
 def _call(label: str, fn, /, *args, **kwargs):
@@ -903,7 +1010,14 @@ _TOUR_JS = """
 (function () {
   const doc = window.parent.document;
   const win = window.parent;
-  if (doc.getElementById("ow-tour-ring")) { return; }
+  // relaunch semantics: if a previous tour is still (or half) alive, clear it and start
+  // fresh instead of silently refusing
+  ["ow-tour-card", "ow-tour-ring", "ow-tour-shield", "ow-tour-style"].forEach(
+    function (id) {
+      const prev = doc.getElementById(id);
+      if (prev) { prev.remove(); }
+    }
+  );
   const style = doc.createElement("style");
   style.id = "ow-tour-style";
   style.textContent =
@@ -973,8 +1087,18 @@ _TOUR_JS = """
     }
     win.requestAnimationFrame(tick);
   }
-  function place(idx, el) {
-    if (!el) { next(idx + 1); return; }
+  function place(idx, el, retried) {
+    if (!el) {
+      // the click that launches the tour also triggers a Streamlit rerun, which can hide
+      // an anchor for a beat — give it one longer grace pass before skipping the station
+      if (!retried) {
+        waitFor(STEPS[idx].find, function (el2) { place(idx, el2, true); },
+                performance.now() + 1800);
+        return;
+      }
+      next(idx + 1);
+      return;
+    }
     const r0 = el.getBoundingClientRect();
     if (r0.top < 0 || r0.bottom > win.innerHeight) {
       el.scrollIntoView({ block: "center", behavior: "instant" });
@@ -1049,7 +1173,7 @@ _TOUR_JS = """
 """
 
 
-def _render_tour() -> None:
+def _render_tour(run_id: int) -> None:
     """Game-style guided tour for first-time users: a same-origin component script drives
     the parent DOM (dim cutout + highlight ring + step card). Placement prefers the side
     of the target so the card never covers what it explains; anchors are polled each
@@ -1161,7 +1285,8 @@ def _render_tour() -> None:
     ]
     payload = json.dumps(steps, ensure_ascii=False)
     components.html(
-        "<script>const STEPS = " + payload + ";\n" + _TOUR_JS + "</script>",
+        f"<script>const TOUR_RUN = {run_id};\n"
+        "const STEPS = " + payload + ";\n" + _TOUR_JS + "</script>",
         height=0,
     )
 
@@ -1183,33 +1308,63 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     _section("世界")
+    _RECENT_MANUAL = "（手动输入路径）"
+
+    def _apply_recent_pick() -> None:
+        pick = st.session_state.get("recent_pick")
+        if pick and pick != _RECENT_MANUAL:
+            st.session_state["content_root"] = pick
+
     _recents = load_recent_workspaces()
     if _recents:
-        _recent_pick = st.selectbox(
+        # the picker must stay truthful: if the path was edited by hand, the old pick no
+        # longer describes reality, and a stale pick would also swallow the next change
+        # event for the same entry (the original "can't re-pick" bug)
+        _stale_pick = st.session_state.get("recent_pick")
+        if _stale_pick and _stale_pick != _RECENT_MANUAL:
+            if _stale_pick not in _recents or st.session_state.get("content_root") != _stale_pick:
+                st.session_state["recent_pick"] = _RECENT_MANUAL
+        st.selectbox(
             "最近打开",
-            ["（手动输入路径）"] + _recents,
+            [_RECENT_MANUAL] + _recents,
+            key="recent_pick",
+            on_change=_apply_recent_pick,
             help="最近翻阅过的世界，一键回到现场。",
         )
-        if (
-            _recent_pick != "（手动输入路径）"
-            and st.session_state.get("_applied_recent") != _recent_pick
-        ):
-            st.session_state["_applied_recent"] = _recent_pick
-            st.session_state["content_root"] = _recent_pick
-            st.rerun()
     content_root = st.text_input(
         "档案目录",
         value=st.session_state.get("content_root", _default_content_root()),
         help="你的世界存放在这个文件夹里。新世界请先选一个空目录。",
     )
     st.session_state["content_root"] = content_root
+
+    # Workspace-scoped session keys die with the workspace: a draft extracted from world A
+    # must never be submittable into world B, answers must not cite another world, and an
+    # ingest preview must not commit foreign files. One root change, one sweep.
+    _WORKSPACE_KEYS = (
+        "extraction_draft",
+        "ingest_preview",
+        "last_suggest",
+        "audit_markdown",
+        "audit_flash",
+        "ask_history",
+        "tree_participants",
+        "barks_speakers",
+    )
+    if st.session_state.get("_ws_root") != content_root:
+        for _ws_key in _WORKSPACE_KEYS:
+            st.session_state.pop(_ws_key, None)
+        for _ws_key in [k for k in st.session_state if str(k).startswith("gap_")]:
+            st.session_state.pop(_ws_key, None)
+        st.session_state["_ws_root"] = content_root
+
     if st.button("建立新世界", icon=":material/add_circle:", use_container_width=True):
         try:
             _initialize_content_root(content_root)
         except Exception as e:
             _fail(e)
         else:
-            st.success("档案馆已落成。")
+            _flash("success", "档案馆已落成。")
             st.rerun()
 
     # The offline providers are a test asset and never surface here: users either connect
@@ -1252,10 +1407,27 @@ with st.sidebar:
             )
         else:
             llm_model = picked_model
-        if base_url.strip():
-            os.environ["OPENAI_BASE_URL"] = base_url.strip()
-        if api_key.strip():
-            os.environ["OPENAI_API_KEY"] = api_key.strip()
+        # Connection env is a pure function of (this session's inputs, the .env snapshot
+        # taken at session start). Without the snapshot, switching to a provider with an
+        # empty Base URL would silently keep the PREVIOUS vendor's URL — requests would
+        # go to vendor A with vendor B's model id.
+        _env_defaults = st.session_state.setdefault(
+            "_env_defaults",
+            {
+                "base_url": os.environ.get("OPENAI_BASE_URL", ""),
+                "api_key": os.environ.get("OPENAI_API_KEY", ""),
+            },
+        )
+        _eff_base = base_url.strip() or _env_defaults["base_url"]
+        _eff_key = api_key.strip() or _env_defaults["api_key"]
+        if _eff_base:
+            os.environ["OPENAI_BASE_URL"] = _eff_base
+        else:
+            os.environ.pop("OPENAI_BASE_URL", None)
+        if _eff_key:
+            os.environ["OPENAI_API_KEY"] = _eff_key
+        else:
+            os.environ.pop("OPENAI_API_KEY", None)
         if st.button("测试连接", icon=":material/bolt:", use_container_width=True):
             with st.spinner("正在叩响厂商之门…"):
                 probe = probe_llm_connection_action(
@@ -1354,7 +1526,12 @@ st.markdown(
 )
 
 if st.session_state.pop("start_tour", False):
-    _render_tour()
+    # Streamlit dedupes components by content: an identical iframe is NOT remounted, so
+    # its script would never re-execute. A per-run nonce makes every launch unique.
+    st.session_state["tour_run_id"] = st.session_state.get("tour_run_id", 0) + 1
+    _render_tour(st.session_state["tour_run_id"])
+
+_drain_flash()
 
 inventory: dict[str, Any] | None = None
 if _ready:
@@ -1713,13 +1890,12 @@ with tab_genesis:
         )
         # ---------------------------------------------------------------- world seed
         with seed_tab:
-            picked_tpl = st.selectbox(
-                "从模板开始",
-                ["自定义"] + list(GENESIS_TEMPLATES),
-                help="选择题材模板一键填表，再随意修改。",
-            )
-            if picked_tpl != "自定义" and st.session_state.get("_tpl_applied") != picked_tpl:
-                _tpl = GENESIS_TEMPLATES[picked_tpl]
+
+            def _apply_template_pick() -> None:
+                pick = st.session_state.get("tpl_pick")
+                if not pick or pick == "自定义":
+                    return
+                _tpl = GENESIS_TEMPLATES[pick]
                 st.session_state["seed_idea"] = str(_tpl["idea"])
                 st.session_state["seed_genre"] = str(_tpl["game_genre"])
                 st.session_state["seed_fantasy"] = str(_tpl["player_fantasy"])
@@ -1728,8 +1904,16 @@ with tab_genesis:
                 st.session_state["seed_era"] = str(_tpl["era"])
                 st.session_state["seed_conflict"] = str(_tpl["core_conflict"])
                 st.session_state["seed_notes"] = str(_tpl["notes"])
-                st.session_state["_tpl_applied"] = picked_tpl
-                st.rerun()
+
+            # on_change fires exactly when the widget value actually changes — no applied
+            # flag to desync, and 自定义→同一模板 always refills
+            st.selectbox(
+                "从模板开始",
+                ["自定义"] + list(GENESIS_TEMPLATES),
+                key="tpl_pick",
+                on_change=_apply_template_pick,
+                help="选择题材模板一键填表，再随意修改。",
+            )
             st.session_state.setdefault("seed_styles", ["蒸汽朋克"])
             with st.form("world_seed_form"):
                 _section("核心设定")
@@ -1915,7 +2099,7 @@ with tab_genesis:
                             llm_model=llm_model,
                         )
                         _track_cost(result)
-                        st.session_state["extraction_draft"] = result["draft"]
+                        _set_extraction_draft(result["draft"])
                         st.rerun()
                 except Exception as e:
                     _fail(e)
@@ -1995,7 +2179,7 @@ with tab_genesis:
                             _fail(e)
                         else:
                             _track_cost(filled)
-                            st.session_state["extraction_draft"] = filled["draft"]
+                            _set_extraction_draft(filled["draft"])
                             st.rerun()
                     for gap in gaps:
                         st.text_input(
@@ -2028,12 +2212,14 @@ with tab_genesis:
                         _fail(e)
                     else:
                         _track_cost(submit_result)
-                        del st.session_state["extraction_draft"]
-                        st.success(
-                            f"草案已呈送审阅台（尚有 {submit_result['open_gaps']} 处留白）。"
+                        _set_extraction_draft(None)
+                        _flash(
+                            "success",
+                            f"草案已呈送审阅台（尚有 {submit_result['open_gaps']} 处留白）。",
                         )
+                        st.rerun()
                 if submit_cols[2].button("焚稿重来", icon=":material/delete:"):
-                    del st.session_state["extraction_draft"]
+                    _set_extraction_draft(None)
                     st.rerun()
         # ---------------------------------------------------------------- ingest
         with ingest_tab:
@@ -2125,7 +2311,7 @@ with tab_genesis:
                         if committed["has_errors"] and not allow_partial:
                             st.error("存在冲突，未写入。可勾选「跳过冲突对象」部分导入。")
                         else:
-                            st.success("导入完成。")
+                            _flash("success", "导入完成。")
                             st.rerun()
                 if commit_cols[2].button("取消"):
                     del st.session_state["ingest_preview"]
@@ -2555,7 +2741,7 @@ with tab_audit:
                         except Exception as e:
                             _fail(e)
                         else:
-                            st.success(f"已回滚 `{rolled['patch_id']}`。")
+                            _flash("success", f"已回滚 `{rolled['patch_id']}`。")
                             st.rerun()
 
         with prose_tab:
@@ -2751,6 +2937,7 @@ with tab_create:
             if not npc_rows:
                 st.info("档案中还没有角色。先创世或导入角色设定。")
             else:
+                _prune_picker_state("tree_participants", set(npc_label))
                 participants = st.multiselect(
                     "对话参与者",
                     options=list(npc_label),
@@ -2813,6 +3000,7 @@ with tab_create:
                 st.info("档案中还没有角色。先创世或导入角色设定。")
                 speaker_ids: list[str] = []
             else:
+                _prune_picker_state("barks_speakers", set(npc_label))
                 speaker_ids = st.multiselect(
                     "说话人",
                     options=list(npc_label),
@@ -3046,7 +3234,10 @@ with tab_review:
                             else:
                                 _track_cost(decided)
                                 written = decided.get("written_ref")
-                                st.success(f"已钤印入档{f'：{written}' if written else ''}。")
+                                _flash(
+                                    "success",
+                                    f"已钤印入档{f'：{written}' if written else ''}。",
+                                )
                                 st.rerun()
                         if reject_col.button(
                             "驳回",
@@ -3065,6 +3256,7 @@ with tab_review:
                             except Exception as e:
                                 _fail(e)
                             else:
+                                _flash("success", "已驳回，草稿就地焚毁。")
                                 st.rerun()
 
 # ------------------------------------------------------------------------------ export

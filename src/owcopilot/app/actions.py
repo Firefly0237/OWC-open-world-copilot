@@ -36,7 +36,7 @@ from ..extraction import (
     quests_from_beats,
 )
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
-from ..llm.cache import NoOpCache
+from ..llm.cache import CacheBackend, NoOpCache, build_cache_backend
 from ..llm.gateway import LLMGateway, OpenAICompatProvider
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
@@ -519,6 +519,23 @@ def run_project_export_action(
         }
 
 
+_ACTION_CACHE: CacheBackend | None = None
+
+
+def _action_cache() -> CacheBackend:
+    """One process-lifetime L1/L2 cache shared by every real-mode action gateway.
+
+    Same assembly as the REST service (`service.api._build_cache`): without it, every
+    Workbench rerun built a throwaway gateway with NoOpCache and a user asking the same
+    question twice paid twice. Offline mode stays uncached on purpose — it is the test
+    substrate, and cross-test result sharing would couple unrelated tests.
+    """
+    global _ACTION_CACHE
+    if _ACTION_CACHE is None:
+        _ACTION_CACHE = build_cache_backend("exact+semantic")
+    return _ACTION_CACHE
+
+
 def _gateway(
     *, task: str, llm_mode: str, llm_model: str, offline_provider: Any
 ) -> tuple[LLMGateway, TelemetryCollector]:
@@ -532,7 +549,7 @@ def _gateway(
     gateway = LLMGateway(
         providers={"cheap": provider},
         router=StaticRouter(mapping={task: "cheap"}),
-        cache=NoOpCache(),
+        cache=_action_cache() if real else NoOpCache(),
         telemetry=telemetry,
         max_retries=1 if real else 0,
         retry_backoff_seconds=1.0 if real else 0.0,

@@ -123,3 +123,15 @@ def test_create_and_review_loop(root: str) -> None:
 def test_barks_action_rejects_unknown_speaker(root: str) -> None:
     with pytest.raises(ValueError, match="unknown speaker"):
         run_barks_action(root, speaker_ids=["npc_nobody"], topic="hello")
+
+
+def test_review_decisions_are_final(root: str) -> None:
+    draft = run_draft_action(root, brief="Find the missing scout near the fort")
+    item_id = draft["review_item_id"]
+    decide_review_action(root, item_id=item_id, decision="accepted", operator="lead")
+    # a second decision (double click, REST retry, second tab) must be refused in either
+    # direction — otherwise provenance flips on content that is already materialised
+    with pytest.raises(ValueError, match="already decided"):
+        decide_review_action(root, item_id=item_id, decision="rejected", operator="lead")
+    with pytest.raises(ValueError, match="already decided"):
+        decide_review_action(root, item_id=item_id, decision="accepted", operator="lead")

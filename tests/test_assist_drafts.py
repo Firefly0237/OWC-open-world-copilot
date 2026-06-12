@@ -60,6 +60,35 @@ def test_parse_quest_draft_tolerates_real_model_shape_drift() -> None:
     assert quest.metadata == {}
 
 
+def test_parse_quest_draft_coerces_timeline_order_drift() -> None:
+    """Round-10 live run: deepseek answered `"timeline_order": "side"` and the draft action
+    500ed on ValidationError. Numeric strings coerce; junk degrades to None but stays
+    visible to the reviewer via metadata."""
+    junk = parse_quest_draft(json.dumps({"title": "T", "objective": "O", "timeline_order": "side"}))
+    assert junk.timeline_order is None
+    assert junk.metadata["model_timeline_order"] == "side"
+    numeric = parse_quest_draft(
+        json.dumps({"title": "T", "objective": "O", "timeline_order": " 7 "})
+    )
+    assert numeric.timeline_order == 7
+
+
+def test_parse_quest_draft_coerces_numeric_scalar_strings() -> None:
+    """Round-10 live rerun: stage ids arrived as ints (`{"id": 1}`); string fields must
+    stringify scalars instead of letting Pydantic refuse the draft."""
+    quest = parse_quest_draft(
+        json.dumps(
+            {
+                "title": "T",
+                "objective": "O",
+                "stages": [{"id": 1, "summary": "集合"}, {"id": 2, "description": "出发"}],
+            }
+        )
+    )
+    assert [stage.id for stage in quest.stages] == ["1", "2"]
+    assert quest.stages[1].summary == "出发"
+
+
 def test_parse_quest_draft_converts_reward_mapping() -> None:
     quest = parse_quest_draft(json.dumps({"title": "T", "objective": "O", "rewards": {"gold": 75}}))
     assert quest.rewards[0].kind == "gold"

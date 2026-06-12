@@ -113,6 +113,12 @@ def _normalize_quest_payload(data: dict) -> dict:
     occasionally scalar strings where the schema wants lists. Strictness belongs to the audit
     layer, not JSON shape parsing — mirror the QA-side lesson."""
     normalized = dict(data)
+    # Scalar string fields sometimes arrive as numbers (round-10 live rerun: stage ids
+    # came back as ints). Pydantic v2 rightly refuses int->str, so stringify here.
+    for key in ("id", "title", "giver_npc", "location", "objective"):
+        value = normalized.get(key)
+        if value is not None and not isinstance(value, str):
+            normalized[key] = str(value)
     for key in ("prerequisites", "dialogue_refs", "localization_keys", "tags"):
         value = normalized.get(key)
         if value is None and key in normalized:
@@ -121,6 +127,20 @@ def _normalize_quest_payload(data: dict) -> dict:
             normalized[key] = [value] if value.strip() else []
         elif isinstance(value, dict):
             normalized[key] = [str(item) for item in value.values() if str(item).strip()]
+    order = normalized.get("timeline_order")
+    if order is not None and not isinstance(order, bool) and not isinstance(order, int):
+        # Round-10 live run: the model answered `"timeline_order": "side"`. Coerce numeric
+        # strings; anything else degrades to None with the raw value kept in metadata so
+        # the reviewer still sees what the model meant — a draft must never 500 on this.
+        try:
+            normalized["timeline_order"] = int(str(order).strip())
+        except ValueError:
+            normalized["timeline_order"] = None
+            meta = normalized.get("metadata")
+            normalized["metadata"] = {
+                **(meta if isinstance(meta, dict) else {}),
+                "model_timeline_order": str(order),
+            }
     rewards = normalized.get("rewards")
     if rewards is None and "rewards" in normalized:
         normalized["rewards"] = []
@@ -171,6 +191,9 @@ def _normalize_stage(stage: dict, index: int) -> dict:
     """Models call the stage text `description`/`text`/`name` interchangeably; the schema wants
     `summary`. Keep whatever id they gave, default one otherwise."""
     normalized = dict(stage)
+    raw_id = normalized.get("id")
+    if raw_id is not None and not isinstance(raw_id, str):
+        normalized["id"] = str(raw_id)
     if not str(normalized.get("id") or "").strip():
         normalized["id"] = f"stage_{index}"
     if not str(normalized.get("summary") or "").strip():

@@ -37,6 +37,14 @@ def decide_review_item(
         raise ValueError("operator is required for review decisions")
     queue = ReviewQueue(project.sqlite_store)
     item = queue.get(item_id)
+    # Decisions are final. Without this guard a second accept/reject (double click, REST
+    # retry, two tabs) could flip an already-materialised item to "rejected" and corrupt
+    # the provenance trail, or re-merge a bundle.
+    if item.status != "pending_review":
+        raise ValueError(
+            f"review item '{item_id}' was already decided ({item.status}); "
+            "decisions are final — generate a new draft instead"
+        )
 
     if decision == "rejected":
         decided = queue.mark(item_id, "rejected", decided_by=operator)
