@@ -26,20 +26,38 @@ validated, repaired Quest) are kept for compatibility with earlier demos and the
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
 import re
 import time
+import urllib.parse
 import uuid
 from collections import deque
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
+from ..app.actions import (
+    decide_review_action,
+    delete_object_action,
+    list_review_items_action,
+    run_theme_sweep_action,
+    update_entity_action,
+)
+from ..app.workspaces import (
+    create_managed_world,
+    export_world_zip,
+    import_world_zip,
+    list_managed_worlds,
+    sanitize_world_name,
+    worlds_home,
+)
 from ..assembly import PrefixMode, RouterMode, build_grounded_pipeline
 from ..assist.barks import BarkBatchService
 from ..assist.dialogue_trees import DialogueTreeService, OfflineDialogueTreeProvider
@@ -492,6 +510,90 @@ class ProjectExportResponse(BaseModel):
     project: str
     output_dir: str
     manifest: dict[str, Any]
+    cost_budget: dict[str, Any]
+
+
+# ---- round-13 platform endpoints: workspaces / review decisions / sweep / manage ----
+class WorkspaceInfo(BaseModel):
+    name: str
+    path: str
+
+
+class WorkspaceListResponse(BaseModel):
+    workspaces: list[WorkspaceInfo]
+
+
+class WorkspaceCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class WorkspaceImportRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    zip_base64: str = Field(min_length=4)
+
+
+class ReviewItemsResponse(BaseModel):
+    project: str
+    count: int
+    items: list[dict[str, Any]]
+    cost_budget: dict[str, Any]
+
+
+class ReviewDecideRequest(BaseModel):
+    decision: str = Field(pattern="^(accepted|rejected)$")
+    operator: str = Field(min_length=1, max_length=80)
+
+
+class ReviewDecideResponse(BaseModel):
+    project: str
+    item_id: str
+    decision: str
+    written_ref: str | None = None
+    post_audit_open_errors: int = 0
+    cost_budget: dict[str, Any]
+
+
+class ProjectSweepRequest(BaseModel):
+    theme: str = Field(min_length=1, max_length=200)
+    extra_terms: list[str] = Field(default_factory=list)
+    use_llm: bool = False
+    llm_mode: str = "offline"
+    llm_model: str = "deepseek-v4-flash"
+    max_judge: int = Field(default=400, ge=1, le=2000)
+
+
+class ProjectSweepResponse(BaseModel):
+    project: str
+    theme: str
+    scanned_total: int
+    scanned_by_kind: dict[str, int]
+    llm_used: bool
+    judged_count: int
+    judge_skipped: int
+    hits: list[dict[str, Any]]
+    review_suggested: list[dict[str, Any]]
+    markdown: str
+    cost_budget: dict[str, Any]
+
+
+class EntityUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    tags: list[str] | None = None
+
+
+class EntityUpdateResponse(BaseModel):
+    project: str
+    entity: dict[str, Any]
+    changed: list[str]
+    cost_budget: dict[str, Any]
+
+
+class ObjectDeleteResponse(BaseModel):
+    project: str
+    deleted_ref: str
+    removed_relations: int
+    post_audit_open_errors: int
     cost_budget: dict[str, Any]
 
 
@@ -1621,6 +1723,223 @@ def create_app() -> FastAPI:
             )
         finally:
             project_context.close()
+
+    # ---- round-13 platform endpoints: the standardized surface any client (the Vue
+    # frontend, studio pipelines, CI) integrates against. Same gates as everything else:
+    # optional API key, rate limit, real mode fail-closed.
+    def _project_root_or_404(project: str) -> str:
+        content_root = _project_content_root(project)
+        if content_root is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"project {project!r} is not registered (OWCOPILOT_PROJECTS_JSON)",
+            )
+        return str(content_root)
+
+    def _manage_error(e: ValueError) -> HTTPException:
+        status = 404 if "不存在" in str(e) else 409
+        return HTTPException(status_code=status, detail=str(e))
+
+    @app.get("/workspaces", response_model=WorkspaceListResponse)
+    def list_workspaces(
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> WorkspaceListResponse:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        return WorkspaceListResponse(workspaces=[WorkspaceInfo(**w) for w in list_managed_worlds()])
+
+    @app.post("/workspaces", response_model=WorkspaceInfo, status_code=201)
+    def create_workspace(
+        req: WorkspaceCreateRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> WorkspaceInfo:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        try:
+            created = create_managed_world(req.name)
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        return WorkspaceInfo(name=created.name, path=str(created))
+
+    @app.post("/workspaces:import", response_model=WorkspaceInfo, status_code=201)
+    def import_workspace(
+        req: WorkspaceImportRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> WorkspaceInfo:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        try:
+            data = base64.b64decode(req.zip_base64, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise HTTPException(status_code=400, detail="zip_base64 不是有效的 base64") from e
+        try:
+            imported = import_world_zip(data, req.name)
+        except ValueError as e:
+            # name collision is a conflict; anything else (slip, empty, not a world
+            # pack) is a bad request
+            status = 409 if "已存在" in str(e) else 400
+            raise HTTPException(status_code=status, detail=str(e)) from e
+        return WorkspaceInfo(name=imported.name, path=str(imported))
+
+    @app.get("/workspaces/{name}/pack")
+    def download_workspace_pack(
+        name: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> Response:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        try:
+            safe_name = sanitize_world_name(name)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        target = worlds_home() / safe_name
+        if not target.exists():
+            raise HTTPException(status_code=404, detail=f"世界「{safe_name}」不存在")
+        # HTTP headers are latin-1: CJK names need the RFC 5987 filename* form, with a
+        # plain ASCII fallback for ancient clients
+        encoded = urllib.parse.quote(f"{safe_name}-pack.zip")
+        return Response(
+            content=export_world_zip(target),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=\"world-pack.zip\"; filename*=UTF-8''{encoded}"
+                )
+            },
+        )
+
+    @app.get("/projects/{project}/review_items", response_model=ReviewItemsResponse)
+    def list_review_items(
+        project: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> ReviewItemsResponse:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        result = list_review_items_action(_project_root_or_404(project))
+        return ReviewItemsResponse(project=project, **result)
+
+    @app.post(
+        "/projects/{project}/review_items/{item_id}:decide",
+        response_model=ReviewDecideResponse,
+    )
+    def decide_review_item_endpoint(
+        project: str,
+        item_id: str,
+        req: ReviewDecideRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> ReviewDecideResponse:
+        """The HITL write path over REST: decisions are final (the backend guard turns a
+        double decide into 409, so client retries cannot corrupt provenance)."""
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        try:
+            decided = decide_review_action(
+                _project_root_or_404(project),
+                item_id=item_id,
+                decision=req.decision,
+                operator=req.operator,
+            )
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=f"review item not found: {e}") from e
+        except ValueError as e:
+            raise _manage_error(e) from e
+        return ReviewDecideResponse(
+            project=project,
+            item_id=item_id,
+            decision=str(decided.get("decision", req.decision)),
+            written_ref=decided.get("written_ref"),
+            post_audit_open_errors=int(decided.get("post_audit_open_errors", 0)),
+            cost_budget=decided.get("cost_budget") or {},
+        )
+
+    @app.post("/projects/{project}/sweeps:run", response_model=ProjectSweepResponse)
+    def run_theme_sweep(
+        project: str,
+        req: ProjectSweepRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> ProjectSweepResponse:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        if req.use_llm and req.llm_mode == "real":
+            if not os.getenv("OWCOPILOT_API_KEY"):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "llm_mode=real over the API requires OWCOPILOT_API_KEY to be "
+                        "configured (fail-closed: real mode spends provider credit)"
+                    ),
+                )
+            if not os.getenv("OPENAI_API_KEY"):
+                raise HTTPException(
+                    status_code=503,
+                    detail="real provider is not configured (OPENAI_BASE_URL / OPENAI_API_KEY)",
+                )
+        result = run_theme_sweep_action(
+            _project_root_or_404(project),
+            theme=req.theme,
+            extra_terms=req.extra_terms,
+            use_llm=req.use_llm,
+            llm_mode=req.llm_mode,
+            llm_model=req.llm_model,
+            max_judge=req.max_judge,
+        )
+        return ProjectSweepResponse(
+            project=project, **{k: v for k, v in result.items() if k != "terms"}
+        )
+
+    @app.patch("/projects/{project}/entities/{entity_id}", response_model=EntityUpdateResponse)
+    def update_entity(
+        project: str,
+        entity_id: str,
+        req: EntityUpdateRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> EntityUpdateResponse:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        try:
+            result = update_entity_action(
+                _project_root_or_404(project),
+                entity_id=entity_id,
+                name=req.name,
+                description=req.description,
+                tags=req.tags,
+            )
+        except ValueError as e:
+            raise _manage_error(e) from e
+        return EntityUpdateResponse(project=project, **result)
+
+    @app.delete(
+        "/projects/{project}/objects/{ref_type}/{object_id}",
+        response_model=ObjectDeleteResponse,
+    )
+    def delete_object(
+        project: str,
+        ref_type: str,
+        object_id: str,
+        request: Request,
+        cascade_relations: bool = True,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> ObjectDeleteResponse:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        try:
+            result = delete_object_action(
+                _project_root_or_404(project),
+                ref_type=ref_type,
+                object_id=object_id,
+                cascade_relations=cascade_relations,
+            )
+        except ValueError as e:
+            raise _manage_error(e) from e
+        return ObjectDeleteResponse(project=project, **result)
 
     @app.post("/projects/{project}/exports", response_model=ProjectExportResponse)
     def export_project_content(
