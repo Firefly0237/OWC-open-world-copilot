@@ -29,6 +29,9 @@ function applyProject(): void {
       <nav>
         <RouterLink to="/overview">世界总览</RouterLink>
         <RouterLink to="/archive">设定档案</RouterLink>
+        <RouterLink to="/genesis">创世工坊</RouterLink>
+        <RouterLink to="/ask">世界问答</RouterLink>
+        <RouterLink to="/review">审阅台</RouterLink>
       </nav>
       <div class="project">
         <input v-model="project" placeholder="项目名（如 demo）" @keydown.enter="applyProject" />
