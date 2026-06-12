@@ -116,6 +116,7 @@ import streamlit.components.v1 as components
 from owcopilot.app.actions import (
     add_reference_action,
     decide_review_action,
+    delete_object_action,
     fill_extraction_gaps_action,
     list_patches_action,
     list_project_issues_action,
@@ -140,10 +141,18 @@ from owcopilot.app.actions import (
     run_world_seed_action,
     search_references_action,
     submit_extraction_action,
+    update_entity_action,
 )
 from owcopilot.app.genesis_templates import GENESIS_TEMPLATES
 from owcopilot.app.view_models import build_content_inventory, build_project_overview
-from owcopilot.app.workspaces import load_recent_workspaces, remember_workspace
+from owcopilot.app.workspaces import (
+    create_managed_world,
+    export_world_zip,
+    import_world_zip,
+    list_managed_worlds,
+    load_recent_workspaces,
+    remember_workspace,
+)
 from owcopilot.content.models import ContentBundle
 from owcopilot.content.store import ContentStore
 from owcopilot.extraction import decode_document_bytes as decode_manuscript_bytes
@@ -262,7 +271,10 @@ _CUSTOM_MODEL_OPTION = "自定义输入…"
 _PROBE_ERROR_TEXT = {
     "auth": "鉴权失败（401）：请检查 API Key 是否正确、是否有该模型的权限。",
     "rate_limit": "限流（429）：请求太频繁或额度受限，稍后再试。",
-    "timeout": "连接超时：检查网络，或确认 Base URL 是否正确。",
+    "timeout": (
+        "连接超时：网络不稳，或本次生成耗时超过上限。创世/提炼等长任务已自动放宽至 240 秒；"
+        "仍超时可在「设置 → 高级」调大生成超时，或减小生成规模后重试。"
+    ),
     "connection": "无法连接：Base URL 可能不对，或网络不通。",
     "missing_dependency": "未安装真实模型依赖：pip install owcopilot[live]",
     "provider_error": "服务商返回错误：检查模型 ID 与账户状态。",
@@ -978,6 +990,9 @@ def _default_content_root() -> str:
     from_query = st.query_params.get("root", "").strip()
     if from_query:
         return from_query
+    managed = list_managed_worlds()
+    if managed:  # most recently touched managed world wins
+        return str(managed[0]["path"])
     return str((Path.cwd() / "content").resolve())
 
 
@@ -1184,8 +1199,9 @@ def _render_tour(run_id: int) -> None:
             "find": {"kind": "testid", "value": "stSidebar"},
             "title": "欢迎来到 OWCopilot",
             "body": (
-                "这是一座属于你的世界档案馆。左侧是总控台：先在「世界」一栏选一个文件夹"
-                "存放你的世界——填好路径，点「建立新世界」，档案馆就开张了。"
+                "这是一座属于你的世界档案馆。左侧是总控台：在「世界」一栏给新世界起个名字，"
+                "点「创建空白世界」；同事发来的世界包（.zip）也在这里导入——"
+                "不需要填写任何路径。"
             ),
         },
         {
@@ -1219,11 +1235,12 @@ def _render_tour(run_id: int) -> None:
         {
             "find": {"kind": "tab", "text": "创世工坊"},
             "click": {"kind": "tab", "text": "创世工坊"},
-            "title": "创世工坊 · 从无到有",
+            "title": "创世工坊 · 从无到有，或带着旧世界来",
             "body": (
-                "三种开局任选：写一句想法点「开辟世界」，生成整套世界草案；"
-                "把小说或剧本丢进「文稿提炼」，自动整理成档案；已有 Excel 设定表，"
-                "就走「表格导入」。灵感素材放进「灵感书阁」，只供借鉴、不入正史。"
+                "三种开局任选：写一句想法点「开辟世界」；小说、剧本、散乱笔记丢进"
+                "「文稿提炼」（txt / md / docx 都行，AI 替你整理成档案）；规整的"
+                " Excel / JSON 设定表走「表格导入」——页内附「我该上传什么」清单。"
+                "灵感素材放「灵感书阁」，只供借鉴、不入正史。"
             ),
         },
         {
@@ -1277,9 +1294,9 @@ def _render_tour(run_id: int) -> None:
             "click": {"kind": "tab", "text": "导出交付"},
             "title": "导出交付 · 装订成册",
             "body": (
-                "完成的世界从这里带走：导出 Unreal / Unity 引擎数据表，"
-                "或装订成可阅读的设定集（Markdown / Word）。左下角随时能看到"
-                "每一步花了多少钱。祝创作愉快！"
+                "完成的世界从这里带走：导出 Unreal / Unity 引擎数据表，装订成设定集"
+                "（Markdown / Word），或下载世界包（.zip）——换机、备份、交接，"
+                "导入即还原。左下角随时能看到每一步花了多少钱。祝创作愉快！"
             ),
         },
     ]
@@ -1308,35 +1325,118 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     _section("世界")
-    _RECENT_MANUAL = "（手动输入路径）"
+    # Managed worlds (app-owned storage, picked by NAME) are the default; pointing at an
+    # arbitrary local path survives as the advanced option. This mirrors how shipped
+    # tools handle user content and is the only mode portable to a hosted deployment.
+    _CUSTOM_WORLD = "自定义路径…"
+    _managed_worlds = list_managed_worlds()
+    _world_paths = {w["name"]: str(w["path"]) for w in _managed_worlds}
+    st.session_state.setdefault("content_root", _default_content_root())
 
-    def _apply_recent_pick() -> None:
-        pick = st.session_state.get("recent_pick")
-        if pick and pick != _RECENT_MANUAL:
-            st.session_state["content_root"] = pick
+    def _apply_world_pick() -> None:
+        pick = st.session_state.get("world_pick")
+        target = _world_paths.get(str(pick))
+        if target:
+            st.session_state["content_root"] = target
 
-    _recents = load_recent_workspaces()
-    if _recents:
-        # the picker must stay truthful: if the path was edited by hand, the old pick no
-        # longer describes reality, and a stale pick would also swallow the next change
-        # event for the same entry (the original "can't re-pick" bug)
-        _stale_pick = st.session_state.get("recent_pick")
-        if _stale_pick and _stale_pick != _RECENT_MANUAL:
-            if _stale_pick not in _recents or st.session_state.get("content_root") != _stale_pick:
-                st.session_state["recent_pick"] = _RECENT_MANUAL
-        st.selectbox(
-            "最近打开",
-            [_RECENT_MANUAL] + _recents,
-            key="recent_pick",
-            on_change=_apply_recent_pick,
-            help="最近翻阅过的世界，一键回到现场。",
+    if _managed_worlds:
+        _root_now = (
+            str(Path(st.session_state["content_root"]))
+            if (st.session_state["content_root"].strip())
+            else ""
         )
-    content_root = st.text_input(
-        "档案目录",
-        value=st.session_state.get("content_root", _default_content_root()),
-        help="你的世界存放在这个文件夹里。新世界请先选一个空目录。",
+        _match_name = next((n for n, p in _world_paths.items() if str(Path(p)) == _root_now), None)
+        # keep the picker truthful: a managed pick that no longer matches the actual root
+        # is stale and would swallow the next change event for the same entry
+        _pick_now = st.session_state.get("world_pick")
+        if _pick_now is None:
+            st.session_state["world_pick"] = _match_name or _CUSTOM_WORLD
+        elif _pick_now != _CUSTOM_WORLD and _world_paths.get(str(_pick_now)) != _root_now:
+            st.session_state["world_pick"] = _match_name or _CUSTOM_WORLD
+        st.selectbox(
+            "我的世界",
+            list(_world_paths) + [_CUSTOM_WORLD],
+            key="world_pick",
+            on_change=_apply_world_pick,
+            help="世界保存在本机应用目录（~/.owcopilot/worlds）。选「自定义路径…」可指向任意文件夹。",
+        )
+
+    with st.expander("新建 / 导入世界", icon=":material/add_circle:"):
+        _new_name = st.text_input("新世界名称", key="new_world_name", placeholder="例如：盐汐群岛")
+        if st.button("创建空白世界", icon=":material/flare:", use_container_width=True):
+            try:
+                _created = create_managed_world(_new_name)
+            except Exception as e:
+                _fail(e)
+            else:
+                st.session_state["content_root"] = str(_created)
+                _flash("success", f"世界「{_created.name}」已落成。")
+                st.rerun()
+        _pack_file = st.file_uploader(
+            "导入世界包（.zip）",
+            type=["zip"],
+            key="world_pack_upload",
+            help="OWCopilot 导出的世界包，或任何含 world/quests 等目录的内容仓压缩包。",
+        )
+        if _pack_file is not None:
+            _pack_name = st.text_input(
+                "导入为", value=Path(_pack_file.name).stem, key="world_pack_name"
+            )
+            if st.button("导入世界包", icon=":material/unarchive:", use_container_width=True):
+                try:
+                    _imported = import_world_zip(_pack_file.getvalue(), _pack_name)
+                except Exception as e:
+                    _fail(e)
+                else:
+                    st.session_state["content_root"] = str(_imported)
+                    _flash("success", f"世界「{_imported.name}」已导入。")
+                    st.rerun()
+
+    _show_custom_path = (not _managed_worlds) or (
+        st.session_state.get("world_pick") == _CUSTOM_WORLD
     )
-    st.session_state["content_root"] = content_root
+    if _show_custom_path:
+        _RECENT_MANUAL = "（手动输入路径）"
+
+        def _apply_recent_pick() -> None:
+            pick = st.session_state.get("recent_pick")
+            if pick and pick != _RECENT_MANUAL:
+                st.session_state["content_root"] = pick
+
+        _recents = load_recent_workspaces()
+        if _recents:
+            # same truthfulness rule as the world picker (the "can't re-pick" bug class)
+            _stale_pick = st.session_state.get("recent_pick")
+            if _stale_pick and _stale_pick != _RECENT_MANUAL:
+                if (
+                    _stale_pick not in _recents
+                    or st.session_state.get("content_root") != _stale_pick
+                ):
+                    st.session_state["recent_pick"] = _RECENT_MANUAL
+            st.selectbox(
+                "最近打开",
+                [_RECENT_MANUAL] + _recents,
+                key="recent_pick",
+                on_change=_apply_recent_pick,
+                help="最近翻阅过的路径，一键回到现场。",
+            )
+        content_root = st.text_input(
+            "档案目录",
+            value=st.session_state.get("content_root", _default_content_root()),
+            help="你的世界存放在这个文件夹里。新世界请先选一个空目录。",
+        )
+        st.session_state["content_root"] = content_root
+        if st.button(
+            "在此路径建立新世界", icon=":material/create_new_folder:", use_container_width=True
+        ):
+            try:
+                _initialize_content_root(content_root)
+            except Exception as e:
+                _fail(e)
+            else:
+                _flash("success", "档案馆已落成。")
+                st.rerun()
+    content_root = st.session_state["content_root"]
 
     # Workspace-scoped session keys die with the workspace: a draft extracted from world A
     # must never be submittable into world B, answers must not cite another world, and an
@@ -1357,15 +1457,6 @@ with st.sidebar:
         for _ws_key in [k for k in st.session_state if str(k).startswith("gap_")]:
             st.session_state.pop(_ws_key, None)
         st.session_state["_ws_root"] = content_root
-
-    if st.button("建立新世界", icon=":material/add_circle:", use_container_width=True):
-        try:
-            _initialize_content_root(content_root)
-        except Exception as e:
-            _fail(e)
-        else:
-            _flash("success", "档案馆已落成。")
-            st.rerun()
 
     # The offline providers are a test asset and never surface here: users either connect
     # their own key (BYO, in-process only) or the AI features stay locked with guidance.
@@ -1416,6 +1507,7 @@ with st.sidebar:
             {
                 "base_url": os.environ.get("OPENAI_BASE_URL", ""),
                 "api_key": os.environ.get("OPENAI_API_KEY", ""),
+                "timeout": os.environ.get("OWCOPILOT_PROVIDER_TIMEOUT_SEC", ""),
             },
         )
         _eff_base = base_url.strip() or _env_defaults["base_url"]
@@ -1461,6 +1553,24 @@ with st.sidebar:
         st.session_state["operator"] = operator
         st.divider()
         _section("高级")
+        st.session_state.setdefault("llm_timeout_sec", 0)
+        st.number_input(
+            "生成超时（秒，0 = 按任务自动）",
+            min_value=0,
+            step=30,
+            key="llm_timeout_sec",
+            help=(
+                "创世、文稿提炼等长任务默认放宽到 240 秒。"
+                "网络偏慢或生成规模很大时可再调高；调小不会低于任务安全下限。"
+            ),
+        )
+        _timeout_choice = int(st.session_state.get("llm_timeout_sec", 0) or 0)
+        if _timeout_choice > 0:
+            os.environ["OWCOPILOT_PROVIDER_TIMEOUT_SEC"] = str(_timeout_choice)
+        elif _env_defaults.get("timeout"):
+            os.environ["OWCOPILOT_PROVIDER_TIMEOUT_SEC"] = str(_env_defaults["timeout"])
+        else:
+            os.environ.pop("OWCOPILOT_PROVIDER_TIMEOUT_SEC", None)
         sqlite_override = st.text_input(
             "运行库路径（可选）",
             value="",
@@ -1751,6 +1861,107 @@ with tab_archive:
                             st.markdown("**关系**")
                             for rel in related[:20]:
                                 st.write(f"- `{rel['source']}` —{rel['kind']}→ `{rel['target']}`")
+                    with st.expander("管理此实体（编辑 / 删除）", icon=":material/edit_note:"):
+                        with st.form(f"edit_entity_{picked}"):
+                            edit_name = st.text_input("名称", value=row["name"])
+                            edit_desc = st.text_area(
+                                "描述", value=row.get("description") or "", height=100
+                            )
+                            edit_tags = st.text_input(
+                                "标签（逗号分隔）",
+                                value=", ".join(row.get("tags") or []),
+                            )
+                            if st.form_submit_button(
+                                "保存修改", icon=":material/save:", type="primary"
+                            ):
+                                try:
+                                    update_entity_action(
+                                        content_root,
+                                        entity_id=picked,
+                                        name=edit_name,
+                                        description=edit_desc,
+                                        tags=[
+                                            tag.strip()
+                                            for tag in edit_tags.replace("，", ",").split(",")
+                                            if tag.strip()
+                                        ],
+                                        sqlite_path=sqlite_path,
+                                    )
+                                except Exception as e:
+                                    _fail(e)
+                                else:
+                                    _flash("success", f"已更新 `{picked}`（ID 不变，引用安然）。")
+                                    st.rerun()
+                        st.caption("名称与描述随时可改——ID 保持不变，所有引用安然无恙。")
+                        st.divider()
+                        if st.button(
+                            "预览删除影响",
+                            key=f"impact_{picked}",
+                            icon=":material/hub:",
+                            use_container_width=True,
+                        ):
+                            try:
+                                impact_preview = run_impact_action(
+                                    content_root,
+                                    changes=[
+                                        {
+                                            "change_type": "entity_delete",
+                                            "target_ref": f"entity:{picked}",
+                                        }
+                                    ],
+                                    sqlite_path=sqlite_path,
+                                )
+                            except Exception as e:
+                                _fail(e)
+                            else:
+                                st.session_state["_del_impact"] = {
+                                    "ref": picked,
+                                    "result": impact_preview,
+                                }
+                        _del_impact = st.session_state.get("_del_impact")
+                        if _del_impact and _del_impact.get("ref") == picked:
+                            _ir = _del_impact["result"]
+                            if _ir["total"]:
+                                st.warning(
+                                    f"删除将波及 {_ir['total']} 处："
+                                    f"必须改 {len(_ir['must_change'])}，"
+                                    f"建议查 {len(_ir['suggest_check'])}。"
+                                )
+                                for item in (_ir["must_change"] + _ir["suggest_check"])[:12]:
+                                    st.write(f"- `{item['target_ref']}`")
+                            else:
+                                st.success("没有发现牵连引用，可以放心删除。")
+                        confirm_del = st.checkbox(
+                            "我已确认影响，删除这个实体（其关系一并移除）",
+                            key=f"confirm_del_{picked}",
+                        )
+                        if st.button(
+                            "删除此实体",
+                            key=f"del_{picked}",
+                            icon=":material/delete_forever:",
+                            disabled=not confirm_del,
+                            use_container_width=True,
+                        ):
+                            try:
+                                deleted = delete_object_action(
+                                    content_root,
+                                    ref_type="entity",
+                                    object_id=picked,
+                                    cascade_relations=True,
+                                    sqlite_path=sqlite_path,
+                                )
+                            except Exception as e:
+                                _fail(e)
+                            else:
+                                st.session_state.pop("_del_impact", None)
+                                _flash(
+                                    "success",
+                                    f"已删除 `{deleted['deleted_ref']}`"
+                                    f"（连带移除 {deleted['removed_relations']} 条关系）。"
+                                    f"复跑校勘后待修 error = "
+                                    f"{deleted['post_audit_open_errors']}。",
+                                )
+                                st.rerun()
         elif kind == "任务":
             rows = [r for r in inventory["quests"] if _match(r)]
             st.caption(f"{len(rows)} / {len(inventory['quests'])} 条")
@@ -1771,6 +1982,40 @@ with tab_archive:
                 df["来源"] = df["来源"].map(lambda o: _ORIGIN_LABEL.get(o, o))
                 df["审核"] = df["审核"].map(lambda s: _REVIEW_LABEL.get(s, s))
                 st.dataframe(df, use_container_width=True, hide_index=True, height=420)
+                with st.expander("管理任务（删除）", icon=":material/edit_note:"):
+                    quest_to_delete = st.selectbox(
+                        "选择任务",
+                        options=[""] + [r["id"] for r in rows],
+                        format_func=lambda i: "选择一个任务…" if not i else i,
+                        key="quest_delete_pick",
+                    )
+                    if quest_to_delete:
+                        confirm_q = st.checkbox(
+                            "确认删除此任务（引用它的内容会在校勘中亮出来）",
+                            key=f"confirm_qdel_{quest_to_delete}",
+                        )
+                        if st.button(
+                            "删除此任务",
+                            key=f"qdel_{quest_to_delete}",
+                            icon=":material/delete_forever:",
+                            disabled=not confirm_q,
+                        ):
+                            try:
+                                deleted_q = delete_object_action(
+                                    content_root,
+                                    ref_type="quest",
+                                    object_id=quest_to_delete,
+                                    sqlite_path=sqlite_path,
+                                )
+                            except Exception as e:
+                                _fail(e)
+                            else:
+                                _flash(
+                                    "success",
+                                    f"已删除 `{deleted_q['deleted_ref']}`。复跑校勘后"
+                                    f"待修 error = {deleted_q['post_audit_open_errors']}。",
+                                )
+                                st.rerun()
         elif kind == "区域":
             rows = [r for r in inventory["regions"] if _match(r)]
             st.caption(f"{len(rows)} / {len(inventory['regions'])} 条")
@@ -1853,6 +2098,28 @@ with tab_archive:
                     if full:
                         name_of = {row["id"]: row["name"] for row in inventory["entities"]}
                         st.graphviz_chart(_tree_dot(full, name_of), use_container_width=True)
+                    with st.expander("管理对话树（删除）", icon=":material/edit_note:"):
+                        confirm_t = st.checkbox(
+                            "确认删除这棵对话树", key=f"confirm_tdel_{picked_tree}"
+                        )
+                        if st.button(
+                            "删除此对话树",
+                            key=f"tdel_{picked_tree}",
+                            icon=":material/delete_forever:",
+                            disabled=not confirm_t,
+                        ):
+                            try:
+                                deleted_t = delete_object_action(
+                                    content_root,
+                                    ref_type="dialogue_tree",
+                                    object_id=picked_tree,
+                                    sqlite_path=sqlite_path,
+                                )
+                            except Exception as e:
+                                _fail(e)
+                            else:
+                                _flash("success", f"已删除 `{deleted_t['deleted_ref']}`。")
+                                st.rerun()
             else:
                 st.info("还没有对话树。可在创作工坊生成。")
         elif kind == "关系":
@@ -2226,6 +2493,21 @@ with tab_genesis:
             st.caption(
                 "现成的设定表格（Excel 多 Sheet / JSON / Luban / Markdown）：先预览，无误再入档。"
             )
+            with st.expander("我该上传什么？格式要求一览", icon=":material/help:"):
+                st.markdown(
+                    "带着现有世界观进来，有三条路，按你手头的材料选：\n\n"
+                    "| 你手头有什么 | 走哪条路 | 支持格式 |\n"
+                    "| --- | --- | --- |\n"
+                    "| 规整的设定表 | 本页「表格导入」 | `.xlsx` 多 Sheet"
+                    "（实体/任务/区域各一张表，支持中文表头）、"
+                    "`.json` / `.jsonl`、Luban 表、`.md`、`.csv` |\n"
+                    "| 小说 / 剧本 / 散乱笔记 | 左边「文稿提炼」 | `.txt`、`.md`、"
+                    "`.docx`、`.json`（AI 整理成实体、关系、剧情节拍，缺口列出来问你） |\n"
+                    "| 另一台机器导出的世界 | 侧栏「新建 / 导入世界」 | "
+                    "OWCopilot 世界包 `.zip` |\n\n"
+                    "拿不准的话：直接把材料粘进「文稿提炼」最稳——它不要求任何格式。\n"
+                    "所有导入都先预览、后入档，不会偷偷覆盖任何东西。"
+                )
             ingest_files = st.file_uploader(
                 "上传表格/文档",
                 type=["xlsx", "json", "jsonl", "md", "markdown", "csv"],
@@ -3317,21 +3599,46 @@ with tab_export:
             default=["md", "docx"],
             format_func=lambda f: "Markdown" if f == "md" else "Word (.docx)",
         )
-if lb_cols[2].button("装订设定集", icon=":material/menu_book:", type="primary") and lb_formats:
-    try:
-        lb_result = _call(
-            "正在装订设定集…",
-            run_lorebook_export_action,
-            content_root,
-            output_dir=Path(output_dir) / "lorebook",
-            formats=tuple(lb_formats),
-            title=lb_title.strip() or "世界设定集",
-            sqlite_path=sqlite_path,
+        if (
+            lb_cols[2].button("装订设定集", icon=":material/menu_book:", type="primary")
+            and lb_formats
+        ):
+            try:
+                lb_result = _call(
+                    "正在装订设定集…",
+                    run_lorebook_export_action,
+                    content_root,
+                    output_dir=Path(output_dir) / "lorebook",
+                    formats=tuple(lb_formats),
+                    title=lb_title.strip() or "世界设定集",
+                    sqlite_path=sqlite_path,
+                )
+            except Exception as e:
+                _fail(e)
+            else:
+                _track_cost(lb_result)
+                st.success(f"已导出到 `{lb_result['output_dir']}`")
+                for row in lb_result["files"]:
+                    st.write(f"- `{row['path']}` `sha256:{row['sha256'][:12]}…`")
+
+        st.divider()
+        _section("世界包", "整个世界一包带走——备份、换机、交接都用它")
+        pack_cols = st.columns([3, 2])
+        pack_cols[0].caption(
+            "打包当前世界的全部档案（不含可重建的运行库）。"
+            "在侧栏「新建 / 导入世界」上传同一个 zip，即可在任何机器上还原这个世界。"
         )
-    except Exception as e:
-        _fail(e)
-    else:
-        _track_cost(lb_result)
-        st.success(f"已导出到 `{lb_result['output_dir']}`")
-        for row in lb_result["files"]:
-            st.write(f"- `{row['path']}` `sha256:{row['sha256'][:12]}…`")
+        try:
+            _pack_bytes = export_world_zip(content_root)
+        except Exception as e:
+            _fail(e)
+        else:
+            pack_cols[1].download_button(
+                "下载世界包 (.zip)",
+                data=_pack_bytes,
+                file_name=f"{Path(content_root).name or 'world'}-pack.zip",
+                mime="application/zip",
+                icon=":material/archive:",
+                type="primary",
+                use_container_width=True,
+            )

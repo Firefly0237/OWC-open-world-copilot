@@ -519,6 +519,36 @@ def run_project_export_action(
         }
 
 
+# Long-form generation needs more wall-clock and output headroom than chat-sized calls.
+# Floors are combined with the user-tunable base (OWCOPILOT_PROVIDER_TIMEOUT_SEC, settable
+# from 设置→高级): effective timeout = max(base, floor). Round-11 trigger: a default-scale
+# world_seed (8 npcs / 5 quests) takes well past the old flat 30s and timed out for real.
+_TASK_TIMEOUT_FLOOR_SEC: dict[str, float] = {
+    "world_seed": 240.0,
+    "extract_lore": 240.0,
+    "extract_fill": 120.0,
+    "dialogue_tree": 120.0,
+    "flavor_batch": 90.0,
+    "quest_draft": 90.0,
+    "barks_batch": 90.0,
+    "patch_suggest": 90.0,
+}
+_TASK_TIMEOUT_DEFAULT_SEC = 60.0
+# Output caps: enough headroom that a full default-scale bundle is not truncated
+# mid-JSON, while still stopping runaway generations.
+_TASK_MAX_OUTPUT_TOKENS: dict[str, int] = {
+    "world_seed": 6000,
+    "extract_lore": 4500,
+    "dialogue_tree": 4000,
+}
+
+
+def _task_timeout_sec(task: str) -> float:
+    base = float(os.getenv("OWCOPILOT_PROVIDER_TIMEOUT_SEC", "0") or 0)
+    floor = _TASK_TIMEOUT_FLOOR_SEC.get(task, _TASK_TIMEOUT_DEFAULT_SEC)
+    return max(base, floor)
+
+
 _ACTION_CACHE: CacheBackend | None = None
 
 
@@ -543,7 +573,11 @@ def _gateway(
     real = llm_mode == "real"
     if real:
         load_dotenv()  # pick up provider keys from .env; shell env wins
-        provider: Any = OpenAICompatProvider(model=llm_model)
+        provider: Any = OpenAICompatProvider(
+            model=llm_model,
+            timeout=_task_timeout_sec(task),
+            max_output_tokens=_TASK_MAX_OUTPUT_TOKENS.get(task),
+        )
     else:
         provider = offline_provider
     gateway = LLMGateway(
@@ -801,6 +835,90 @@ def run_ingest_action(
             "content_hash_before": result.content_hash_before,
             "content_hash_after": result.content_hash_after,
             "cost_budget": _deterministic_cost_budget("ingest"),
+        }
+
+
+def update_entity_action(
+    content_root: str | Path,
+    *,
+    entity_id: str,
+    name: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    """Edit an entity's display fields in place. The id never changes here, so references
+    in quests/relations stay valid — renames of the id itself go through the impact +
+    patch workflow instead."""
+    with _project(content_root, sqlite_path) as project:
+        bundle = project.content_store.load()
+        entity = bundle.entities.get(entity_id)
+        if entity is None:
+            raise ValueError(f"实体不存在：{entity_id}")
+        update: dict[str, Any] = {}
+        if name is not None and name.strip():
+            update["name"] = name.strip()
+        if description is not None:
+            update["description"] = description.strip()
+        if tags is not None:
+            update["tags"] = [str(tag).strip() for tag in tags if str(tag).strip()]
+        if update:
+            bundle.entities[entity_id] = entity.model_copy(update=update)
+            project.content_store.save(bundle)
+            project.reload()
+        return {
+            "entity": bundle.entities[entity_id].model_dump(mode="json"),
+            "changed": sorted(update),
+            "cost_budget": _deterministic_cost_budget("entity_update"),
+        }
+
+
+def delete_object_action(
+    content_root: str | Path,
+    *,
+    ref_type: str,
+    object_id: str,
+    cascade_relations: bool = True,
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    """Delete one object from the world. Entities optionally cascade their relations;
+    anything still referencing the deleted object surfaces in the next audit (by design —
+    the UI shows an impact preview before calling this)."""
+    with _project(content_root, sqlite_path) as project:
+        bundle = project.content_store.load()
+        removed_relations = 0
+        if ref_type == "entity":
+            if object_id not in bundle.entities:
+                raise ValueError(f"实体不存在：{object_id}")
+            del bundle.entities[object_id]
+            if cascade_relations:
+                before = len(bundle.relations)
+                bundle.relations = [
+                    rel
+                    for rel in bundle.relations
+                    if rel.source != object_id and rel.target != object_id
+                ]
+                removed_relations = before - len(bundle.relations)
+        elif ref_type == "quest":
+            if object_id not in bundle.quests:
+                raise ValueError(f"任务不存在：{object_id}")
+            del bundle.quests[object_id]
+        elif ref_type == "dialogue_tree":
+            if object_id not in bundle.dialogue_trees:
+                raise ValueError(f"对话树不存在：{object_id}")
+            del bundle.dialogue_trees[object_id]
+        else:
+            raise ValueError(f"不支持删除的类型：{ref_type}")
+        # ContentStore.save reconciles directories against the bundle (orphan json files
+        # are removed), so no per-file unlink bookkeeping belongs here.
+        project.content_store.save(bundle)
+        project.reload()
+        audit = run_full_audit(project, persist=True)
+        return {
+            "deleted_ref": f"{ref_type}:{object_id}",
+            "removed_relations": removed_relations,
+            "post_audit_open_errors": len(audit.open_errors),
+            "cost_budget": _deterministic_cost_budget("object_delete"),
         }
 
 
