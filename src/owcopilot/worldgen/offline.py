@@ -11,7 +11,10 @@ class OfflineWorldSeedProvider:
     """Return a compact structured world seed for tests and local dry-runs."""
 
     def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-        brief: dict[str, Any] = json.loads(user)
+        # The production user message is labeled plain text with empty fields omitted
+        # (never a full-brief JSON dump — see worldgen.service._brief_user_message);
+        # this double parses the same format so tests exercise the real contract.
+        brief = _parse_brief_message(user)
         idea = str(brief.get("idea") or "未命名世界")
         styles = brief.get("world_styles") or ["原创奇幻"]
         style_text = "、".join(str(item) for item in styles if str(item).strip()) or "原创奇幻"
@@ -20,7 +23,7 @@ class OfflineWorldSeedProvider:
             {
                 "source_ref": ref,
                 "source_title": title,
-                "used_for": f"{brief.get('reference_mode') or '灵感参考'}：主题、节奏和冲突结构",
+                "used_for": "灵感参考：主题、节奏和冲突结构",
                 "transformation": (
                     "转化为能源、阵营和区域之间的新冲突，没有把参考材料当作正式设定事实。"
                 ),
@@ -188,6 +191,21 @@ class OfflineWorldSeedProvider:
         }
         text = json.dumps(payload, ensure_ascii=False)
         return text, max(1, (len(system) + len(user)) // 4), max(1, len(text) // 4)
+
+
+def _parse_brief_message(user: str) -> dict[str, Any]:
+    """Parse the labeled-lines user message (核心想法：…/世界风格：…)."""
+    brief: dict[str, Any] = {}
+    for line in user.splitlines():
+        label, separator, value = line.partition("：")
+        if not separator:
+            continue
+        label, value = label.strip(), value.strip()
+        if label == "核心想法":
+            brief["idea"] = value
+        elif label == "世界风格":
+            brief["world_styles"] = [s.strip() for s in value.split("、") if s.strip()]
+    return brief
 
 
 def _reference_rows(system: str) -> list[tuple[str, str, str]]:

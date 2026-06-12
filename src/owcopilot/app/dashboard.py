@@ -138,6 +138,7 @@ from owcopilot.app.actions import (
     run_prose_check_action,
     run_rollback_action,
     run_suggest_action,
+    run_theme_sweep_action,
     run_world_seed_action,
     search_references_action,
     submit_extraction_action,
@@ -1450,6 +1451,7 @@ with st.sidebar:
         "ask_history",
         "tree_participants",
         "barks_speakers",
+        "sweep_report",
     )
     if st.session_state.get("_ws_root") != content_root:
         for _ws_key in _WORKSPACE_KEYS:
@@ -2157,6 +2159,41 @@ with tab_genesis:
         )
         # ---------------------------------------------------------------- world seed
         with seed_tab:
+            # Progressive brief: only the idea is required. Optional dimensions appear
+            # on demand and EMPTY ones never reach the model — an empty "玩家身份" field
+            # in the prompt reads as "invent a protagonist", which wrecks worldview-only
+            # requests (round-12 user report).
+            _OPT_MEDIUM = "载体/媒介"
+            _OPT_GENRE = "玩法/类型"
+            _OPT_FANTASY = "主角/玩家身份"
+            _OPT_STYLES = "世界风格"
+            _OPT_TONE = "基调"
+            _OPT_ERA = "时代/技术水平"
+            _OPT_CONFLICT = "核心冲突"
+            _OPT_REFS = "参考用法"
+            _OPT_FACTS = "在现有世界上扩写"
+            _OPT_NOTES = "补充要求"
+            _SEED_OPTIONS = [
+                _OPT_MEDIUM,
+                _OPT_GENRE,
+                _OPT_FANTASY,
+                _OPT_STYLES,
+                _OPT_TONE,
+                _OPT_ERA,
+                _OPT_CONFLICT,
+                _OPT_REFS,
+                _OPT_FACTS,
+                _OPT_NOTES,
+            ]
+            _TPL_FIELD_OPTIONS = [
+                _OPT_GENRE,
+                _OPT_FANTASY,
+                _OPT_STYLES,
+                _OPT_TONE,
+                _OPT_ERA,
+                _OPT_CONFLICT,
+                _OPT_NOTES,
+            ]
 
             def _apply_template_pick() -> None:
                 pick = st.session_state.get("tpl_pick")
@@ -2171,6 +2208,12 @@ with tab_genesis:
                 st.session_state["seed_era"] = str(_tpl["era"])
                 st.session_state["seed_conflict"] = str(_tpl["core_conflict"])
                 st.session_state["seed_notes"] = str(_tpl["notes"])
+                # the template's dimensions must become visible, or the user can't see
+                # (or clear) what it just filled in
+                chosen = set(st.session_state.get("seed_optional_fields") or [])
+                st.session_state["seed_optional_fields"] = [
+                    opt for opt in _SEED_OPTIONS if opt in (chosen | set(_TPL_FIELD_OPTIONS))
+                ]
 
             # on_change fires exactly when the widget value actually changes — no applied
             # flag to desync, and 自定义→同一模板 always refills
@@ -2181,72 +2224,99 @@ with tab_genesis:
                 on_change=_apply_template_pick,
                 help="选择题材模板一键填表，再随意修改。",
             )
-            st.session_state.setdefault("seed_styles", ["蒸汽朋克"])
+            idea = st.text_area(
+                "核心想法（唯一必填）",
+                placeholder=(
+                    "例如：一个靠蒸汽巨树维持生命的群岛世界，各方势力争夺树心的控制权。"
+                    "——只写这一句也能开辟世界。"
+                ),
+                height=110,
+                key="seed_idea",
+            )
+            chosen_fields = st.multiselect(
+                "补充设定（可选——想约束哪个维度就添加哪个，未添加的交给模型自行裁量）",
+                _SEED_OPTIONS,
+                key="seed_optional_fields",
+                placeholder="例如只要世界观：什么都不加，直接开辟",
+            )
             with st.form("world_seed_form"):
-                _section("核心设定")
-                idea = st.text_area(
-                    "核心想法",
-                    placeholder=(
-                        "例如：一个靠蒸汽巨树维持生命的群岛世界，"
-                        "玩家要在工会、王室和旧神信徒之间选择立场。"
-                    ),
-                    height=110,
-                    key="seed_idea",
-                )
-                c1, c2, c3 = st.columns(3)
-                medium = c1.selectbox(
-                    "载体", ["开放世界游戏", "RPG", "视觉小说", "剧本", "小说设定"]
-                )
-                game_genre = c2.text_input(
-                    "玩法/类型", placeholder="开放世界 RPG / 叙事冒险", key="seed_genre"
-                )
-                player_fantasy = c3.text_input(
-                    "玩家身份", placeholder="流亡调查员 / 新任领主", key="seed_fantasy"
-                )
-                _section("风格与基调")
-                style_choices = st.multiselect(
-                    "世界风格",
-                    [
-                        "蒸汽朋克",
-                        "魔幻",
-                        "黑暗奇幻",
-                        "科幻",
-                        "废土",
-                        "武侠",
-                        "赛博朋克",
-                        "历史架空",
-                    ],
-                    key="seed_styles",
-                )
-                c4, c5, c6 = st.columns(3)
-                other_style = c4.text_input("其他风格")
-                tone = c5.text_input("基调", placeholder="克制、悬疑、史诗", key="seed_tone")
-                era = c6.text_input(
-                    "时代/技术水平", placeholder="工业革命早期 / 近未来", key="seed_era"
-                )
-                core_conflict = st.text_input(
-                    "核心冲突",
-                    placeholder="能源枯竭、王权更替、旧神复苏",
-                    key="seed_conflict",
-                )
-                _section("参考用法")
-                c7, c8 = st.columns(2)
-                reference_mode = c7.selectbox(
-                    "参考模式",
-                    ["灵感参考", "参考剧情结构", "参考人物关系", "参考任务节奏", "做一个变体"],
-                )
-                reference_query = c8.text_input(
-                    "参考检索关键词", placeholder="留空则用核心想法检索"
-                )
-                use_project_facts = st.checkbox("在现有世界上扩写（读取项目事实）", value=False)
-                _section("生成规模")
+                medium = ""
+                game_genre = ""
+                player_fantasy = ""
+                style_choices: list[str] = []
+                other_style = ""
+                tone = ""
+                era = ""
+                core_conflict = ""
+                reference_mode = "灵感参考"
+                reference_query = ""
+                use_project_facts = False
+                notes = ""
+                if _OPT_MEDIUM in chosen_fields:
+                    medium = st.selectbox(
+                        _OPT_MEDIUM,
+                        ["开放世界游戏", "RPG", "视觉小说", "剧本", "小说设定"],
+                        key="seed_medium",
+                    )
+                if _OPT_GENRE in chosen_fields:
+                    game_genre = st.text_input(
+                        _OPT_GENRE, placeholder="开放世界 RPG / 叙事冒险", key="seed_genre"
+                    )
+                if _OPT_FANTASY in chosen_fields:
+                    player_fantasy = st.text_input(
+                        _OPT_FANTASY, placeholder="流亡调查员 / 新任领主", key="seed_fantasy"
+                    )
+                if _OPT_STYLES in chosen_fields:
+                    style_choices = st.multiselect(
+                        _OPT_STYLES,
+                        [
+                            "蒸汽朋克",
+                            "魔幻",
+                            "黑暗奇幻",
+                            "科幻",
+                            "废土",
+                            "武侠",
+                            "赛博朋克",
+                            "历史架空",
+                        ],
+                        key="seed_styles",
+                    )
+                    other_style = st.text_input("其他风格（自由填写）", key="seed_style_other")
+                if _OPT_TONE in chosen_fields:
+                    tone = st.text_input(_OPT_TONE, placeholder="克制、悬疑、史诗", key="seed_tone")
+                if _OPT_ERA in chosen_fields:
+                    era = st.text_input(
+                        _OPT_ERA, placeholder="工业革命早期 / 近未来", key="seed_era"
+                    )
+                if _OPT_CONFLICT in chosen_fields:
+                    core_conflict = st.text_input(
+                        _OPT_CONFLICT,
+                        placeholder="能源枯竭、王权更替、旧神复苏",
+                        key="seed_conflict",
+                    )
+                if _OPT_REFS in chosen_fields:
+                    ref_cols = st.columns(2)
+                    reference_mode = ref_cols[0].selectbox(
+                        "参考模式",
+                        ["灵感参考", "参考剧情结构", "参考人物关系", "参考任务节奏", "做一个变体"],
+                        key="seed_ref_mode",
+                    )
+                    reference_query = ref_cols[1].text_input(
+                        "参考检索关键词", placeholder="留空则用核心想法检索", key="seed_ref_query"
+                    )
+                if _OPT_FACTS in chosen_fields:
+                    use_project_facts = st.checkbox(
+                        "在现有世界上扩写（读取项目事实）", value=True, key="seed_use_facts"
+                    )
+                if _OPT_NOTES in chosen_fields:
+                    notes = st.text_area(_OPT_NOTES, height=70, key="seed_notes")
+                _section("生成规模", "0 = 完全不要这一类")
                 counts_cols = st.columns(5)
-                faction_count = counts_cols[0].slider("阵营", 1, 8, 3)
-                region_count = counts_cols[1].slider("区域", 1, 8, 2)
-                npc_count = counts_cols[2].slider("角色", 1, 24, 8)
-                quest_count = counts_cols[3].slider("任务", 1, 16, 5)
+                faction_count = counts_cols[0].slider("阵营", 0, 8, 3)
+                region_count = counts_cols[1].slider("区域", 0, 8, 2)
+                npc_count = counts_cols[2].slider("角色", 0, 24, 8)
+                quest_count = counts_cols[3].slider("任务", 0, 16, 5)
                 term_count = counts_cols[4].slider("术语", 0, 24, 5)
-                notes = st.text_area("补充要求", height=70, key="seed_notes")
                 submitted = st.form_submit_button(
                     "开辟世界",
                     icon=":material/flare:",
@@ -2265,7 +2335,7 @@ with tab_genesis:
                         content_root,
                         brief={
                             "idea": idea.strip(),
-                            "medium": medium,
+                            "medium": medium if _OPT_MEDIUM in chosen_fields else "",
                             "game_genre": game_genre.strip(),
                             "world_styles": styles,
                             "tone": tone.strip(),
@@ -2788,11 +2858,12 @@ with tab_audit:
             issues_listing = list_project_issues_action(content_root, sqlite_path=sqlite_path)
         except Exception as e:
             _fail(e)
-        check_tab, forge_tab, prose_tab = st.tabs(
+        check_tab, forge_tab, prose_tab, sweep_tab = st.tabs(
             [
                 ":material/fact_check: 一致性校勘",
                 ":material/healing: 修复工坊",
                 ":material/spellcheck: 文稿体检",
+                ":material/search_insights: 专项清查",
             ]
         )
         with check_tab:
@@ -3082,6 +3153,108 @@ with tab_audit:
                             if issue["suggestion"]:
                                 st.write(f"建议：{issue['suggestion']}")
                     _show_cost(prose_result)
+
+        with sweep_tab:
+            st.caption(
+                "突发任务：限期消除某类主题或元素？这里对全库做一次无预设的地毯式排查——"
+                "词面命中 + 模型逐项判定（可选）+ 关系扩散，产出可勾选的工作单。"
+            )
+            sweep_theme = st.text_input(
+                "要清查的主题或元素",
+                key="sweep_theme",
+                placeholder="例如：赌博相关元素 / 某个被弃用的角色 / 涉及宗教符号的描写",
+            )
+            sweep_terms_raw = st.text_input(
+                "关联词（可选，逗号分隔）",
+                key="sweep_terms",
+                placeholder="同义词、俗称、易漏写法——例如：骰子, 赌坊, 押注",
+            )
+            use_judge = st.checkbox(
+                "用模型逐项判定（覆盖换了说法、没用关键词的内容）",
+                value=not _ai_locked,
+                disabled=_ai_locked,
+                help=(
+                    "未接入模型时仅做词面命中 + 关系扩散；"
+                    "接入后模型会逐个对象判定是否相关并给出原文证据。"
+                ),
+            )
+            if st.button(
+                "开始清查",
+                icon=":material/search_insights:",
+                type="primary",
+                disabled=not sweep_theme.strip(),
+            ):
+                try:
+                    sweep_result = _call(
+                        "正在地毯式排查全库…",
+                        run_theme_sweep_action,
+                        content_root,
+                        theme=sweep_theme.strip(),
+                        extra_terms=[
+                            t.strip()
+                            for t in sweep_terms_raw.replace("，", ",").split(",")
+                            if t.strip()
+                        ],
+                        use_llm=bool(use_judge and not _ai_locked),
+                        llm_mode=llm_mode,
+                        llm_model=llm_model,
+                        sqlite_path=sqlite_path,
+                    )
+                except Exception as e:
+                    _fail(e)
+                else:
+                    _track_cost(sweep_result)
+                    st.session_state["sweep_report"] = sweep_result
+            sweep_report = st.session_state.get("sweep_report")
+            if sweep_report:
+                _chips(
+                    _chip("扫描对象 ", strong=str(sweep_report["scanned_total"]), kind="blue"),
+                    _chip("直接命中 ", strong=str(len(sweep_report["hits"])), kind="red"),
+                    _chip(
+                        "关联待查 ",
+                        strong=str(len(sweep_report["review_suggested"])),
+                        kind="amber",
+                    ),
+                    _chip(
+                        "语义判定 ",
+                        strong=(
+                            f"{sweep_report['judged_count']} 项"
+                            if sweep_report["llm_used"]
+                            else "未启用"
+                        ),
+                        kind="gold" if sweep_report["llm_used"] else "",
+                    ),
+                )
+                if sweep_report["judge_skipped"]:
+                    st.warning(
+                        f"有 {sweep_report['judge_skipped']} 个对象超出单次判定上限未过模型，"
+                        "工作单中已注明——必要时分批再跑。"
+                    )
+                all_findings = sweep_report["hits"] + sweep_report["review_suggested"]
+                if all_findings:
+                    sweep_df = pd.DataFrame(
+                        [
+                            {
+                                "处置": "待处理" if f["verdict"] == "hit" else "建议复查",
+                                "类型": f["object_kind"],
+                                "名称": f["name"],
+                                "引用": f["ref"],
+                                "证据": f["evidence"],
+                            }
+                            for f in all_findings
+                        ]
+                    )
+                    st.dataframe(sweep_df, use_container_width=True, hide_index=True, height=320)
+                else:
+                    st.success("全库扫描完毕，未发现与该主题相关的内容。")
+                st.download_button(
+                    "导出工作单 (.md)",
+                    data=sweep_report["markdown"].encode("utf-8"),
+                    file_name=f"sweep-{sweep_report['theme'][:20]}.md",
+                    mime="text/markdown",
+                    icon=":material/checklist:",
+                )
+                _show_cost(sweep_report)
 
 # ------------------------------------------------------------------------------ impact
 with tab_impact:

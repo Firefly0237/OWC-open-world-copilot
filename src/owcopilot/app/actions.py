@@ -838,6 +838,60 @@ def run_ingest_action(
         }
 
 
+def run_theme_sweep_action(
+    content_root: str | Path,
+    *,
+    theme: str,
+    extra_terms: list[str] | None = None,
+    use_llm: bool = False,
+    llm_mode: str = "offline",
+    llm_model: str = "deepseek-v4-flash",
+    max_judge: int = 400,
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    """Theme sweep over the whole world (term layer + optional LLM judge + graph
+    expansion). Read-only: produces a work order for a human, writes nothing."""
+    from ..assist.sweep import OfflineSweepJudgeProvider, ThemeSweepService, render_sweep_markdown
+
+    with _project(content_root, sqlite_path) as project:
+        gateway = None
+        telemetry_summary: dict[str, Any] | None = None
+        if use_llm:
+            gateway, telemetry = _gateway(
+                task="theme_sweep",
+                llm_mode=llm_mode,
+                llm_model=llm_model,
+                offline_provider=OfflineSweepJudgeProvider(),
+            )
+        report = ThemeSweepService(bundle=project.bundle, gateway=gateway).sweep(
+            theme,
+            extra_terms=extra_terms,
+            use_llm=use_llm,
+            max_judge=max_judge,
+        )
+        if use_llm:
+            telemetry_summary = telemetry.summary()
+        return {
+            "theme": report.theme,
+            "terms": report.terms,
+            "scanned_total": report.scanned_total,
+            "scanned_by_kind": report.scanned_by_kind,
+            "llm_used": report.llm_used,
+            "judged_count": report.judged_count,
+            "judge_skipped": report.judge_skipped,
+            "hits": [finding.__dict__ for finding in report.hits],
+            "review_suggested": [finding.__dict__ for finding in report.review_suggested],
+            "markdown": render_sweep_markdown(report),
+            "cost_budget": (
+                summarize_workflow([llm_step("theme_sweep", telemetry_summary)]).budget.model_dump(
+                    mode="json"
+                )
+                if telemetry_summary is not None
+                else _deterministic_cost_budget("theme_sweep")
+            ),
+        }
+
+
 def update_entity_action(
     content_root: str | Path,
     *,

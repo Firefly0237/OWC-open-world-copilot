@@ -56,7 +56,7 @@ class WorldSeedService:
         raw = self.gateway.complete(
             task="world_seed",
             system=_system_prompt(brief, project_pack, inspiration_pack),
-            user=brief.model_dump_json(),
+            user=_brief_user_message(brief),
         )
         payload = parse_world_seed_payload(raw)
         draft_id = "world_seed_" + hashlib.sha256(f"{brief.idea}\n{raw}".encode()).hexdigest()[:12]
@@ -90,6 +90,68 @@ def parse_world_seed_payload(raw: str) -> dict[str, Any]:
     return payload
 
 
+_BRIEF_OPTIONAL_LABELS: list[tuple[str, str]] = [
+    ("medium", "载体/媒介"),
+    ("game_genre", "玩法/类型"),
+    ("tone", "基调"),
+    ("era", "时代/技术水平"),
+    ("player_fantasy", "主角/玩家身份"),
+    ("core_conflict", "核心冲突"),
+    ("notes", "补充要求"),
+]
+
+
+def _brief_user_message(brief: WorldSeedBrief) -> str:
+    """Compose the user message from the FILLED brief fields only.
+
+    Never serialize the whole brief: an empty `"player_fantasy": ""` in the prompt reads
+    as "this dimension exists, fill it" and the model invents a protagonist for a
+    worldview-only request. Absent means absent.
+    """
+    lines = [f"核心想法：{brief.idea.strip()}"]
+    if brief.world_styles:
+        styles = "、".join(s.strip() for s in brief.world_styles if s.strip())
+        if styles:
+            lines.append(f"世界风格：{styles}")
+    for field, label in _BRIEF_OPTIONAL_LABELS:
+        value = str(getattr(brief, field) or "").strip()
+        if value:
+            lines.append(f"{label}：{value}")
+    lines.append(
+        "以上是创作者提供的全部设定。未提及的维度由你根据核心想法自行裁量，"
+        "保持内在一致即可——不要为未提及的维度强加具体设定（例如未提及主角就不要设计主角）。"
+    )
+    return "\n".join(lines)
+
+
+def _section_plan(brief: WorldSeedBrief) -> str:
+    """Counts speak only for requested sections; a 0-count section is an explicit
+    'return an empty array', not a smaller target."""
+    wanted: list[str] = []
+    skipped: list[str] = []
+    for key, count in (
+        ("factions", brief.faction_count),
+        ("regions", brief.region_count),
+        ("npcs", brief.npc_count),
+        ("quests", brief.quest_count),
+        ("terms", brief.term_count),
+    ):
+        if count > 0:
+            wanted.append(f"{key}={count}")
+        else:
+            skipped.append(key)
+    plan = "Target counts: " + (", ".join(wanted) if wanted else "(none)") + ". "
+    if skipped:
+        plan += (
+            "The creator explicitly does NOT want these sections — return [] for: "
+            + ", ".join(skipped)
+            + ". "
+        )
+    if brief.region_count <= 0:
+        plan += "Also return [] for locations. "
+    return plan
+
+
 def _system_prompt(
     brief: WorldSeedBrief,
     project_pack: ContextPack,
@@ -98,8 +160,10 @@ def _system_prompt(
     project_lines = _context_lines(project_pack.hits)
     inspiration_lines = _context_lines(inspiration_pack.hits)
     return (
-        "You are a senior game narrative designer. Create an original structured world seed "
-        "for a game content workbench. Return ONE JSON object only. Do not wrap it in markdown. "
+        "You are a senior worldbuilding and narrative designer. Create an original "
+        "structured world seed from the creator's brief, in the brief's own genre, medium "
+        "and language — do not assume a default genre or audience. "
+        "Return ONE JSON object only. Do not wrap it in markdown. "
         "The JSON keys must be: summary, style_guide, factions, regions, locations, npcs, "
         "quests, terms, relations, reference_report. "
         "Use uploaded references only as inspiration or structure according to reference_mode; "
@@ -108,9 +172,8 @@ def _system_prompt(
         "explicitly asks for quotation. "
         "Each reference_report item must include source_ref, source_title, used_for, "
         "transformation, excluded. "
-        f"Target counts: factions={brief.faction_count}, regions={brief.region_count}, "
-        f"npcs={brief.npc_count}, quests={brief.quest_count}, terms={brief.term_count}.\n\n"
-        "Project facts context:\n"
+        + _section_plan(brief)
+        + "\n\nProject facts context:\n"
         + ("\n".join(project_lines) if project_lines else "(none)")
         + "\n\nInspiration reference context:\n"
         + ("\n".join(inspiration_lines) if inspiration_lines else "(none)")
@@ -204,7 +267,7 @@ def _bundle_from_payload(
 
     locations = _ensure_count(
         _list(payload.get("locations")),
-        max(brief.region_count + 2, 3),
+        max(brief.region_count + 2, 3) if brief.region_count > 0 else 0,
         "地点",
     )
     region_ids = list(bundle.regions) or list(existing.regions)
@@ -230,7 +293,8 @@ def _bundle_from_payload(
             faction_ids,
             _round_robin(faction_ids, index),
         )
-        description = str(raw.get("description") or raw.get("purpose") or "重要叙事地点。")
+        # No preset filler text: a missing description stays minimal and theme-neutral.
+        description = str(raw.get("description") or raw.get("purpose") or raw.get("name") or "")
         bundle.entities[loc_id] = Entity(
             id=loc_id,
             name=str(raw.get("name") or loc_id),
@@ -305,22 +369,26 @@ def _bundle_from_payload(
             npc_ids,
             _round_robin(npc_ids, index),
         )
+        # When the model omits stages, derive ONE stage from the quest's own objective —
+        # never inject preset beats (确认线索/作出选择 was steering every fallback quest
+        # toward the same investigation-shaped arc).
+        raw_stages = _list(raw.get("stages")) or [
+            str(raw.get("objective") or raw.get("title") or quest_id)
+        ]
         stages = [
             QuestStage(
                 id=f"{quest_id}_stage_{stage_index + 1}",
                 summary=str(stage),
                 location=quest_location,
             )
-            for stage_index, stage in enumerate(
-                _list(raw.get("stages")) or ["确认线索", "作出选择"]
-            )
+            for stage_index, stage in enumerate(raw_stages)
         ]
         bundle.quests[quest_id] = Quest(
             id=quest_id,
             title=str(raw.get("title") or quest_id),
             giver_npc=quest_giver,
             location=quest_location,
-            objective=str(raw.get("objective") or "推进核心冲突并产生阵营后果。"),
+            objective=str(raw.get("objective") or raw.get("title") or quest_id),
             timeline_order=index + 1,
             stages=stages,
             localization_keys=[f"quest.{quest_id}.objective"],
