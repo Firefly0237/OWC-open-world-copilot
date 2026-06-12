@@ -25,6 +25,7 @@ class ReviewItemType(str, Enum):
     IMPORT_DRAFT = "import_draft"
     DIALOGUE_TREE = "dialogue_tree"
     FLAVOR_BATCH = "flavor_batch"
+    CHARACTER_PROFILE = "character_profile"
 
 
 class ReviewItem(BaseModel):
@@ -103,6 +104,19 @@ class ReviewQueue:
             ReviewItem(
                 item_type=ReviewItemType.DIALOGUE_TREE,
                 object_ref=f"dialogue_tree:{tree_id}",
+                payload=payload,
+                issue_refs=issue_refs or [],
+            )
+        )
+
+    def add_character_profile(
+        self, payload: dict[str, Any], *, issue_refs: list[str] | None = None
+    ) -> ReviewItem:
+        entity_id = str((payload.get("entity") or {}).get("id") or "unknown")
+        return self.add(
+            ReviewItem(
+                item_type=ReviewItemType.CHARACTER_PROFILE,
+                object_ref=f"character:{entity_id}",
                 payload=payload,
                 issue_refs=issue_refs or [],
             )

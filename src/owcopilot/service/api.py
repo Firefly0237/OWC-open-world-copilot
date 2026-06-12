@@ -52,6 +52,7 @@ from ..app.actions import (
     decide_review_action,
     delete_object_action,
     list_review_items_action,
+    run_character_action,
     run_extraction_action,
     run_theme_sweep_action,
     run_world_seed_action,
@@ -585,16 +586,17 @@ class ProjectSweepResponse(BaseModel):
     cost_budget: dict[str, Any]
 
 
-_JOB_KINDS = ("world_seed", "extraction", "theme_sweep")
+_JOB_KINDS = ("world_seed", "extraction", "theme_sweep", "character_profile")
 _JOB_PARAM_KEYS: dict[str, set[str]] = {
     "world_seed": {"brief", "llm_mode", "llm_model", "budget_tokens"},
     "extraction": {"title", "text", "source_kind", "max_chunks", "llm_mode", "llm_model"},
     "theme_sweep": {"theme", "extra_terms", "use_llm", "llm_mode", "llm_model", "max_judge"},
+    "character_profile": {"brief", "llm_mode", "llm_model", "budget_tokens"},
 }
 
 
 class JobCreateRequest(BaseModel):
-    kind: str = Field(pattern="^(world_seed|extraction|theme_sweep)$")
+    kind: str = Field(pattern="^(world_seed|extraction|theme_sweep|character_profile)$")
     params: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -617,6 +619,7 @@ class EntityUpdateRequest(BaseModel):
     name: str | None = None
     description: str | None = None
     tags: list[str] | None = None
+    metadata_updates: dict[str, Any] | None = None
 
 
 class EntityUpdateResponse(BaseModel):
@@ -1991,6 +1994,7 @@ def create_app() -> FastAPI:
             "world_seed": run_world_seed_action,
             "extraction": run_extraction_action,
             "theme_sweep": run_theme_sweep_action,
+            "character_profile": run_character_action,
         }
         action = runners[req.kind]
         params = dict(req.params)
@@ -2150,6 +2154,7 @@ def create_app() -> FastAPI:
                 name=req.name,
                 description=req.description,
                 tags=req.tags,
+                metadata_updates=req.metadata_updates,
             )
         except ValueError as e:
             raise _manage_error(e) from e

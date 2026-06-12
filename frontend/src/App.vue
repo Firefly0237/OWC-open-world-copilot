@@ -78,6 +78,7 @@ onMounted(async () => {
         <RouterLink to="/overview">世界总览</RouterLink>
         <RouterLink to="/archive">设定档案</RouterLink>
         <RouterLink to="/genesis">创世工坊</RouterLink>
+        <RouterLink to="/characters">人物工坊</RouterLink>
         <RouterLink to="/ask">世界问答</RouterLink>
         <RouterLink to="/review">审阅台</RouterLink>
       </nav>

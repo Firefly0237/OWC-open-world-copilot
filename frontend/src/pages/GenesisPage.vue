@@ -91,7 +91,7 @@ const form = reactive({
   >,
   customs: Object.fromEntries(DIMENSIONS.map((d) => [d.key, ""])) as Record<string, string>,
   playerFantasy: "",
-  cast: "",
+  castRows: [] as { name: string; profile: string }[],
   restrictions: "",
   notes: "",
   factions: 2,
@@ -100,6 +100,14 @@ const form = reactive({
   quests: 2,
   terms: 3,
 });
+
+function addCastRow(): void {
+  form.castRows.push({ name: "", profile: "" });
+}
+
+function removeCastRow(index: number): void {
+  form.castRows.splice(index, 1);
+}
 
 interface SeedEntity {
   name: string;
@@ -187,10 +195,11 @@ async function run(): Promise<void> {
           world_scale: resolved("world_scale"),
           core_conflict: resolved("core_conflict"),
           player_fantasy: form.playerFantasy.trim(),
-          key_characters: form.cast
-            .split("\n")
-            .map((line) => line.trim())
-            .filter(Boolean),
+          key_characters: form.castRows
+            .filter((row) => row.name.trim())
+            .map((row) =>
+              row.profile.trim() ? `${row.name.trim()}：${row.profile.trim()}` : row.name.trim(),
+            ),
           content_restrictions: form.restrictions.trim(),
           notes: form.notes.trim(),
           faction_count: form.factions,
@@ -258,12 +267,19 @@ async function run(): Promise<void> {
 
     <div class="pane form">
       <label class="field">
-        <span class="label">核心想法 <em>必填</em></span>
+        <span class="label">
+          核心想法 <em>必填</em>
+          <i class="muted">{{ form.idea.length }}/4000</i>
+        </span>
         <textarea
           v-model="form.idea"
           rows="3"
+          maxlength="4000"
           placeholder="例如：一个靠蒸汽巨树维持生命的群岛世界，各方势力争夺树心的控制权。"
         ></textarea>
+        <span v-if="form.idea.length > 1200" class="muted small">
+          篇幅很长？现成的设定文档更适合用「文稿提炼」整理入档，这里写主旨即可。
+        </span>
       </label>
 
       <div class="field">
@@ -309,14 +325,15 @@ async function run(): Promise<void> {
         </label>
       </div>
 
-      <label class="field">
+      <div class="field">
         <span class="label">主要人物</span>
-        <textarea
-          v-model="form.cast"
-          rows="3"
-          placeholder="每行一位，写法随意，例如：&#10;沈横舟：守灯二十年的老领航员&#10;白盐：走私船上长大的巡查官"
-        ></textarea>
-      </label>
+        <div v-for="(row, index) in form.castRows" :key="index" class="cast-row">
+          <input v-model="row.name" maxlength="40" placeholder="名字" />
+          <input v-model="row.profile" maxlength="200" placeholder="一句设定，例如：守灯二十年的老领航员" />
+          <button type="button" class="ghost" @click="removeCastRow(index)">移除</button>
+        </div>
+        <button type="button" class="ghost add" @click="addCastRow">+ 添加人物</button>
+      </div>
 
       <label class="field">
         <span class="label">补充要求</span>
@@ -515,6 +532,37 @@ textarea:focus {
   font-size: 0.8rem;
   padding: 0.22rem 0.7rem;
   width: 7rem;
+}
+
+.cast-row {
+  display: grid;
+  grid-template-columns: 9rem 1fr auto;
+  gap: 0.5rem;
+  margin-bottom: 0.45rem;
+}
+
+button.ghost {
+  background: var(--ow-panel-2);
+  border: 1px solid var(--ow-line);
+  border-radius: 0.5rem;
+  color: var(--ow-muted);
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+}
+
+button.ghost:hover {
+  border-color: var(--ow-gold-soft);
+  color: var(--ow-ink);
+}
+
+button.add {
+  align-self: flex-start;
+}
+
+.small {
+  font-size: 0.78rem;
 }
 
 .scales {

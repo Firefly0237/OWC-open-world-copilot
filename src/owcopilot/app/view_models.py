@@ -68,6 +68,9 @@ def build_content_inventory(
                 "tags": ", ".join(e.tags),
                 "origin": e.origin.value,
                 "review_status": e.review_status.value,
+                # character sheets and other rich payloads ride in metadata; the
+                # frontend maintenance UI reads/writes them through here
+                "metadata": e.metadata,
             }
             for e in bundle.entities.values()
         ]

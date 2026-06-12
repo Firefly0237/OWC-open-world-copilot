@@ -11,7 +11,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ..assist.review_queue import ReviewItem, ReviewItemType, ReviewQueue
-from ..content.models import ContentBundle, DialogueTree, Entity, Origin, Quest, ReviewStatus
+from ..content.models import (
+    ContentBundle,
+    DialogueTree,
+    Entity,
+    Origin,
+    Quest,
+    Relation,
+    ReviewStatus,
+)
 from .audit import run_full_audit
 from .project import ProjectContext
 
@@ -97,6 +105,25 @@ def decide_review_item(
         project.content_store.save(bundle)
         project.reload()
         written_ref = f"dialogue_tree:{tree.id}"
+    elif item.item_type is ReviewItemType.CHARACTER_PROFILE:
+        entity = Entity.model_validate(item.payload.get("entity") or {})
+        if entity.id in project.bundle.entities:
+            raise ValueError(
+                f"character '{entity.id}' would overwrite existing content; "
+                "reject it and regenerate with a unique id"
+            )
+        relations = [Relation.model_validate(raw) for raw in (item.payload.get("relations") or [])]
+        bundle = project.content_store.load()
+        bundle.entities[entity.id] = entity.model_copy(
+            update={"review_status": ReviewStatus.APPROVED}
+        )
+        existing_keys = {(r.source, r.target, r.kind) for r in bundle.relations}
+        for relation in relations:
+            if (relation.source, relation.target, relation.kind) not in existing_keys:
+                bundle.relations.append(relation)
+        project.content_store.save(bundle)
+        project.reload()
+        written_ref = f"entity:{entity.id}"
     elif item.item_type is ReviewItemType.FLAVOR_BATCH:
         entities = [Entity.model_validate(raw) for raw in (item.payload.get("entities") or [])]
         existing = [entity.id for entity in entities if entity.id in project.bundle.entities]

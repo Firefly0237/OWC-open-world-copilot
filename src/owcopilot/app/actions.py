@@ -527,6 +527,7 @@ def run_project_export_action(
 _TASK_TIMEOUT_FLOOR_SEC: dict[str, float] = {
     "world_seed": 240.0,
     "extract_lore": 240.0,
+    "character_profile": 120.0,
     "extract_fill": 120.0,
     "dialogue_tree": 120.0,
     "flavor_batch": 90.0,
@@ -844,6 +845,67 @@ def run_ingest_action(
         }
 
 
+def run_character_action(
+    content_root: str | Path,
+    *,
+    brief: dict[str, Any],
+    sqlite_path: str | None = None,
+    budget_tokens: int = 1200,
+    llm_mode: str = "offline",
+    llm_model: str = "deepseek-v4-flash",
+    progress: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Generate one detailed character sheet grounded in the world; queue it for review."""
+    from ..assist.characters import (
+        CharacterBrief,
+        CharacterProfileService,
+        OfflineCharacterProvider,
+    )
+
+    parsed = CharacterBrief.model_validate(brief)
+
+    def emit(name: str) -> None:
+        if progress is not None:
+            progress("stage", {"name": name})
+
+    with _project(content_root, sqlite_path) as project:
+        gateway, telemetry = _gateway(
+            task="character_profile",
+            llm_mode=llm_mode,
+            llm_model=llm_model,
+            offline_provider=OfflineCharacterProvider(),
+        )
+        emit("retrieving")
+        service = CharacterProfileService(
+            gateway=gateway,
+            bundle=project.bundle,
+            context_builder=project.context_builder,
+        )
+        emit("generating")
+        draft = service.generate(parsed, budget_tokens=budget_tokens)
+        emit("parsing")
+        item = ReviewQueue(project.sqlite_store).add_character_profile(
+            {
+                "entity": draft.entity.model_dump(mode="json", exclude_none=True),
+                "relations": [r.model_dump(mode="json") for r in draft.relations],
+                "summary": draft.entity.description,
+                "suggested_relations": draft.suggested_relations,
+            }
+        )
+        telemetry_summary = telemetry.summary()
+        return {
+            "entity": draft.entity.model_dump(mode="json", exclude_none=True),
+            "relations": [r.model_dump(mode="json") for r in draft.relations],
+            "profile": draft.profile,
+            "suggested_relations": draft.suggested_relations,
+            "review_item_id": item.id,
+            "telemetry": telemetry_summary,
+            "cost_budget": summarize_workflow(
+                [llm_step("character_profile", telemetry_summary)]
+            ).budget.model_dump(mode="json"),
+        }
+
+
 def run_theme_sweep_action(
     content_root: str | Path,
     *,
@@ -907,11 +969,13 @@ def update_entity_action(
     name: str | None = None,
     description: str | None = None,
     tags: list[str] | None = None,
+    metadata_updates: dict[str, Any] | None = None,
     sqlite_path: str | None = None,
 ) -> dict[str, Any]:
     """Edit an entity's display fields in place. The id never changes here, so references
     in quests/relations stay valid — renames of the id itself go through the impact +
-    patch workflow instead."""
+    patch workflow instead. `metadata_updates` shallow-merges (a None value deletes the
+    key), which is how character-sheet sections are maintained."""
     with _project(content_root, sqlite_path) as project:
         bundle = project.content_store.load()
         entity = bundle.entities.get(entity_id)
@@ -924,6 +988,14 @@ def update_entity_action(
             update["description"] = description.strip()
         if tags is not None:
             update["tags"] = [str(tag).strip() for tag in tags if str(tag).strip()]
+        if metadata_updates:
+            merged = dict(entity.metadata)
+            for key, value in metadata_updates.items():
+                if value is None:
+                    merged.pop(key, None)
+                else:
+                    merged[key] = value
+            update["metadata"] = merged
         if update:
             bundle.entities[entity_id] = entity.model_copy(update=update)
             project.content_store.save(bundle)
