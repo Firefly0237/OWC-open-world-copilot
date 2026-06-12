@@ -36,20 +36,26 @@ import time
 import urllib.parse
 import uuid
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from ..app.actions import (
     decide_review_action,
     delete_object_action,
     list_review_items_action,
+    run_extraction_action,
     run_theme_sweep_action,
+    run_world_seed_action,
     update_entity_action,
 )
+from ..app.view_models import build_content_inventory, build_project_overview
 from ..app.workspaces import (
     create_managed_world,
     export_world_zip,
@@ -112,6 +118,7 @@ from ..worldbible.security import (
     validate_world_bible_model,
     validate_world_bible_text,
 )
+from .jobs import JobManager
 
 __version__ = "0.2.0"
 
@@ -576,6 +583,34 @@ class ProjectSweepResponse(BaseModel):
     cost_budget: dict[str, Any]
 
 
+_JOB_KINDS = ("world_seed", "extraction", "theme_sweep")
+_JOB_PARAM_KEYS: dict[str, set[str]] = {
+    "world_seed": {"brief", "llm_mode", "llm_model", "budget_tokens"},
+    "extraction": {"title", "text", "source_kind", "max_chunks", "llm_mode", "llm_model"},
+    "theme_sweep": {"theme", "extra_terms", "use_llm", "llm_mode", "llm_model", "max_judge"},
+}
+
+
+class JobCreateRequest(BaseModel):
+    kind: str = Field(pattern="^(world_seed|extraction|theme_sweep)$")
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class JobCreatedResponse(BaseModel):
+    job_id: str
+    kind: str
+    status: str
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    kind: str
+    status: str
+    events: list[dict[str, Any]]
+    result: dict[str, Any] | None = None
+    error: str | None = None
+
+
 class EntityUpdateRequest(BaseModel):
     name: str | None = None
     description: str | None = None
@@ -867,7 +902,23 @@ def create_app() -> FastAPI:
         version=__version__,
         description="Consistency-checked quest generation for open-world game development.",
     )
+    # Browser clients (the Vue frontend) live on another origin in dev; CORS is opt-out
+    # via env. The API key gate still applies — CORS only governs who may *ask*.
+    cors_origins = [
+        origin.strip()
+        for origin in os.getenv(
+            "OWCOPILOT_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+        ).split(",")
+        if origin.strip()
+    ]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     limiter = _build_rate_limiter(int(os.getenv("OWCOPILOT_RATE_LIMIT_PER_MIN", "60")))
+    jobs_manager = JobManager()
     app.state.v2_issues = {}
 
     @app.get("/health")
@@ -1810,6 +1861,128 @@ def create_app() -> FastAPI:
                     f"attachment; filename=\"world-pack.zip\"; filename*=UTF-8''{encoded}"
                 )
             },
+        )
+
+    @app.get("/projects/{project}/overview")
+    def project_overview(
+        project: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        return {
+            "project": project,
+            "overview": build_project_overview(_project_root_or_404(project)),
+        }
+
+    @app.get("/projects/{project}/archive")
+    def project_archive(
+        project: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        return {
+            "project": project,
+            "inventory": build_content_inventory(_project_root_or_404(project)),
+        }
+
+    @app.post("/projects/{project}/jobs", response_model=JobCreatedResponse, status_code=202)
+    def create_job(
+        project: str,
+        req: JobCreateRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> JobCreatedResponse:
+        """Run a long action asynchronously; progress streams over /jobs/{id}/events."""
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        allowed = _JOB_PARAM_KEYS[req.kind]
+        unknown = sorted(set(req.params) - allowed)
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown params for {req.kind}: {unknown}; allowed: {sorted(allowed)}",
+            )
+        if req.params.get("llm_mode") == "real":
+            if not os.getenv("OWCOPILOT_API_KEY"):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "llm_mode=real over the API requires OWCOPILOT_API_KEY to be "
+                        "configured (fail-closed: real mode spends provider credit)"
+                    ),
+                )
+            if not os.getenv("OPENAI_API_KEY"):
+                raise HTTPException(
+                    status_code=503,
+                    detail="real provider is not configured (OPENAI_BASE_URL / OPENAI_API_KEY)",
+                )
+        content_root = _project_root_or_404(project)
+        runners: dict[str, Callable[..., dict[str, Any]]] = {
+            "world_seed": run_world_seed_action,
+            "extraction": run_extraction_action,
+            "theme_sweep": run_theme_sweep_action,
+        }
+        action = runners[req.kind]
+        params = dict(req.params)
+
+        def runner(emit: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+            return action(content_root, progress=emit, **params)
+
+        job = jobs_manager.submit(req.kind, runner)
+        return JobCreatedResponse(job_id=job.id, kind=job.kind, status=job.status)
+
+    @app.get("/jobs/{job_id}", response_model=JobStatusResponse)
+    def job_status(
+        job_id: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> JobStatusResponse:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        job = jobs_manager.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+        return JobStatusResponse(
+            job_id=job.id,
+            kind=job.kind,
+            status=job.status,
+            events=list(job.events),
+            result=job.result,
+            error=job.error,
+        )
+
+    @app.get("/jobs/{job_id}/events")
+    def job_events(
+        job_id: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> StreamingResponse:
+        """SSE: replays buffered events, then tails until the job is terminal."""
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        if jobs_manager.get(job_id) is None:
+            raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+
+        def stream():
+            index = 0
+            while True:
+                events, index, terminal = jobs_manager.wait_events(job_id, index, timeout=10.0)
+                for event in events:
+                    payload = json.dumps(event["data"], ensure_ascii=False)
+                    yield f"event: {event['type']}\ndata: {payload}\n\n"
+                if terminal and not events:
+                    return
+                if not events and not terminal:
+                    yield ": keep-alive\n\n"
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     @app.get("/projects/{project}/review_items", response_model=ReviewItemsResponse)

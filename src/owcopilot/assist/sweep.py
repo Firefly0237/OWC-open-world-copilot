@@ -24,6 +24,7 @@ the user of this feature must be able to say "we checked everything".
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -152,6 +153,7 @@ class ThemeSweepService:
         extra_terms: list[str] | None = None,
         use_llm: bool = False,
         max_judge: int = 400,
+        progress: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> SweepReport:
         theme = theme.strip()
         if not theme:
@@ -183,6 +185,8 @@ class ThemeSweepService:
             for start in range(0, len(to_judge), _JUDGE_BATCH_SIZE):
                 batch = to_judge[start : start + _JUDGE_BATCH_SIZE]
                 judged_count += len(batch)
+                if progress is not None:
+                    progress("judge", {"done": judged_count, "total": len(to_judge)})
                 for index, reason, quote in self._judge_batch(theme, terms, batch):
                     row = batch[index]
                     evidence = f"模型判定：{reason}" + (f"（原文：{quote}）" if quote else "")

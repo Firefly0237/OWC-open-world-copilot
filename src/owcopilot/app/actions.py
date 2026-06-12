@@ -8,7 +8,7 @@ whole Workbench behaviour is unit-testable in core CI, and the dashboard file st
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -422,6 +422,7 @@ def run_world_seed_action(
     budget_tokens: int = 1800,
     llm_mode: str = "offline",
     llm_model: str = "deepseek-v4-flash",
+    progress: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     parsed = WorldSeedBrief.model_validate(brief)
     with _project(content_root, sqlite_path) as project:
@@ -436,7 +437,7 @@ def run_world_seed_action(
             bundle=project.bundle,
             project_context_builder=project.context_builder,
             reference_context_builder=project.reference_context_builder,
-        ).generate(parsed, budget_tokens=budget_tokens)
+        ).generate(parsed, budget_tokens=budget_tokens, progress=progress)
         issues = project.audit_runner.run(AuditContext.from_bundle(draft.bundle)).issues
         item = ReviewQueue(project.sqlite_store).add_world_seed(
             {
@@ -632,6 +633,7 @@ def run_extraction_action(
     max_chunks: int = 12,
     llm_mode: str = "offline",
     llm_model: str = "deepseek-v4-flash",
+    progress: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Distill an unstructured manuscript into a reviewable draft (entities/relations/beats)."""
     with _project(content_root, sqlite_path) as project:
@@ -642,7 +644,11 @@ def run_extraction_action(
             offline_provider=OfflineExtractionProvider(),
         )
         draft = ExtractionService(gateway=gateway, bundle=project.bundle).extract(
-            title=title, text=text, source_kind=source_kind, max_chunks=max_chunks
+            title=title,
+            text=text,
+            source_kind=source_kind,
+            max_chunks=max_chunks,
+            progress=progress,
         )
         telemetry_summary = telemetry.summary()
         return {
@@ -848,6 +854,7 @@ def run_theme_sweep_action(
     llm_model: str = "deepseek-v4-flash",
     max_judge: int = 400,
     sqlite_path: str | None = None,
+    progress: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Theme sweep over the whole world (term layer + optional LLM judge + graph
     expansion). Read-only: produces a work order for a human, writes nothing."""
@@ -868,6 +875,7 @@ def run_theme_sweep_action(
             extra_terms=extra_terms,
             use_llm=use_llm,
             max_judge=max_judge,
+            progress=progress,
         )
         if use_llm:
             telemetry_summary = telemetry.summary()

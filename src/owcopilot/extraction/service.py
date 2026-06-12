@@ -12,6 +12,7 @@ import io
 import json
 import re
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -67,6 +68,7 @@ class ExtractionService:
         text: str,
         source_kind: str = "文稿",
         max_chunks: int = 12,
+        progress: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> ExtractionDraft:
         clean = text.strip()
         if not clean:
@@ -74,6 +76,8 @@ class ExtractionService:
         chunks = chunk_text(clean)[:max_chunks]
         merged = _MergedFacts()
         for index, chunk in enumerate(chunks):
+            if progress is not None:
+                progress("chunk", {"index": index + 1, "total": len(chunks)})
             raw = self.gateway.complete(
                 task="extract_lore",
                 system=_SYSTEM_PROMPT,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from typing import Any
 
 from ..content.models import (
@@ -42,8 +43,19 @@ class WorldSeedService:
         self.project_context_builder = project_context_builder
         self.reference_context_builder = reference_context_builder
 
-    def generate(self, brief: WorldSeedBrief, *, budget_tokens: int = 1800) -> WorldSeedDraft:
+    def generate(
+        self,
+        brief: WorldSeedBrief,
+        *,
+        budget_tokens: int = 1800,
+        progress: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> WorldSeedDraft:
+        def emit(name: str) -> None:
+            if progress is not None:
+                progress("stage", {"name": name})
+
         query = _brief_query(brief)
+        emit("retrieving")
         project_pack = (
             self.project_context_builder.build(query, budget_tokens=budget_tokens // 2, limit=6)
             if brief.use_project_facts
@@ -53,11 +65,13 @@ class WorldSeedService:
         inspiration_pack = self.reference_context_builder.build(
             reference_query, budget_tokens=budget_tokens, limit=8
         )
+        emit("generating")
         raw = self.gateway.complete(
             task="world_seed",
             system=_system_prompt(brief, project_pack, inspiration_pack),
             user=_brief_user_message(brief),
         )
+        emit("parsing")
         payload = parse_world_seed_payload(raw)
         draft_id = "world_seed_" + hashlib.sha256(f"{brief.idea}\n{raw}".encode()).hexdigest()[:12]
         bundle = _bundle_from_payload(
