@@ -109,8 +109,11 @@ _BRIEF_OPTIONAL_LABELS: list[tuple[str, str]] = [
     ("game_genre", "玩法/类型"),
     ("tone", "基调"),
     ("era", "时代/技术水平"),
+    ("magic_level", "魔法/超自然体系"),
+    ("world_scale", "世界尺度"),
     ("player_fantasy", "主角/玩家身份"),
     ("core_conflict", "核心冲突"),
+    ("content_restrictions", "内容红线（必须避免）"),
     ("notes", "补充要求"),
 ]
 

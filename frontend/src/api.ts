@@ -1,8 +1,9 @@
 /** Thin client for the standardized REST surface. The Vue app is just one consumer of
  * the same authenticated contract the Streamlit UI, CLI and pipelines use. */
 
-const BASE: string =
-  (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:8000";
+// Same-origin by default: the built app ships from the API server itself (one command,
+// one port). Dev mode points at uvicorn via frontend/.env.development.
+const BASE: string = (import.meta.env.VITE_API_BASE as string | undefined) ?? "";
 
 export function currentProject(): string {
   return localStorage.getItem("owcopilot_project") ?? "demo";

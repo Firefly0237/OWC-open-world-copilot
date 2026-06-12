@@ -44,7 +44,9 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ..app.actions import (
     decide_review_action,
@@ -805,11 +807,18 @@ def _context_builder_for_bundle(bundle: ContentBundle) -> tuple[SQLiteStore, Con
     )
 
 
-PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+# Managed world names double as project ids and are frequently CJK, so the rule is
+# "no path-hostile characters", not "ASCII only". Traversal is impossible by charset.
+PROJECT_ID_FORBIDDEN_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 def _validate_project_id(project: str) -> None:
-    if not PROJECT_ID_RE.fullmatch(project):
+    if (
+        not project
+        or len(project) > 64
+        or project.strip(".") == ""
+        or PROJECT_ID_FORBIDDEN_RE.search(project)
+    ):
         raise HTTPException(status_code=400, detail="invalid project id")
 
 
@@ -835,10 +844,48 @@ def _project_registry() -> dict[str, Path]:
     return registry
 
 
+def _frontend_dist_dir() -> Path | None:
+    """Locate the built Vue app: explicit env first, then the repo-relative default."""
+    override = os.getenv("OWCOPILOT_FRONTEND_DIST", "").strip()
+    candidates = (
+        [Path(override)]
+        if override
+        else [
+            Path(__file__).resolve().parents[3] / "frontend" / "dist",
+            Path.cwd() / "frontend" / "dist",
+        ]
+    )
+    for candidate in candidates:
+        if (candidate / "index.html").exists():
+            return candidate
+    return None
+
+
+class _SpaStaticFiles(StaticFiles):
+    """Serve the built frontend; unknown paths fall back to index.html so client-side
+    routes (/overview, /review …) survive a hard refresh."""
+
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as e:
+            if e.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
+
+
 def _project_content_root(project: str) -> Path | None:
     _validate_project_id(project)
     root = _project_registry().get(project)
     if root is None:
+        # Zero-config path: a managed world's NAME doubles as its project id, so a fresh
+        # install needs no OWCOPILOT_PROJECTS_JSON at all — create a world, use its name.
+        try:
+            managed = worlds_home() / sanitize_world_name(project)
+        except ValueError:
+            return None
+        if managed.exists() and managed.is_dir():
+            return managed
         return None
     if not root.exists() or not root.is_dir():
         raise HTTPException(status_code=404, detail=f"configured project {project!r} not found")
@@ -921,20 +968,24 @@ def create_app() -> FastAPI:
     jobs_manager = JobManager()
     app.state.v2_issues = {}
 
-    @app.get("/")
-    def root() -> dict[str, Any]:
-        """A browser hitting the API port should learn where to go, not see a bare 404."""
-        return {
-            "service": "owcopilot",
-            "version": __version__,
-            "hint": (
-                "这里是 OWCopilot API 服务，本身没有页面。图形界面请启动前端："
-                "npm --prefix frontend run dev，然后打开 http://localhost:5173；"
-                "交互式接口文档在 /docs，健康检查在 /health。"
-            ),
-            "docs": "/docs",
-            "health": "/health",
-        }
+    frontend_dist = _frontend_dist_dir()
+    if frontend_dist is None:
+        # No built frontend around: a browser hitting the API port should still learn
+        # where to go instead of seeing a bare 404.
+        @app.get("/")
+        def root() -> dict[str, Any]:
+            return {
+                "service": "owcopilot",
+                "version": __version__,
+                "hint": (
+                    "这里是 OWCopilot API 服务。未发现已构建的前端"
+                    "（npm --prefix frontend run build 后重启即可单端口使用）；"
+                    "开发模式请另起 npm --prefix frontend run dev → http://localhost:5173。"
+                    "交互式接口文档在 /docs，健康检查在 /health。"
+                ),
+                "docs": "/docs",
+                "health": "/health",
+            }
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -2170,6 +2221,12 @@ def create_app() -> FastAPI:
             )
         finally:
             project_context.close()
+
+    if frontend_dist is not None:
+        # One process, one port: the built Vue app ships from the API itself, so launch
+        # is a single command with no CORS and no env vars. Mounted last — API routes
+        # registered above keep precedence.
+        app.mount("/", _SpaStaticFiles(directory=str(frontend_dist), html=True), name="spa")
 
     return app
 

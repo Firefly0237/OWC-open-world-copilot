@@ -42,10 +42,41 @@ def client(tmp_path, monkeypatch) -> TestClient:
     return TestClient(create_app())
 
 
-def test_root_route_points_browsers_at_the_frontend(client: TestClient) -> None:
-    body = client.get("/").json()
+def test_root_route_points_browsers_at_the_frontend(tmp_path, monkeypatch) -> None:
+    # force the no-dist branch regardless of whether the repo has a built frontend
+    monkeypatch.setenv("OWCOPILOT_FRONTEND_DIST", str(tmp_path / "missing"))
+    monkeypatch.delenv("OWCOPILOT_API_KEY", raising=False)
+    bare = TestClient(create_app())
+    body = bare.get("/").json()
     assert body["service"] == "owcopilot"
-    assert "5173" in body["hint"] and body["docs"] == "/docs"
+    assert body["docs"] == "/docs"
+
+
+def test_spa_mount_serves_index_and_falls_back_on_client_routes(tmp_path, monkeypatch) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html><body>starbound</body></html>", encoding="utf-8")
+    monkeypatch.setenv("OWCOPILOT_FRONTEND_DIST", str(dist))
+    monkeypatch.delenv("OWCOPILOT_API_KEY", raising=False)
+    spa = TestClient(create_app())
+    assert "starbound" in spa.get("/").text
+    # client-side routes survive a hard refresh via the index fallback
+    assert "starbound" in spa.get("/review").text
+    # API routes registered before the mount keep precedence
+    assert spa.get("/health").json()["status"] == "ok"
+
+
+def test_managed_world_name_doubles_as_project_id(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("OWCOPILOT_PROJECTS_JSON", raising=False)
+    monkeypatch.delenv("OWCOPILOT_API_KEY", raising=False)
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    zero_config = TestClient(create_app())
+    created = zero_config.post("/workspaces", json={"name": "盐汐"})
+    assert created.status_code == 201
+    overview = zero_config.get("/projects/盐汐/overview")
+    assert overview.status_code == 200, overview.text
+    assert zero_config.get("/projects/不存在的/overview").status_code == 404
 
 
 def test_workspace_create_list_pack_import_round_trip(client: TestClient) -> None:

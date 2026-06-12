@@ -2169,7 +2169,10 @@ with tab_genesis:
             _OPT_STYLES = "世界风格"
             _OPT_TONE = "基调"
             _OPT_ERA = "时代/技术水平"
+            _OPT_MAGIC = "魔法/超自然体系"
+            _OPT_SCALE = "世界尺度"
             _OPT_CONFLICT = "核心冲突"
+            _OPT_REDLINE = "内容红线"
             _OPT_REFS = "参考用法"
             _OPT_FACTS = "在现有世界上扩写"
             _OPT_NOTES = "补充要求"
@@ -2180,7 +2183,10 @@ with tab_genesis:
                 _OPT_STYLES,
                 _OPT_TONE,
                 _OPT_ERA,
+                _OPT_MAGIC,
+                _OPT_SCALE,
                 _OPT_CONFLICT,
+                _OPT_REDLINE,
                 _OPT_REFS,
                 _OPT_FACTS,
                 _OPT_NOTES,
@@ -2288,6 +2294,27 @@ with tab_genesis:
                     era = st.text_input(
                         _OPT_ERA, placeholder="工业革命早期 / 近未来", key="seed_era"
                     )
+                magic_level = ""
+                world_scale = ""
+                content_restrictions = ""
+                if _OPT_MAGIC in chosen_fields:
+                    magic_level = st.text_input(
+                        _OPT_MAGIC,
+                        placeholder="无超自然 / 低魔 / 高魔 / 科技拟魔 / 神明在场",
+                        key="seed_magic",
+                    )
+                if _OPT_SCALE in chosen_fields:
+                    world_scale = st.text_input(
+                        _OPT_SCALE,
+                        placeholder="一城一镇 / 一国一域 / 大陆 / 星球 / 星海",
+                        key="seed_scale",
+                    )
+                if _OPT_REDLINE in chosen_fields:
+                    content_restrictions = st.text_input(
+                        _OPT_REDLINE,
+                        placeholder="必须避免的内容，例如：不出现骸骨与血泊描写",
+                        key="seed_redline",
+                    )
                 if _OPT_CONFLICT in chosen_fields:
                     core_conflict = st.text_input(
                         _OPT_CONFLICT,
@@ -2340,6 +2367,9 @@ with tab_genesis:
                             "world_styles": styles,
                             "tone": tone.strip(),
                             "era": era.strip(),
+                            "magic_level": magic_level.strip(),
+                            "world_scale": world_scale.strip(),
+                            "content_restrictions": content_restrictions.strip(),
                             "player_fantasy": player_fantasy.strip(),
                             "core_conflict": core_conflict.strip(),
                             "reference_mode": reference_mode,

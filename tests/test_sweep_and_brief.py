@@ -164,6 +164,24 @@ def test_brief_user_message_includes_filled_fields_only() -> None:
     assert "玩家身份：" not in message and "核心冲突：" not in message
 
 
+def test_brief_new_bible_dimensions_round_trip() -> None:
+    """Round-16 guided form fields (magic system / scope / content red-lines): present
+    when filled, absent when not — same omission contract as every other dimension."""
+    filled = WorldSeedBrief(
+        idea="x",
+        magic_level="低魔（稀有而危险）",
+        world_scale="一城一镇",
+        content_restrictions="不出现骸骨与血泊描写",
+    )
+    message = _brief_user_message(filled)
+    assert "魔法/超自然体系：低魔（稀有而危险）" in message
+    assert "世界尺度：一城一镇" in message
+    assert "内容红线（必须避免）：不出现骸骨与血泊描写" in message
+    empty = _brief_user_message(WorldSeedBrief(idea="x"))
+    for label in ("魔法/超自然体系：", "世界尺度：", "内容红线"):
+        assert label not in empty
+
+
 def test_section_plan_zero_counts_mean_empty_arrays() -> None:
     brief = WorldSeedBrief(idea="x", quest_count=0, npc_count=0, term_count=0)
     plan = _section_plan(brief)

@@ -22,6 +22,12 @@ class WorldSeedBrief(BaseModel):
     era: str = ""
     player_fantasy: str = ""
     core_conflict: str = ""
+    # Round-16: dimensions every real worldbuilding bible carries (genre/tone/era were
+    # already here): the magic-or-tech premise, the world's physical scope, and the
+    # content red-lines section (compliance is a first-class part of CN game docs).
+    magic_level: str = ""
+    world_scale: str = ""
+    content_restrictions: str = ""
     reference_mode: str = "灵感参考"
     reference_query: str = ""
     use_project_facts: bool = False
