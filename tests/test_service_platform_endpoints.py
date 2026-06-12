@@ -42,6 +42,12 @@ def client(tmp_path, monkeypatch) -> TestClient:
     return TestClient(create_app())
 
 
+def test_root_route_points_browsers_at_the_frontend(client: TestClient) -> None:
+    body = client.get("/").json()
+    assert body["service"] == "owcopilot"
+    assert "5173" in body["hint"] and body["docs"] == "/docs"
+
+
 def test_workspace_create_list_pack_import_round_trip(client: TestClient) -> None:
     created = client.post("/workspaces", json={"name": "盐汐群岛"})
     assert created.status_code == 201, created.text

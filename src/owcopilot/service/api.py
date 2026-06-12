@@ -921,6 +921,21 @@ def create_app() -> FastAPI:
     jobs_manager = JobManager()
     app.state.v2_issues = {}
 
+    @app.get("/")
+    def root() -> dict[str, Any]:
+        """A browser hitting the API port should learn where to go, not see a bare 404."""
+        return {
+            "service": "owcopilot",
+            "version": __version__,
+            "hint": (
+                "这里是 OWCopilot API 服务，本身没有页面。图形界面请启动前端："
+                "npm --prefix frontend run dev，然后打开 http://localhost:5173；"
+                "交互式接口文档在 /docs，健康检查在 /health。"
+            ),
+            "docs": "/docs",
+            "health": "/health",
+        }
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         return {"status": "ok", "version": __version__, "llm_mode": llm_mode}
