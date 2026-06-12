@@ -2166,6 +2166,7 @@ with tab_genesis:
             _OPT_MEDIUM = "载体/媒介"
             _OPT_GENRE = "玩法/类型"
             _OPT_FANTASY = "主角/玩家身份"
+            _OPT_CAST = "主要人物"
             _OPT_STYLES = "世界风格"
             _OPT_TONE = "基调"
             _OPT_ERA = "时代/技术水平"
@@ -2180,6 +2181,7 @@ with tab_genesis:
                 _OPT_MEDIUM,
                 _OPT_GENRE,
                 _OPT_FANTASY,
+                _OPT_CAST,
                 _OPT_STYLES,
                 _OPT_TONE,
                 _OPT_ERA,
@@ -2271,6 +2273,14 @@ with tab_genesis:
                 if _OPT_FANTASY in chosen_fields:
                     player_fantasy = st.text_input(
                         _OPT_FANTASY, placeholder="流亡调查员 / 新任领主", key="seed_fantasy"
+                    )
+                key_characters_text = ""
+                if _OPT_CAST in chosen_fields:
+                    key_characters_text = st.text_area(
+                        _OPT_CAST,
+                        height=90,
+                        placeholder="每行一位，例如：\n沈横舟：守灯二十年的老领航员\n白盐：走私船上长大的巡查官",
+                        key="seed_cast",
                     )
                 if _OPT_STYLES in chosen_fields:
                     style_choices = st.multiselect(
@@ -2371,6 +2381,11 @@ with tab_genesis:
                             "world_scale": world_scale.strip(),
                             "content_restrictions": content_restrictions.strip(),
                             "player_fantasy": player_fantasy.strip(),
+                            "key_characters": [
+                                line.strip()
+                                for line in key_characters_text.splitlines()
+                                if line.strip()
+                            ],
                             "core_conflict": core_conflict.strip(),
                             "reference_mode": reference_mode,
                             "reference_query": reference_query.strip(),

@@ -182,6 +182,32 @@ def test_brief_new_bible_dimensions_round_trip() -> None:
         assert label not in empty
 
 
+def test_offline_seed_carries_creator_cast_through() -> None:
+    """The offline double mirrors the production contract: creator-given characters must
+    appear in the generated npcs (so the whole pass-through is testable at $0)."""
+    from owcopilot.worldgen.offline import OfflineWorldSeedProvider
+    from owcopilot.worldgen.service import _brief_user_message as build_message
+
+    brief = WorldSeedBrief(idea="灯塔群岛", key_characters=["沈横舟：守灯二十年的老领航员"])
+    raw, _, _ = OfflineWorldSeedProvider().complete(
+        system="", user=build_message(brief), model="cheap"
+    )
+    import json as _json
+
+    payload = _json.loads(raw)
+    names = [npc["name"] for npc in payload["npcs"]]
+    assert "沈横舟" in names
+    assert payload["npcs"][0]["description"].startswith("守灯二十年")
+
+
+def test_brief_key_characters_block_present_only_when_given() -> None:
+    brief = WorldSeedBrief(idea="x", key_characters=["沈横舟：守灯二十年的老领航员", "  "])
+    message = _brief_user_message(brief)
+    assert "主要人物" in message and "- 沈横舟：守灯二十年的老领航员" in message
+    assert "relations 中设计" in message  # the model is told to wire their relationships
+    assert "主要人物" not in _brief_user_message(WorldSeedBrief(idea="x"))
+
+
 def test_section_plan_zero_counts_mean_empty_arrays() -> None:
     brief = WorldSeedBrief(idea="x", quest_count=0, npc_count=0, term_count=0)
     plan = _section_plan(brief)

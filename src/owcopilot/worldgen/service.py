@@ -134,6 +134,10 @@ def _brief_user_message(brief: WorldSeedBrief) -> str:
         value = str(getattr(brief, field) or "").strip()
         if value:
             lines.append(f"{label}：{value}")
+    characters = [c.strip() for c in brief.key_characters if c.strip()]
+    if characters:
+        lines.append("主要人物（必须保留并深化，纳入 npcs，并在 relations 中设计他们之间的关系）：")
+        lines.extend(f"- {character}" for character in characters)
     lines.append(
         "以上是创作者提供的全部设定。未提及的维度由你根据核心想法自行裁量，"
         "保持内在一致即可——不要为未提及的维度强加具体设定（例如未提及主角就不要设计主角）。"

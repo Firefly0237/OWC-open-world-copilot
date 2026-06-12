@@ -109,7 +109,19 @@ class OfflineWorldSeedProvider:
                     "controlling_faction": "fac_freeport",
                 },
             ],
+            # creator-given key characters lead the cast, mirroring the production
+            # contract ("必须保留并深化") so tests can assert the pass-through
             "npcs": [
+                {
+                    "id": f"npc_cast_{index + 1}",
+                    "name": entry.split("：", 1)[0].strip() or f"主要人物{index + 1}",
+                    "description": (entry.split("：", 1)[1].strip() if "：" in entry else entry),
+                    "faction_id": "fac_charter",
+                    "location_id": "loc_crown_gate",
+                }
+                for index, entry in enumerate(brief.get("key_characters") or [])
+            ]
+            + [
                 {
                     "id": "npc_sera",
                     "name": "瑟拉",
@@ -194,10 +206,21 @@ class OfflineWorldSeedProvider:
 
 
 def _parse_brief_message(user: str) -> dict[str, Any]:
-    """Parse the labeled-lines user message (核心想法：…/世界风格：…)."""
+    """Parse the labeled-lines user message (核心想法：…/世界风格：…/主要人物 block)."""
     brief: dict[str, Any] = {}
+    characters: list[str] = []
+    in_cast = False
     for line in user.splitlines():
-        label, separator, value = line.partition("：")
+        stripped = line.strip()
+        if in_cast:
+            if stripped.startswith("- "):
+                characters.append(stripped[2:].strip())
+                continue
+            in_cast = False
+        if stripped.startswith("主要人物"):
+            in_cast = True
+            continue
+        label, separator, value = stripped.partition("：")
         if not separator:
             continue
         label, value = label.strip(), value.strip()
@@ -205,6 +228,8 @@ def _parse_brief_message(user: str) -> dict[str, Any]:
             brief["idea"] = value
         elif label == "世界风格":
             brief["world_styles"] = [s.strip() for s in value.split("、") if s.strip()]
+    if characters:
+        brief["key_characters"] = characters
     return brief
 
 

@@ -37,11 +37,21 @@ python -m venv .venv && .\.venv\Scripts\pip install -e ".[dev,serve,app]"
 
 `eval-acceptance` 会生成一个 65 实体 / 10 区域 / 36 任务的双语世界并验证五道质量门禁（零误报、25 个埋错全检出、影响分析零漏报、30 问句检索全命中、问答拒答纪律）。生成的 `.tmp\demo\acceptance_world` 目录可直接作为下面所有命令的 `--content-root`。
 
-### 启动工作台
+### 启动工作台（Vue，主路径）
 
 ```powershell
-owcopilot ui          # 一条命令打开工作台（等价于 streamlit run …）
+npm --prefix frontend install && npm --prefix frontend run build   # 仅首次
+.\.venv\Scripts\python.exe -m uvicorn owcopilot.service.api:create_app --factory --port 8000
+# 浏览器打开 http://localhost:8000 —— 单进程、零配置，世界存放在 ~/.owcopilot/worlds/
 ```
+
+### 旧版工作台（Streamlit，legacy）
+
+```powershell
+owcopilot ui          # 功能全集仍可用；新功能只进 Vue 版
+```
+
+Streamlit 版进入维护模式（只修不增）。退役条件：Vue 版补齐专项清查页、工作区管理页、设置/模型接入与导出页之后移除 `ui` 命令。
 
 首次使用建议点侧边栏的 **「新手引导」**：游戏式教程会高亮界面元素、贴身弹出指引卡片，按从左到右的顺序带你逛完全部九个页面（世界总览 / 设定档案 / 创世工坊 / 世界问答 / 校勘修复 / 影响分析 / 创作工坊 / 审阅台 / 导出交付）。
 

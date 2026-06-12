@@ -28,6 +28,9 @@ class WorldSeedBrief(BaseModel):
     magic_level: str = ""
     world_scale: str = ""
     content_restrictions: str = ""
+    # Creator-given protagonists/key cast ("名字：一句设定" per entry). The model must
+    # keep them, deepen them, and weave relationships among them — not invent replacements.
+    key_characters: list[str] = Field(default_factory=list)
     reference_mode: str = "灵感参考"
     reference_query: str = ""
     use_project_facts: bool = False

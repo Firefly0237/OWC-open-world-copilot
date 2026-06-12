@@ -1,11 +1,7 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, onUnmounted, reactive, ref } from "vue";
 import { apiGet, apiPost, currentProject, streamJobEvents } from "../api";
 
-/** Guided dimensions, distilled from real worldbuilding/story-bible structures
- * (genre, tone, era, magic system, scope, central conflict) plus the content-redline
- * section CN game docs carry. Every one is optional: "暂未想好" sends nothing, "其他…"
- * opens a free-text input — the form guides, never forces. */
 const UNDECIDED = "暂未想好";
 const CUSTOM = "其他…";
 
@@ -33,11 +29,11 @@ const DIMENSIONS: Dimension[] = [
     key: "era",
     label: "时代 / 技术水平",
     options: ["上古神话", "古典王朝", "中世纪", "工业革命", "现代都市", "近未来", "远未来星际"],
-    placeholder: "例如：蒸汽与符文并行的双轨时代",
+    placeholder: "例如：蒸汽与符文并行",
   },
   {
     key: "magic_level",
-    label: "魔法 / 超自然体系",
+    label: "魔法 / 超自然",
     options: ["无超自然", "低魔（稀有而危险）", "高魔（融入日常）", "科技拟魔", "神明在场", "规则怪谈"],
     placeholder: "例如：以记忆为燃料的咒术",
   },
@@ -77,6 +73,14 @@ const STYLE_OPTIONS = [
   "历史架空",
 ];
 
+const STAGES = [
+  { key: "accepted", label: "受理" },
+  { key: "retrieving", label: "检索" },
+  { key: "generating", label: "推演" },
+  { key: "parsing", label: "整理" },
+  { key: "done", label: "候批" },
+];
+
 const form = reactive({
   idea: "",
   styles: [] as string[],
@@ -87,6 +91,7 @@ const form = reactive({
   >,
   customs: Object.fromEntries(DIMENSIONS.map((d) => [d.key, ""])) as Record<string, string>,
   playerFantasy: "",
+  cast: "",
   restrictions: "",
   notes: "",
   factions: 2,
@@ -96,16 +101,30 @@ const form = reactive({
   terms: 3,
 });
 
-const running = ref(false);
-const progress = ref<string[]>([]);
-const result = ref<{ summary?: string; counts?: Record<string, number> } | null>(null);
-const error = ref("");
+interface SeedEntity {
+  name: string;
+  type: string;
+  description: string;
+}
 
-const STAGE_LABELS: Record<string, string> = {
-  retrieving: "正在检索项目事实与灵感参考…",
-  generating: "正在推演世界草案…",
-  parsing: "正在整理结构化产物…",
-};
+interface SeedRelation {
+  source: string;
+  target: string;
+  kind: string;
+}
+
+const running = ref(false);
+const stageIndex = ref(-1);
+const elapsed = ref(0);
+const error = ref("");
+const result = ref<{
+  summary: string;
+  counts: Record<string, number>;
+  characters: SeedEntity[];
+  relations: SeedRelation[];
+} | null>(null);
+
+let timer: number | undefined;
 
 const COUNT_LABELS: Record<string, string> = {
   entities: "实体",
@@ -132,12 +151,26 @@ function toggleStyle(style: string): void {
   else form.styles.push(style);
 }
 
+function stopTimer(): void {
+  if (timer !== undefined) {
+    window.clearInterval(timer);
+    timer = undefined;
+  }
+}
+
+onUnmounted(stopTimer);
+
 async function run(): Promise<void> {
   if (!canRun.value) return;
   running.value = true;
-  progress.value = [];
+  stageIndex.value = 0;
+  elapsed.value = 0;
   result.value = null;
   error.value = "";
+  stopTimer();
+  timer = window.setInterval(() => {
+    elapsed.value += 1;
+  }, 1000);
   const styles = [...form.styles];
   if (form.styleCustom.trim()) styles.push(form.styleCustom.trim());
   try {
@@ -154,6 +187,10 @@ async function run(): Promise<void> {
           world_scale: resolved("world_scale"),
           core_conflict: resolved("core_conflict"),
           player_fantasy: form.playerFantasy.trim(),
+          key_characters: form.cast
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean),
           content_restrictions: form.restrictions.trim(),
           notes: form.notes.trim(),
           faction_count: form.factions,
@@ -164,23 +201,44 @@ async function run(): Promise<void> {
         },
       },
     });
-    progress.value.push("任务已受理，开始执行…");
     await streamJobEvents(job.job_id, (event) => {
       if (event.type === "stage") {
         const name = String(event.data.name ?? "");
-        progress.value.push(STAGE_LABELS[name] ?? name);
+        const index = STAGES.findIndex((s) => s.key === name);
+        if (index > stageIndex.value) stageIndex.value = index;
       } else if (event.type === "failed") {
         error.value = String(event.data.error ?? "任务失败");
       }
     });
     const status = await apiGet<{
       status: string;
-      result: { summary?: string; counts?: Record<string, number> } | null;
+      result: {
+        summary?: string;
+        counts?: Record<string, number>;
+        bundle?: {
+          entities?: Record<string, SeedEntity>;
+          relations?: SeedRelation[];
+        };
+      } | null;
       error: string | null;
     }>(`/jobs/${job.job_id}`);
     if (status.status === "done" && status.result) {
-      result.value = status.result;
-      progress.value.push("草案已写就，正于审阅台候批。");
+      stageIndex.value = STAGES.length - 1;
+      const bundle = status.result.bundle ?? {};
+      const entities = Object.values(bundle.entities ?? {});
+      const names = new Map(
+        Object.entries(bundle.entities ?? {}).map(([id, e]) => [id, e.name]),
+      );
+      result.value = {
+        summary: status.result.summary ?? "",
+        counts: status.result.counts ?? {},
+        characters: entities.filter((e) => e.type === "npc"),
+        relations: (bundle.relations ?? []).slice(0, 14).map((r) => ({
+          source: names.get(r.source) ?? r.source,
+          target: names.get(r.target) ?? r.target,
+          kind: r.kind,
+        })),
+      };
     } else if (!error.value) {
       error.value = status.error ?? "任务未完成";
     }
@@ -188,6 +246,7 @@ async function run(): Promise<void> {
     error.value = String(e);
   } finally {
     running.value = false;
+    stopTimer();
   }
 }
 </script>
@@ -195,10 +254,7 @@ async function run(): Promise<void> {
 <template>
   <section>
     <div class="section"><span class="t">创世工坊 · 一键创世</span></div>
-    <p class="muted hint">
-      写下核心想法（唯一必填），其余维度按需选择——选「暂未想好」就交给模型自行裁量，
-      选「其他…」可自由填写。留空的维度不会进入提示词。
-    </p>
+    <p class="muted hint">只有核心想法必填，其余想到哪选到哪。</p>
 
     <div class="pane form">
       <label class="field">
@@ -206,12 +262,12 @@ async function run(): Promise<void> {
         <textarea
           v-model="form.idea"
           rows="3"
-          placeholder="例如：一个靠蒸汽巨树维持生命的群岛世界，各方势力争夺树心的控制权。——只写这一句也能开辟世界。"
+          placeholder="例如：一个靠蒸汽巨树维持生命的群岛世界，各方势力争夺树心的控制权。"
         ></textarea>
       </label>
 
       <div class="field">
-        <span class="label">题材风格 <i class="muted">可多选</i></span>
+        <span class="label">题材风格</span>
         <div class="chips">
           <button
             v-for="style in STYLE_OPTIONS"
@@ -223,7 +279,7 @@ async function run(): Promise<void> {
           >
             {{ style }}
           </button>
-          <input v-model="form.styleCustom" class="chip-input" placeholder="其他风格…" />
+          <input v-model="form.styleCustom" class="chip-input" placeholder="其他…" />
         </div>
       </div>
 
@@ -231,7 +287,7 @@ async function run(): Promise<void> {
         <label v-for="dim in DIMENSIONS" :key="dim.key" class="field">
           <span class="label">{{ dim.label }}</span>
           <select v-model="form.selections[dim.key]">
-            <option :value="UNDECIDED">{{ UNDECIDED }}（交给模型）</option>
+            <option :value="UNDECIDED">{{ UNDECIDED }}</option>
             <option v-for="option in dim.options" :key="option" :value="option">
               {{ option }}
             </option>
@@ -245,21 +301,30 @@ async function run(): Promise<void> {
         </label>
         <label class="field">
           <span class="label">主角 / 玩家身份</span>
-          <input v-model="form.playerFantasy" placeholder="留空 = 不设主角（纯世界观）" />
+          <input v-model="form.playerFantasy" placeholder="可留空" />
         </label>
         <label class="field">
-          <span class="label">内容红线（必须避免）</span>
-          <input v-model="form.restrictions" placeholder="例如：不出现骸骨与血泊描写" />
+          <span class="label">内容红线</span>
+          <input v-model="form.restrictions" placeholder="必须避免的内容，可留空" />
         </label>
       </div>
 
       <label class="field">
+        <span class="label">主要人物</span>
+        <textarea
+          v-model="form.cast"
+          rows="3"
+          placeholder="每行一位，写法随意，例如：&#10;沈横舟：守灯二十年的老领航员&#10;白盐：走私船上长大的巡查官"
+        ></textarea>
+      </label>
+
+      <label class="field">
         <span class="label">补充要求</span>
-        <input v-model="form.notes" placeholder="任何其他叮嘱…" />
+        <input v-model="form.notes" placeholder="可留空" />
       </label>
 
       <div class="field">
-        <span class="label">生成规模 <i class="muted">0 = 完全不要这一类</i></span>
+        <span class="label">生成规模 <i class="muted">0 = 不要这一类</i></span>
         <div class="scales">
           <label v-for="(label, key) in { factions: '阵营', regions: '区域', npcs: '角色', quests: '任务', terms: '术语' }" :key="key">
             <span class="muted">{{ label }} {{ form[key] }}</span>
@@ -273,18 +338,69 @@ async function run(): Promise<void> {
       </button>
     </div>
 
-    <div v-if="progress.length" class="pane log">
-      <div v-for="(line, index) in progress" :key="index" class="line">✦ {{ line }}</div>
+    <div v-if="running || stageIndex >= 0" class="pane progress">
+      <svg
+        v-if="running"
+        class="emblem"
+        width="56"
+        height="56"
+        viewBox="0 0 100 100"
+        fill="none"
+      >
+        <circle class="orb" cx="50" cy="50" r="44" stroke="#8fd6e8" stroke-opacity=".35" stroke-dasharray="3 6" />
+        <circle cx="50" cy="50" r="34" stroke="#d9b56c" stroke-opacity=".4" />
+        <path
+          class="core"
+          d="M50 14 L56.5 43.5 L86 50 L56.5 56.5 L50 86 L43.5 56.5 L14 50 L43.5 43.5 Z"
+          fill="#d9b56c"
+          fill-opacity=".25"
+          stroke="#f0d28a"
+          stroke-opacity=".8"
+        />
+      </svg>
+      <div class="stages">
+        <div class="steps">
+          <template v-for="(stage, index) in STAGES" :key="stage.key">
+            <span
+              class="step"
+              :class="{ done: index < stageIndex, active: index === stageIndex && running }"
+            >
+              {{ stage.label }}
+            </span>
+            <span v-if="index < STAGES.length - 1" class="step-line"></span>
+          </template>
+        </div>
+        <span v-if="running" class="muted elapsed">已用时 {{ elapsed }}s · 大世界通常需要一两分钟</span>
+      </div>
     </div>
+
     <p v-if="error" class="error">{{ error }}</p>
+
     <div v-if="result" class="pane done">
-      <p>{{ result.summary }}</p>
+      <p class="summary">{{ result.summary }}</p>
       <div class="chips">
-        <span v-for="(count, key) in result.counts ?? {}" :key="key" class="chip static">
+        <span v-for="(count, key) in result.counts" :key="key" class="chip static">
           {{ COUNT_LABELS[key] ?? key }} <b>{{ count }}</b>
         </span>
       </div>
-      <p class="muted">前往「审阅台」采纳或驳回这份草案。</p>
+      <template v-if="result.characters.length">
+        <div class="section"><span class="t">人物</span></div>
+        <div class="cast">
+          <div v-for="person in result.characters" :key="person.name" class="person">
+            <b>{{ person.name }}</b>
+            <span class="muted">{{ person.description }}</span>
+          </div>
+        </div>
+      </template>
+      <template v-if="result.relations.length">
+        <div class="section"><span class="t">关系</span></div>
+        <div class="relations">
+          <span v-for="(rel, index) in result.relations" :key="index" class="rel">
+            {{ rel.source }} <i>{{ rel.kind }}</i> {{ rel.target }}
+          </span>
+        </div>
+      </template>
+      <p class="muted">草案已入审阅台，采纳后正式入档。</p>
     </div>
   </section>
 </template>
@@ -398,7 +514,7 @@ textarea:focus {
   border-radius: 999px;
   font-size: 0.8rem;
   padding: 0.22rem 0.7rem;
-  width: 8.5rem;
+  width: 7rem;
 }
 
 .scales {
@@ -440,16 +556,88 @@ button.primary:disabled {
   cursor: not-allowed;
 }
 
-.log {
+.progress {
   margin-top: 0.9rem;
-  padding: 0.8rem 1rem;
-  font-size: 0.85rem;
+  padding: 0.9rem 1.1rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
 }
 
-.line {
-  padding: 0.15rem 0;
+.emblem .orb {
+  animation: spin 10s linear infinite;
+  transform-origin: center;
+  transform-box: fill-box;
+}
+
+.emblem .core {
+  animation: pulse 2s ease-in-out infinite;
+  transform-origin: center;
+  transform-box: fill-box;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.7;
+    transform: scale(0.96);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+
+.stages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.steps {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.step {
+  font-size: 0.84rem;
+  color: var(--ow-muted);
+  border: 1px solid var(--ow-line);
+  border-radius: 999px;
+  padding: 0.18rem 0.7rem;
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.step.done {
   color: var(--ow-cyan);
-  animation: ow-fade-up 0.25s ease-out both;
+  border-color: rgba(143, 214, 232, 0.4);
+}
+
+.step.active {
+  color: var(--ow-gold-bright);
+  border-color: var(--ow-gold-soft);
+  box-shadow: 0 0 12px rgba(240, 210, 138, 0.35);
+}
+
+.step-line {
+  width: 1.1rem;
+  height: 1px;
+  background: linear-gradient(90deg, var(--ow-gold-soft), transparent);
+}
+
+.elapsed {
+  font-size: 0.78rem;
 }
 
 .error {
@@ -461,7 +649,56 @@ button.primary:disabled {
   padding: 0.9rem 1.1rem;
 }
 
+.summary {
+  margin: 0 0 0.5rem;
+  line-height: 1.7;
+}
+
 .done .chips {
-  margin: 0.5rem 0;
+  margin-bottom: 0.4rem;
+}
+
+.cast {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.6rem;
+  margin-bottom: 0.4rem;
+}
+
+.person {
+  border: 1px solid var(--ow-line);
+  border-radius: 0.6rem;
+  background: var(--ow-panel-2);
+  padding: 0.55rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+}
+
+.person b {
+  color: var(--ow-gold-bright);
+  font-family: var(--ow-serif);
+}
+
+.relations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+.rel {
+  border: 1px solid var(--ow-line);
+  border-radius: 999px;
+  background: rgba(16, 22, 48, 0.6);
+  font-size: 0.78rem;
+  padding: 0.18rem 0.65rem;
+}
+
+.rel i {
+  color: var(--ow-cyan);
+  font-style: normal;
+  margin: 0 0.3rem;
 }
 </style>

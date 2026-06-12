@@ -50,7 +50,7 @@ async function refresh(): Promise<void> {
 
 async function decide(item: ReviewItem, decision: "accepted" | "rejected"): Promise<void> {
   if (!operator.value.trim()) {
-    error.value = "先落下署名——每道朱批都记下是谁的手笔。";
+    error.value = "先填署名。";
     return;
   }
   setCurrentOperator(operator.value.trim());
@@ -78,9 +78,7 @@ onMounted(refresh);
 <template>
   <section>
     <div class="section"><span class="t">审阅台 · 你执朱笔</span></div>
-    <p class="muted hint">
-      AI 写的一切先在这里候批：采纳才会写入世界，驳回就地焚稿。裁决一经做出不可更改。
-    </p>
+    <p class="muted hint">草稿在此候批：采纳入档，驳回焚稿，不可反悔。</p>
     <div class="operator">
       <input v-model="operator" placeholder="署名（必填）" />
       <button @click="refresh">刷新队列</button>
