@@ -134,6 +134,34 @@ def test_review_decide_over_rest_is_final(client: TestClient) -> None:
     assert missing.status_code == 404
 
 
+def test_connection_settings_and_loopback_real_gate(client: TestClient, monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    # the endpoint deliberately re-reads the repo .env (status must match what a real
+    # call sees); neutralize it here so the developer's own key can't leak into the test
+    monkeypatch.setattr("owcopilot.service.api.load_dotenv", lambda: None)
+    assert client.get("/settings/connection").json()["configured"] is False
+    # loopback + no provider key: real is refused with setup guidance, not a 403
+    blocked = client.post(
+        "/projects/demo/jobs",
+        json={"kind": "extraction", "params": {"title": "x", "text": "y", "llm_mode": "real"}},
+    )
+    assert blocked.status_code == 503
+    updated = client.post(
+        "/settings/connection",
+        json={"base_url": "https://api.example.test", "api_key": "sk-test"},
+    ).json()
+    assert updated["configured"] is True
+    assert updated["base_url"] == "https://api.example.test"
+    # loopback + key configured: the gate opens (job is accepted; it may fail later
+    # against the fake endpoint, which is job state, not an API error)
+    accepted = client.post(
+        "/projects/demo/jobs",
+        json={"kind": "extraction", "params": {"title": "x", "text": "y", "llm_mode": "real"}},
+    )
+    assert accepted.status_code == 202
+
+
 def test_theme_sweep_endpoint_returns_work_order(client: TestClient) -> None:
     response = client.post("/projects/demo/sweeps:run", json={"theme": "赌坊"})
     assert response.status_code == 200, response.text
@@ -142,6 +170,19 @@ def test_theme_sweep_endpoint_returns_work_order(client: TestClient) -> None:
     assert any(f["ref"] == "entity:npc_mara" for f in body["hits"])
     assert "专项清查工作单" in body["markdown"]
     assert body["llm_used"] is False
+
+
+def test_lorebook_download_renders_current_archive(client: TestClient) -> None:
+    book = client.get("/projects/demo/lorebook", params={"fmt": "md"})
+    assert book.status_code == 200, book.text
+    assert "玛拉" in book.text
+    assert "attachment" in book.headers["content-disposition"]
+
+    docx = client.get("/projects/demo/lorebook", params={"fmt": "docx"})
+    assert docx.status_code == 200
+    assert docx.content[:2] == b"PK"  # OOXML is a zip container
+
+    assert client.get("/projects/demo/lorebook", params={"fmt": "pdf"}).status_code == 422
 
 
 def test_entity_update_and_object_delete_endpoints(client: TestClient) -> None:

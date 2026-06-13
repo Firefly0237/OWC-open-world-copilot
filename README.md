@@ -23,7 +23,7 @@
 | 📦 **引擎导出** | UE DataTable 兼容 CSV / Unity 每任务 JSON / 通用 bundle，manifest 对每个产物记 sha256 |
 | 💰 **成本工程** | 所有模型调用过唯一网关：双层缓存、级联路由、输出 token 上限、逐操作成本回显与预算护栏；离线默认 $0 |
 
-四种使用形态共享同一内核：**Workbench UI（Streamlit）/ CLI（CI 门禁）/ REST（服务化）/ MCP（agent 生态，刻意不暴露写动作）**。
+四种使用形态共享同一内核：**Web 工作台（Vue + FastAPI 单进程）/ CLI（CI 门禁）/ REST（服务化）/ MCP（agent 生态，刻意不暴露写动作）**。
 
 ## 快速开始
 
@@ -45,17 +45,15 @@ npm --prefix frontend install && npm --prefix frontend run build   # 仅首次
 # 浏览器打开 http://localhost:8000 —— 单进程、零配置，世界存放在 ~/.owcopilot/worlds/
 ```
 
-### 旧版工作台（Streamlit，legacy）
+**接入你自己的模型**：打开「设置」选择服务商（DeepSeek / OpenAI / Anthropic / Kimi / 智谱 / 通义 / 豆包 / 自定义）、粘贴你的 API Key、选择模型并「测试连接」，保存后创世 / 人物 / 问答 / 清查全部走真实模型，每次调用的花费在结果与顶栏实时回显。**Key 只进入本机服务进程内存，调用直连服务商，没有任何中间服务器**。不接入也能翻阅档案、审阅、导出。（代码层的离线确定性应答器只服务于测试与 CI——这是 420+ 个 $0 测试的基座，不作为产品功能暴露。）
+
+### 旧版工作台（Streamlit，已弃用）
 
 ```powershell
-owcopilot ui          # 功能全集仍可用；新功能只进 Vue 版
+owcopilot ui          # deprecated：仅维护，不再更新；下个版本移除
 ```
 
-Streamlit 版进入维护模式（只修不增）。退役条件：Vue 版补齐专项清查页、工作区管理页、设置/模型接入与导出页之后移除 `ui` 命令。
-
-首次使用建议点侧边栏的 **「新手引导」**：游戏式教程会高亮界面元素、贴身弹出指引卡片，按从左到右的顺序带你逛完全部九个页面（世界总览 / 设定档案 / 创世工坊 / 世界问答 / 校勘修复 / 影响分析 / 创作工坊 / 审阅台 / 导出交付）。
-
-**接入你自己的模型**：不接入也能翻阅档案、运行校勘、影响分析与导出；创世与写作功能需在「设置 → 模型接入」选择服务商（DeepSeek / OpenAI / Anthropic / Kimi / 智谱 / 通义 / 豆包 / 自定义）、粘贴你的 API Key、在下拉中选择模型并「测试连接」。**Key 只保存在本机进程内存中，调用直连服务商，没有任何中间服务器**；「创作护栏」里可设会话花费上限，达到上限创作功能自动落锁。每个操作的花费实时回显。（代码层的离线确定性应答器仍服务于测试与 CI——这是 380+ 个 $0 测试的基座，只是不再作为产品功能暴露。）
+退役条件（Vue 版补齐专项清查 / 工作区 / 设置 / 导出四页）已于本轮达成，Streamlit 版自此弃用：教程、创作护栏等独有功能不再迁移承诺，问题只在影响数据安全时修复。
 
 ### CLI 日常闭环
 
@@ -82,7 +80,7 @@ docker compose up --build       # api:8000 + workbench:8501，离线模式，$0
 真实模式上线检查单：
 
 1. `.env` 配置 `OPENAI_BASE_URL` / `OPENAI_API_KEY`（OpenAI 兼容端点，如 DeepSeek）——`.env` 被 git/docker 双重忽略，密钥只在运行时注入；
-2. **必须**设置 `OWCOPILOT_API_KEY`：未设置时 API 上的 `llm_mode=real` 请求会被直接拒绝（fail-closed，因为它花真钱）；设置后所有请求需带 `X-API-Key`；
+2. **必须**设置 `OWCOPILOT_API_KEY`：未设置时来自**非本机**客户端的 `llm_mode=real` 请求会被直接拒绝（fail-closed，因为它花真钱；本机 loopback 视为机主，不受此限）；设置后所有请求需带 `X-API-Key`；
 3. `OWCOPILOT_PROJECTS_JSON='{"demo":"/data/content"}'` 注册项目目录——API 不接受请求体里的任意文件路径；
 4. 限流（`OWCOPILOT_RATE_LIMIT_PER_MIN`）与输出上限（`OWCOPILOT_MAX_OUTPUT_TOKENS`，默认 3000）按需调整；多副本部署解开 compose 里的 redis 块共享缓存。
 

@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
-import { apiGet, currentProject, setCurrentProject } from "./api";
+import { onMounted, onUnmounted, ref } from "vue";
+import { apiGet, currentProject, llmConfig, sessionCost, setCurrentProject, setLlmConfig } from "./api";
 
 const booting = ref(true);
 const workspaces = ref<string[]>([]);
 const project = ref(currentProject());
 const apiDown = ref(false);
+const modelName = ref("");
+const cost = ref(sessionCost());
 
 function switchProject(event: Event): void {
   const name = (event.target as HTMLSelectElement).value;
@@ -14,7 +16,29 @@ function switchProject(event: Event): void {
   window.location.reload();
 }
 
+async function refreshModelBadge(): Promise<void> {
+  // server env is the source of truth: a restart drops the key, the badge must follow
+  try {
+    const status = await apiGet<{ configured: boolean }>("/settings/connection");
+    const local = llmConfig();
+    if (!status.configured && local.ready) setLlmConfig(false, "");
+    modelName.value = status.configured && local.model ? local.model : "";
+  } catch {
+    modelName.value = "";
+  }
+}
+
+function onLlmChanged(): void {
+  void refreshModelBadge();
+}
+
+function onCostChanged(): void {
+  cost.value = sessionCost();
+}
+
 onMounted(async () => {
+  window.addEventListener("ow-llm-changed", onLlmChanged);
+  window.addEventListener("ow-cost-changed", onCostChanged);
   try {
     const body = await apiGet<{ workspaces: { name: string }[] }>("/workspaces");
     workspaces.value = body.workspaces.map((w) => w.name);
@@ -23,6 +47,7 @@ onMounted(async () => {
       setCurrentProject(workspaces.value[0]);
       project.value = workspaces.value[0];
     }
+    await refreshModelBadge();
   } catch {
     apiDown.value = true;
   } finally {
@@ -30,6 +55,11 @@ onMounted(async () => {
       booting.value = false;
     }, 500);
   }
+});
+
+onUnmounted(() => {
+  window.removeEventListener("ow-llm-changed", onLlmChanged);
+  window.removeEventListener("ow-cost-changed", onCostChanged);
 });
 </script>
 
@@ -81,8 +111,17 @@ onMounted(async () => {
         <RouterLink to="/characters">人物工坊</RouterLink>
         <RouterLink to="/ask">世界问答</RouterLink>
         <RouterLink to="/review">审阅台</RouterLink>
+        <RouterLink to="/sweep">专项清查</RouterLink>
+        <RouterLink to="/worlds">工作区</RouterLink>
+        <RouterLink to="/export">导出</RouterLink>
       </nav>
-      <div class="project">
+      <div class="status">
+        <span v-if="cost > 0" class="cost" title="本次会话累计模型调用成本">
+          ${{ cost.toFixed(4) }}
+        </span>
+        <RouterLink to="/settings" class="model" :class="{ off: !modelName }">
+          <i class="dot"></i>{{ modelName || "未接入模型" }}
+        </RouterLink>
         <select :value="project" @change="switchProject">
           <option v-if="!workspaces.length" value="" disabled>
             {{ apiDown ? "API 未连接" : "暂无世界" }}
@@ -232,8 +271,10 @@ onMounted(async () => {
 
 nav {
   display: flex;
-  gap: 0.9rem;
+  gap: 0.7rem;
   flex: 1;
+  flex-wrap: wrap;
+  font-size: 0.88rem;
 }
 
 nav a {
@@ -256,13 +297,69 @@ nav a.router-link-active {
   text-shadow: 0 0 12px rgba(240, 210, 138, 0.4);
 }
 
-.project select {
+.status {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.status select {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
   border-radius: 0.5rem;
   color: var(--ow-ink);
   padding: 0.4rem 0.6rem;
-  min-width: 11rem;
+  max-width: 11rem;
+}
+
+.cost {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.76rem;
+  color: var(--ow-cyan);
+  border: 1px solid rgba(143, 214, 232, 0.35);
+  border-radius: 999px;
+  padding: 0.16rem 0.55rem;
+  white-space: nowrap;
+}
+
+.model {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--ow-gold-soft);
+  border-radius: 999px;
+  color: var(--ow-gold-bright);
+  font-size: 0.78rem;
+  padding: 0.18rem 0.65rem;
+  text-decoration: none;
+  white-space: nowrap;
+  max-width: 13rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: box-shadow 0.2s ease;
+}
+
+.model:hover {
+  box-shadow: 0 0 10px rgba(240, 210, 138, 0.3);
+}
+
+.model .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #8ed4ac;
+  box-shadow: 0 0 6px rgba(142, 212, 172, 0.8);
+  flex: none;
+}
+
+.model.off {
+  border-color: rgba(224, 180, 106, 0.45);
+  color: #e6c07e;
+}
+
+.model.off .dot {
+  background: #e6c07e;
+  box-shadow: none;
 }
 
 .apidown {

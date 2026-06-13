@@ -187,6 +187,19 @@ def _system_prompt(
         "Return ONE JSON object only. Do not wrap it in markdown. "
         "The JSON keys must be: summary, style_guide, factions, regions, locations, npcs, "
         "quests, terms, relations, reference_report. "
+        "Per-item fields the pipeline reads — factions: name, description; "
+        "regions: name, description, themes, level_min, level_max; "
+        "locations: name, description, purpose, region_id, controlling_faction, tags; "
+        "npcs: name, description, faction_id, location_id; "
+        "quests: title (a player-facing quest-log headline, never an id), objective "
+        "(one concrete sentence: who wants what done and why it matters now), giver_npc, "
+        "location, stages (2-4 stage summaries, each naming where it happens and what the "
+        "player does, referencing npcs/locations you defined), tags; "
+        "terms: canonical, description (an in-world definition stating what the word "
+        "concretely means in THIS world), aliases; "
+        "relations: source, target, kind — use ids/names you defined above. "
+        "Descriptions must be specific enough for a level designer to build from: concrete "
+        "detail, a current tension or hook, no generic filler. "
         "Use uploaded references only as inspiration or structure according to reference_mode; "
         "do not treat them as canonical lore facts. If project facts are provided, preserve them "
         "as higher-priority facts. Avoid long verbatim reuse from references unless the brief "
@@ -390,26 +403,37 @@ def _bundle_from_payload(
             npc_ids,
             _round_robin(npc_ids, index),
         )
+        # Models that mirror the name/description shape of other sections still parse:
+        # quests accept name→title and description→objective as fallbacks.
+        title = str(raw.get("title") or raw.get("name") or quest_id)
+        objective = str(raw.get("objective") or raw.get("description") or title)
         # When the model omits stages, derive ONE stage from the quest's own objective —
         # never inject preset beats (确认线索/作出选择 was steering every fallback quest
         # toward the same investigation-shaped arc).
-        raw_stages = _list(raw.get("stages")) or [
-            str(raw.get("objective") or raw.get("title") or quest_id)
-        ]
+        raw_stages = _list(raw.get("stages")) or [objective]
         stages = [
             QuestStage(
                 id=f"{quest_id}_stage_{stage_index + 1}",
-                summary=str(stage),
+                summary=(
+                    str(
+                        _dict(stage).get("summary")
+                        or _dict(stage).get("description")
+                        or _dict(stage).get("name")
+                        or stage
+                    )
+                    if isinstance(stage, dict)
+                    else str(stage)
+                ),
                 location=quest_location,
             )
             for stage_index, stage in enumerate(raw_stages)
         ]
         bundle.quests[quest_id] = Quest(
             id=quest_id,
-            title=str(raw.get("title") or quest_id),
+            title=title,
             giver_npc=quest_giver,
             location=quest_location,
-            objective=str(raw.get("objective") or raw.get("title") or quest_id),
+            objective=objective,
             timeline_order=index + 1,
             stages=stages,
             localization_keys=[f"quest.{quest_id}.objective"],
@@ -432,7 +456,7 @@ def _bundle_from_payload(
             canonical=str(raw.get("canonical") or raw.get("name") or term_id),
             aliases=[str(item) for item in _list(raw.get("aliases"))],
             forbidden=[str(item) for item in _list(raw.get("forbidden"))],
-            description=str(raw.get("description") or ""),
+            description=str(raw.get("description") or raw.get("definition") or ""),
             origin=Origin.AI_DRAFT,
             review_status=ReviewStatus.PENDING_REVIEW,
         )

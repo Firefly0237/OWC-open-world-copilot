@@ -52,6 +52,7 @@ from ..app.actions import (
     decide_review_action,
     delete_object_action,
     list_review_items_action,
+    probe_llm_connection_action,
     run_character_action,
     run_extraction_action,
     run_theme_sweep_action,
@@ -82,6 +83,7 @@ from ..content.hash import content_hash
 from ..content.models import ContentBundle
 from ..evaluation.quality import evaluate_quest_quality
 from ..exporters import EngineTarget, export_content_bundle
+from ..exporters.lorebook import write_lorebook
 from ..extraction import (
     ExtractionDraft,
     ExtractionService,
@@ -334,6 +336,8 @@ class ProjectAskRequest(ProjectContentRequest):
     query: str = Field(min_length=1, max_length=4000)
     budget_tokens: int = Field(default=800, ge=1, le=8000)
     max_cost_usd: float | None = Field(default=None, ge=0)
+    llm_mode: str = Field(default="offline", pattern="^(offline|real)$")
+    llm_model: str = Field(default="deepseek-v4-flash", max_length=120)
 
 
 class ProjectAskResponse(BaseModel):
@@ -595,6 +599,22 @@ _JOB_PARAM_KEYS: dict[str, set[str]] = {
 }
 
 
+class ConnectionStatusResponse(BaseModel):
+    configured: bool
+    base_url: str = ""
+
+
+class ConnectionUpdateRequest(BaseModel):
+    base_url: str = ""
+    api_key: str = ""
+
+
+class ConnectionProbeRequest(BaseModel):
+    base_url: str = ""
+    api_key: str = ""
+    model: str = Field(min_length=1, max_length=120)
+
+
 class JobCreateRequest(BaseModel):
     kind: str = Field(pattern="^(world_seed|extraction|theme_sweep|character_profile)$")
     params: dict[str, Any] = Field(default_factory=dict)
@@ -845,6 +865,34 @@ def _project_registry() -> dict[str, Path]:
             )
         registry[key] = Path(value).expanduser().resolve()
     return registry
+
+
+def _is_loopback(request: Request) -> bool:
+    """True for the single-user-on-this-machine case. The real-mode fail-closed gate
+    exists to stop strangers from spending a *deployed* server's provider credit; the
+    person sitting at localhost owns both the machine and the key. ("testclient" is
+    starlette's TestClient host — tests run in-process, same trust domain.)"""
+    host = request.client.host if request.client else ""
+    return host in {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+def _require_real_allowed(request: Request) -> None:
+    if not os.getenv("OWCOPILOT_API_KEY") and not _is_loopback(request):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "llm_mode=real over the network requires OWCOPILOT_API_KEY to be "
+                "configured (fail-closed: real mode spends provider credit)"
+            ),
+        )
+    # the gateway dotenv-loads before every real call, so the gate must judge by the
+    # same view or it would 503 a request that was about to succeed
+    load_dotenv()
+    if not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(
+            status_code=503,
+            detail="真实模型未配置：先在「设置」接入服务商与 API Key。",
+        )
 
 
 def _frontend_dist_dir() -> Path | None:
@@ -1295,11 +1343,18 @@ def create_app() -> FastAPI:
             bundle = req.content
 
         telemetry = TelemetryCollector()
+        if req.llm_mode == "real":
+            _require_real_allowed(request)
+            ask_provider: Any = OpenAICompatProvider(model=req.llm_model, timeout=60.0)
+        else:
+            ask_provider = OfflineQAProvider()
         gateway = LLMGateway(
-            providers={"cheap": OfflineQAProvider()},
+            providers={"cheap": ask_provider},
             router=StaticRouter(mapping={"qa_answer": "cheap"}),
             cache=service_cache,  # app-lifetime L1/L2: repeated lore questions cost $0
             telemetry=telemetry,
+            max_retries=1 if req.llm_mode == "real" else 0,
+            retry_backoff_seconds=1.0 if req.llm_mode == "real" else 0.0,
         )
         try:
             answer = LoreQAService(
@@ -1860,6 +1915,59 @@ def create_app() -> FastAPI:
         status = 404 if "不存在" in str(e) else 409
         return HTTPException(status_code=status, detail=str(e))
 
+    @app.get("/settings/connection", response_model=ConnectionStatusResponse)
+    def connection_status(
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> ConnectionStatusResponse:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        # status must mirror what a real call would see: the gateway dotenv-loads on
+        # every real run, so do the same here or a repo .env reads as "not connected"
+        load_dotenv()
+        return ConnectionStatusResponse(
+            configured=bool(os.getenv("OPENAI_API_KEY", "").strip()),
+            base_url=os.getenv("OPENAI_BASE_URL", ""),
+        )
+
+    @app.post("/settings/connection", response_model=ConnectionStatusResponse)
+    def update_connection(
+        req: ConnectionUpdateRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> ConnectionStatusResponse:
+        """Wire the provider connection into the server process (same mechanism the
+        legacy UI used). Local-machine semantics: only loopback may change it — a remote
+        client must never reconfigure whose key this server spends."""
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        if not _is_loopback(request):
+            raise HTTPException(status_code=403, detail="connection settings are local-only")
+        if req.base_url.strip():
+            os.environ["OPENAI_BASE_URL"] = req.base_url.strip()
+        if req.api_key.strip():
+            os.environ["OPENAI_API_KEY"] = req.api_key.strip()
+        return ConnectionStatusResponse(
+            configured=bool(os.getenv("OPENAI_API_KEY", "").strip()),
+            base_url=os.getenv("OPENAI_BASE_URL", ""),
+        )
+
+    @app.post("/settings/connection:probe")
+    def probe_connection(
+        req: ConnectionProbeRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        if not _is_loopback(request) and not os.getenv("OWCOPILOT_API_KEY"):
+            raise HTTPException(status_code=403, detail="probe is local-only on open servers")
+        return probe_llm_connection_action(
+            base_url=req.base_url or os.getenv("OPENAI_BASE_URL", ""),
+            api_key=req.api_key or os.getenv("OPENAI_API_KEY", ""),
+            model=req.model,
+        )
+
     @app.get("/workspaces", response_model=WorkspaceListResponse)
     def list_workspaces(
         request: Request,
@@ -1976,19 +2084,7 @@ def create_app() -> FastAPI:
                 detail=f"unknown params for {req.kind}: {unknown}; allowed: {sorted(allowed)}",
             )
         if req.params.get("llm_mode") == "real":
-            if not os.getenv("OWCOPILOT_API_KEY"):
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        "llm_mode=real over the API requires OWCOPILOT_API_KEY to be "
-                        "configured (fail-closed: real mode spends provider credit)"
-                    ),
-                )
-            if not os.getenv("OPENAI_API_KEY"):
-                raise HTTPException(
-                    status_code=503,
-                    detail="real provider is not configured (OPENAI_BASE_URL / OPENAI_API_KEY)",
-                )
+            _require_real_allowed(request)
         content_root = _project_root_or_404(project)
         runners: dict[str, Callable[..., dict[str, Any]]] = {
             "world_seed": run_world_seed_action,
@@ -2111,19 +2207,7 @@ def create_app() -> FastAPI:
         _require_api_key(x_api_key)
         limiter.check(_client_key(x_api_key, request))
         if req.use_llm and req.llm_mode == "real":
-            if not os.getenv("OWCOPILOT_API_KEY"):
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        "llm_mode=real over the API requires OWCOPILOT_API_KEY to be "
-                        "configured (fail-closed: real mode spends provider credit)"
-                    ),
-                )
-            if not os.getenv("OPENAI_API_KEY"):
-                raise HTTPException(
-                    status_code=503,
-                    detail="real provider is not configured (OPENAI_BASE_URL / OPENAI_API_KEY)",
-                )
+            _require_real_allowed(request)
         result = run_theme_sweep_action(
             _project_root_or_404(project),
             theme=req.theme,
@@ -2226,6 +2310,42 @@ def create_app() -> FastAPI:
             )
         finally:
             project_context.close()
+
+    @app.get("/projects/{project}/lorebook")
+    def download_lorebook(
+        project: str,
+        request: Request,
+        fmt: str = "md",
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> Response:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        if fmt not in ("md", "docx"):
+            raise HTTPException(status_code=422, detail="fmt 仅支持 md 或 docx")
+        project_context = _registered_project(project)
+        try:
+            # Rendered fresh on every download so the file always matches the archive;
+            # the copy under .owcopilot/exports doubles as a local audit trail.
+            out_dir = project_context.content_root / ".owcopilot" / "exports" / "lorebook"
+            write_lorebook(project_context.bundle, out_dir, formats=(fmt,))
+            payload = (out_dir / f"lorebook.{fmt}").read_bytes()
+        finally:
+            project_context.close()
+        media = (
+            "text/markdown; charset=utf-8"
+            if fmt == "md"
+            else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+        encoded = urllib.parse.quote(f"{project}-设定集.{fmt}")
+        return Response(
+            content=payload,
+            media_type=media,
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=\"lorebook.{fmt}\"; filename*=UTF-8''{encoded}"
+                )
+            },
+        )
 
     if frontend_dist is not None:
         # One process, one port: the built Vue app ships from the API itself, so launch

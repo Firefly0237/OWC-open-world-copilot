@@ -1,6 +1,16 @@
 <script setup lang="ts">
-import { computed, onUnmounted, reactive, ref } from "vue";
-import { apiGet, apiPost, currentProject, streamJobEvents } from "../api";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import StepperProgress from "../components/StepperProgress.vue";
+import {
+  addSessionCost,
+  apiGet,
+  apiPost,
+  costOf,
+  currentProject,
+  llmConfig,
+  llmParams,
+  streamJobEvents,
+} from "../api";
 
 const UNDECIDED = "暂未想好";
 const CUSTOM = "其他…";
@@ -125,6 +135,8 @@ const running = ref(false);
 const stageIndex = ref(-1);
 const elapsed = ref(0);
 const error = ref("");
+const lastCost = ref(0);
+const llmReady = ref(llmConfig().ready);
 const result = ref<{
   summary: string;
   counts: Record<string, number>;
@@ -133,6 +145,12 @@ const result = ref<{
 } | null>(null);
 
 let timer: number | undefined;
+
+function onLlmChanged(): void {
+  llmReady.value = llmConfig().ready;
+}
+
+onMounted(() => window.addEventListener("ow-llm-changed", onLlmChanged));
 
 const COUNT_LABELS: Record<string, string> = {
   entities: "实体",
@@ -144,7 +162,7 @@ const COUNT_LABELS: Record<string, string> = {
   style_guides: "风格圣经",
 };
 
-const canRun = computed(() => form.idea.trim().length > 0 && !running.value);
+const canRun = computed(() => form.idea.trim().length > 0 && !running.value && llmReady.value);
 
 function resolved(key: string): string {
   const pick = form.selections[key];
@@ -166,7 +184,10 @@ function stopTimer(): void {
   }
 }
 
-onUnmounted(stopTimer);
+onUnmounted(() => {
+  stopTimer();
+  window.removeEventListener("ow-llm-changed", onLlmChanged);
+});
 
 async function run(): Promise<void> {
   if (!canRun.value) return;
@@ -185,6 +206,7 @@ async function run(): Promise<void> {
     const job = await apiPost<{ job_id: string }>(`/projects/${currentProject()}/jobs`, {
       kind: "world_seed",
       params: {
+        ...llmParams(),
         brief: {
           idea: form.idea.trim(),
           medium: resolved("medium"),
@@ -233,6 +255,9 @@ async function run(): Promise<void> {
     }>(`/jobs/${job.job_id}`);
     if (status.status === "done" && status.result) {
       stageIndex.value = STAGES.length - 1;
+      const used = costOf(status.result as { cost_budget?: { used_usd?: number } });
+      lastCost.value = used;
+      addSessionCost(used);
       const bundle = status.result.bundle ?? {};
       const entities = Object.values(bundle.entities ?? {});
       const names = new Map(
@@ -353,43 +378,21 @@ async function run(): Promise<void> {
       <button class="primary" :disabled="!canRun" @click="run">
         {{ running ? "正在开辟…" : "开辟世界" }}
       </button>
+      <p v-if="!llmReady" class="muted small">
+        生成走真实模型——先在
+        <RouterLink to="/settings" class="golink">设置</RouterLink>
+        接入服务商与 API Key。
+      </p>
     </div>
 
-    <div v-if="running || stageIndex >= 0" class="pane progress">
-      <svg
-        v-if="running"
-        class="emblem"
-        width="56"
-        height="56"
-        viewBox="0 0 100 100"
-        fill="none"
-      >
-        <circle class="orb" cx="50" cy="50" r="44" stroke="#8fd6e8" stroke-opacity=".35" stroke-dasharray="3 6" />
-        <circle cx="50" cy="50" r="34" stroke="#d9b56c" stroke-opacity=".4" />
-        <path
-          class="core"
-          d="M50 14 L56.5 43.5 L86 50 L56.5 56.5 L50 86 L43.5 56.5 L14 50 L43.5 43.5 Z"
-          fill="#d9b56c"
-          fill-opacity=".25"
-          stroke="#f0d28a"
-          stroke-opacity=".8"
-        />
-      </svg>
-      <div class="stages">
-        <div class="steps">
-          <template v-for="(stage, index) in STAGES" :key="stage.key">
-            <span
-              class="step"
-              :class="{ done: index < stageIndex, active: index === stageIndex && running }"
-            >
-              {{ stage.label }}
-            </span>
-            <span v-if="index < STAGES.length - 1" class="step-line"></span>
-          </template>
-        </div>
-        <span v-if="running" class="muted elapsed">已用时 {{ elapsed }}s · 大世界通常需要一两分钟</span>
-      </div>
-    </div>
+    <StepperProgress
+      v-if="running || stageIndex >= 0"
+      :stages="STAGES"
+      :index="stageIndex"
+      :running="running"
+      :elapsed="elapsed"
+      hint="大世界通常需要一两分钟"
+    />
 
     <p v-if="error" class="error">{{ error }}</p>
 
@@ -399,6 +402,7 @@ async function run(): Promise<void> {
         <span v-for="(count, key) in result.counts" :key="key" class="chip static">
           {{ COUNT_LABELS[key] ?? key }} <b>{{ count }}</b>
         </span>
+        <span v-if="lastCost" class="chip static">本次 <b>${{ lastCost.toFixed(4) }}</b></span>
       </div>
       <template v-if="result.characters.length">
         <div class="section"><span class="t">人物</span></div>
@@ -604,88 +608,10 @@ button.primary:disabled {
   cursor: not-allowed;
 }
 
-.progress {
-  margin-top: 0.9rem;
-  padding: 0.9rem 1.1rem;
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-}
-
-.emblem .orb {
-  animation: spin 10s linear infinite;
-  transform-origin: center;
-  transform-box: fill-box;
-}
-
-.emblem .core {
-  animation: pulse 2s ease-in-out infinite;
-  transform-origin: center;
-  transform-box: fill-box;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 0.7;
-    transform: scale(0.96);
-  }
-
-  50% {
-    opacity: 1;
-    transform: scale(1.05);
-  }
-}
-
-.stages {
-  display: flex;
-  flex-direction: column;
-  gap: 0.45rem;
-}
-
-.steps {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-}
-
-.step {
-  font-size: 0.84rem;
-  color: var(--ow-muted);
-  border: 1px solid var(--ow-line);
-  border-radius: 999px;
-  padding: 0.18rem 0.7rem;
-  transition:
-    color 0.2s ease,
-    border-color 0.2s ease,
-    box-shadow 0.2s ease;
-}
-
-.step.done {
-  color: var(--ow-cyan);
-  border-color: rgba(143, 214, 232, 0.4);
-}
-
-.step.active {
+.golink {
   color: var(--ow-gold-bright);
-  border-color: var(--ow-gold-soft);
-  box-shadow: 0 0 12px rgba(240, 210, 138, 0.35);
-}
-
-.step-line {
-  width: 1.1rem;
-  height: 1px;
-  background: linear-gradient(90deg, var(--ow-gold-soft), transparent);
-}
-
-.elapsed {
-  font-size: 0.78rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .error {

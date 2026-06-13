@@ -28,6 +28,7 @@ const TYPE_LABELS: Record<string, string> = {
   import_draft: "提炼草案",
   dialogue_tree: "对话树",
   flavor_batch: "物案批次",
+  character_profile: "角色卡",
 };
 
 function summarize(item: ReviewItem): string {
@@ -86,17 +87,19 @@ onMounted(refresh);
     <p v-if="flash" class="flash">{{ flash }}</p>
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="!items.length && !error" class="muted">案头清净——暂无候批的草稿。</p>
-    <div v-for="item in items" :key="item.id" class="pane card">
-      <div class="head">
-        <span class="type">{{ TYPE_LABELS[item.item_type] ?? item.item_type }}</span>
-        <span class="mono">{{ item.object_ref }}</span>
+    <TransitionGroup name="card" tag="div" class="queue">
+      <div v-for="item in items" :key="item.id" class="pane card">
+        <div class="head">
+          <span class="type">{{ TYPE_LABELS[item.item_type] ?? item.item_type }}</span>
+          <span class="mono">{{ item.object_ref }}</span>
+        </div>
+        <p class="muted body">{{ summarize(item) }}</p>
+        <div class="actions">
+          <button class="primary" @click="decide(item, 'accepted')">采纳</button>
+          <button @click="decide(item, 'rejected')">驳回</button>
+        </div>
       </div>
-      <p class="muted body">{{ summarize(item) }}</p>
-      <div class="actions">
-        <button class="primary" @click="decide(item, 'accepted')">采纳</button>
-        <button @click="decide(item, 'rejected')">驳回</button>
-      </div>
-    </div>
+    </TransitionGroup>
   </section>
 </template>
 
@@ -174,5 +177,41 @@ button.primary {
 
 .error {
   color: #e89a9a;
+}
+
+.queue {
+  position: relative;
+}
+
+/* decided cards sweep off the desk; the queue closes ranks */
+.card-enter-active,
+.card-leave-active,
+.card-move {
+  transition:
+    opacity 0.35s ease,
+    transform 0.35s ease;
+}
+
+.card-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.card-leave-to {
+  opacity: 0;
+  transform: translateX(24px);
+}
+
+.card-leave-active {
+  position: absolute;
+  width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-enter-active,
+  .card-leave-active,
+  .card-move {
+    transition: none;
+  }
 }
 </style>

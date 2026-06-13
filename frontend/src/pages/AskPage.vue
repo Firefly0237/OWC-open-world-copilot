@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { apiPost, currentProject } from "../api";
+import { onMounted, onUnmounted, ref } from "vue";
+import { addSessionCost, apiPost, costOf, currentProject, llmConfig, llmParams } from "../api";
 
 interface AskAnswer {
   answer: string;
@@ -13,30 +13,42 @@ interface Turn {
   answer: string;
   refused: boolean;
   citations: string[];
+  cost: number;
 }
 
 const question = ref("");
 const turns = ref<Turn[]>([]);
 const busy = ref(false);
 const error = ref("");
+const llmReady = ref(llmConfig().ready);
 
 const REFUSAL_TEXT = "档案中查无此条——我不杜撰。";
 
+function onLlmChanged(): void {
+  llmReady.value = llmConfig().ready;
+}
+
+onMounted(() => window.addEventListener("ow-llm-changed", onLlmChanged));
+onUnmounted(() => window.removeEventListener("ow-llm-changed", onLlmChanged));
+
 async function ask(): Promise<void> {
   const q = question.value.trim();
-  if (!q || busy.value) return;
+  if (!q || busy.value || !llmReady.value) return;
   busy.value = true;
   error.value = "";
   try {
-    const body = await apiPost<{ answer: AskAnswer }>(
+    const body = await apiPost<{ answer: AskAnswer; cost_budget?: { used_usd?: number } }>(
       `/projects/${currentProject()}/ask`,
-      { query: q },
+      { query: q, ...llmParams() },
     );
+    const used = costOf(body);
+    addSessionCost(used);
     turns.value.push({
       question: q,
       answer: body.answer.refused ? REFUSAL_TEXT : body.answer.answer,
       refused: body.answer.refused,
       citations: (body.answer.citations ?? []).map((c) => c.ref),
+      cost: used,
     });
     question.value = "";
   } catch (e) {
@@ -51,15 +63,18 @@ async function ask(): Promise<void> {
   <section>
     <div class="section"><span class="t">世界问答</span></div>
     <p class="muted hint">有问必有据；查无此条，绝不杜撰。</p>
-    <div v-for="(turn, index) in turns" :key="index" class="turn">
-      <div class="pane q">{{ turn.question }}</div>
-      <div class="pane a" :class="{ refused: turn.refused }">
-        <p>{{ turn.answer }}</p>
-        <div v-if="turn.citations.length" class="chips">
-          <span v-for="ref in turn.citations" :key="ref" class="chip">{{ ref }}</span>
+    <TransitionGroup name="turn" tag="div">
+      <div v-for="(turn, index) in turns" :key="index" class="turn">
+        <div class="pane q">{{ turn.question }}</div>
+        <div class="pane a" :class="{ refused: turn.refused }">
+          <p>{{ turn.answer }}</p>
+          <div v-if="turn.citations.length || turn.cost" class="chips">
+            <span v-for="ref in turn.citations" :key="ref" class="chip">{{ ref }}</span>
+            <span v-if="turn.cost" class="chip dim">${{ turn.cost.toFixed(4) }}</span>
+          </div>
         </div>
       </div>
-    </div>
+    </TransitionGroup>
     <p v-if="error" class="error">{{ error }}</p>
     <div class="composer">
       <input
@@ -67,10 +82,15 @@ async function ask(): Promise<void> {
         placeholder="向你的世界提问……"
         @keydown.enter="ask"
       />
-      <button class="primary" :disabled="busy || !question.trim()" @click="ask">
+      <button class="primary" :disabled="busy || !question.trim() || !llmReady" @click="ask">
         {{ busy ? "翻阅中…" : "提问" }}
       </button>
     </div>
+    <p v-if="!llmReady" class="muted small">
+      问答走真实模型——先在
+      <RouterLink to="/settings" class="golink">设置</RouterLink>
+      接入服务商与 API Key。
+    </p>
   </section>
 </template>
 
@@ -156,5 +176,33 @@ button.primary:disabled {
 
 .error {
   color: #e89a9a;
+}
+
+.chip.dim {
+  border-color: rgba(143, 214, 232, 0.35);
+  background: transparent;
+  color: var(--ow-cyan);
+}
+
+.small {
+  font-size: 0.78rem;
+  margin-top: 0.5rem;
+}
+
+.golink {
+  color: var(--ow-gold-bright);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.turn-enter-active {
+  transition:
+    opacity 0.35s ease,
+    transform 0.35s ease;
+}
+
+.turn-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
 }
 </style>

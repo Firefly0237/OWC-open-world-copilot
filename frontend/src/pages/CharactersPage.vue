@@ -1,6 +1,18 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
-import { apiGet, apiPost, currentProject, streamJobEvents } from "../api";
+import StepperProgress from "../components/StepperProgress.vue";
+import {
+  addSessionCost,
+  apiDelete,
+  apiGet,
+  apiPatch,
+  apiPost,
+  costOf,
+  currentProject,
+  llmConfig,
+  llmParams,
+  streamJobEvents,
+} from "../api";
 
 const UNDECIDED = "暂未想好";
 const CUSTOM = "其他…";
@@ -58,6 +70,8 @@ const running = ref(false);
 const stageIndex = ref(-1);
 const elapsed = ref(0);
 const error = ref("");
+const lastCost = ref(0);
+const llmReady = ref(llmConfig().ready);
 const result = ref<{
   name: string;
   summary: string;
@@ -74,12 +88,22 @@ const editDraft = reactive<{ description: string; tags: string; profile: Record<
 const maintainFlash = ref("");
 
 let timer: number | undefined;
+
+function onLlmChanged(): void {
+  llmReady.value = llmConfig().ready;
+}
+
 onUnmounted(() => {
   if (timer !== undefined) window.clearInterval(timer);
+  window.removeEventListener("ow-llm-changed", onLlmChanged);
 });
 
 const canRun = computed(
-  () => form.name.trim().length > 0 && form.concept.trim().length > 0 && !running.value,
+  () =>
+    form.name.trim().length > 0 &&
+    form.concept.trim().length > 0 &&
+    !running.value &&
+    llmReady.value,
 );
 
 async function loadArchive(): Promise<void> {
@@ -93,6 +117,7 @@ async function loadArchive(): Promise<void> {
 }
 
 onMounted(async () => {
+  window.addEventListener("ow-llm-changed", onLlmChanged);
   try {
     await loadArchive();
   } catch (e) {
@@ -125,6 +150,7 @@ async function run(): Promise<void> {
     const job = await apiPost<{ job_id: string }>(`/projects/${currentProject()}/jobs`, {
       kind: "character_profile",
       params: {
+        ...llmParams(),
         brief: {
           name: form.name.trim(),
           concept: form.concept.trim(),
@@ -162,6 +188,9 @@ async function run(): Promise<void> {
     }>(`/jobs/${job.job_id}`);
     if (status.status === "done" && status.result) {
       stageIndex.value = STAGES.length - 1;
+      const used = costOf(status.result as { cost_budget?: { used_usd?: number } });
+      lastCost.value = used;
+      addSessionCost(used);
       const allNames = new Map(
         [...npcs.value, ...factions.value, ...locations.value].map((e) => [e.id, e.name]),
       );
@@ -196,7 +225,14 @@ function startEdit(npc: ArchiveEntity): void {
 async function saveEdit(npc: ArchiveEntity): Promise<void> {
   maintainFlash.value = "";
   try {
-    await fetchPatch(npc.id);
+    await apiPatch(`/projects/${currentProject()}/entities/${encodeURIComponent(npc.id)}`, {
+      description: editDraft.description,
+      tags: editDraft.tags
+        .split(/[,，]/)
+        .map((t) => t.trim())
+        .filter(Boolean),
+      metadata_updates: { profile: editDraft.profile },
+    });
     editing.value = "";
     maintainFlash.value = `已更新 ${npc.name}。`;
     await loadArchive();
@@ -205,46 +241,16 @@ async function saveEdit(npc: ArchiveEntity): Promise<void> {
   }
 }
 
-async function fetchPatch(entityId: string): Promise<void> {
-  const base = (import.meta.env.VITE_API_BASE as string | undefined) ?? "";
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const key = localStorage.getItem("owcopilot_api_key");
-  if (key) headers["X-API-Key"] = key;
-  const response = await fetch(
-    `${base}/projects/${currentProject()}/entities/${encodeURIComponent(entityId)}`,
-    {
-      method: "PATCH",
-      headers,
-      body: JSON.stringify({
-        description: editDraft.description,
-        tags: editDraft.tags
-          .split(/[,，]/)
-          .map((t) => t.trim())
-          .filter(Boolean),
-        metadata_updates: { profile: editDraft.profile },
-      }),
-    },
-  );
-  if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
-}
-
 async function removeNpc(npc: ArchiveEntity): Promise<void> {
   if (!window.confirm(`删除「${npc.name}」？其关系会一并移除。`)) return;
   maintainFlash.value = "";
-  const base = (import.meta.env.VITE_API_BASE as string | undefined) ?? "";
-  const headers: Record<string, string> = {};
-  const key = localStorage.getItem("owcopilot_api_key");
-  if (key) headers["X-API-Key"] = key;
-  const response = await fetch(
-    `${base}/projects/${currentProject()}/objects/entity/${encodeURIComponent(npc.id)}`,
-    { method: "DELETE", headers },
-  );
-  if (!response.ok) {
-    maintainFlash.value = `${response.status} ${await response.text()}`;
-    return;
+  try {
+    await apiDelete(`/projects/${currentProject()}/objects/entity/${encodeURIComponent(npc.id)}`);
+    maintainFlash.value = `已删除 ${npc.name}。`;
+    await loadArchive();
+  } catch (e) {
+    maintainFlash.value = String(e);
   }
-  maintainFlash.value = `已删除 ${npc.name}。`;
-  await loadArchive();
 }
 </script>
 
@@ -337,27 +343,28 @@ async function removeNpc(npc: ArchiveEntity): Promise<void> {
       <button class="primary" :disabled="!canRun" @click="run">
         {{ running ? "正在落笔…" : "生成角色卡" }}
       </button>
+      <p v-if="!llmReady" class="muted small">
+        生成走真实模型——先在
+        <RouterLink to="/settings" class="golink">设置</RouterLink>
+        接入服务商与 API Key。
+      </p>
     </div>
 
-    <div v-if="running || stageIndex >= 0" class="pane progress">
-      <div class="steps">
-        <template v-for="(stage, index) in STAGES" :key="stage.key">
-          <span
-            class="step"
-            :class="{ done: index < stageIndex, active: index === stageIndex && running }"
-          >
-            {{ stage.label }}
-          </span>
-          <span v-if="index < STAGES.length - 1" class="step-line"></span>
-        </template>
-      </div>
-      <span v-if="running" class="muted elapsed">已用时 {{ elapsed }}s</span>
-    </div>
+    <StepperProgress
+      v-if="running || stageIndex >= 0"
+      :stages="STAGES"
+      :index="stageIndex"
+      :running="running"
+      :elapsed="elapsed"
+    />
 
     <p v-if="error" class="error">{{ error }}</p>
 
     <div v-if="result" class="pane done">
-      <h3 class="cast-name">{{ result.name }}</h3>
+      <h3 class="cast-name">
+        {{ result.name }}
+        <span v-if="lastCost" class="cost">本次 ${{ lastCost.toFixed(4) }}</span>
+      </h3>
       <p class="summary">{{ result.summary }}</p>
       <div v-for="(text, key) in result.profile" :key="key" class="profile-row">
         <span class="profile-label">{{ PROFILE_LABELS[key] ?? key }}</span>
@@ -526,47 +533,21 @@ button.primary:disabled {
   cursor: not-allowed;
 }
 
-.progress {
-  margin-top: 0.9rem;
-  padding: 0.8rem 1rem;
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-}
-
-.steps {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-}
-
-.step {
-  font-size: 0.84rem;
-  color: var(--ow-muted);
-  border: 1px solid var(--ow-line);
-  border-radius: 999px;
-  padding: 0.18rem 0.7rem;
-}
-
-.step.done {
-  color: var(--ow-cyan);
-  border-color: rgba(143, 214, 232, 0.4);
-}
-
-.step.active {
+.golink {
   color: var(--ow-gold-bright);
-  border-color: var(--ow-gold-soft);
-  box-shadow: 0 0 12px rgba(240, 210, 138, 0.35);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
-.step-line {
-  width: 1.1rem;
-  height: 1px;
-  background: linear-gradient(90deg, var(--ow-gold-soft), transparent);
-}
-
-.elapsed {
-  font-size: 0.78rem;
+.cost {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.74rem;
+  color: var(--ow-cyan);
+  border: 1px solid rgba(143, 214, 232, 0.35);
+  border-radius: 999px;
+  padding: 0.12rem 0.5rem;
+  margin-left: 0.5rem;
+  vertical-align: middle;
 }
 
 .error {
