@@ -29,8 +29,15 @@ async function create(): Promise<void> {
   error.value = "";
   try {
     const created = await apiPost<{ name: string }>("/workspaces", { name: newName.value.trim() });
-    flash.value = `世界「${created.name}」已创建。`;
     newName.value = "";
+    // first world on a clean install: adopt it immediately so the whole app has a
+    // current project (otherwise the data pages would have nothing to open)
+    if (!workspaces.value.length) {
+      setCurrentProject(created.name);
+      window.location.reload();
+      return;
+    }
+    flash.value = `世界「${created.name}」已创建。`;
     await refresh();
   } catch (e) {
     error.value = String(e);

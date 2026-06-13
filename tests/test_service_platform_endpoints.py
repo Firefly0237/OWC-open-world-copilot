@@ -201,3 +201,32 @@ def test_entity_update_and_object_delete_endpoints(client: TestClient) -> None:
     assert deleted.json()["removed_relations"] == 1
     assert client.delete("/projects/demo/objects/entity/npc_mara").status_code == 404
     assert client.delete("/projects/demo/objects/poi/x").status_code == 409
+
+
+def test_reference_add_list_search_round_trip(client: TestClient) -> None:
+    added = client.post(
+        "/projects/demo/references",
+        json={"title": "潮汐笔记", "text": "雾潮在满月时短暂退去，露出沉船的桅杆。"},
+    )
+    assert added.status_code == 201, added.text
+    listed = client.get("/projects/demo/references").json()
+    assert listed["count"] >= 1
+    assert any(s["title"] == "潮汐笔记" for s in listed["sources"])
+    searched = client.post("/projects/demo/references:search", json={"query": "雾潮 满月"})
+    assert searched.status_code == 200
+    assert "hits" in searched.json()
+
+
+def test_ingest_rejects_bad_base64_and_unparseable(client: TestClient) -> None:
+    bad = client.post(
+        "/projects/demo/ingest",
+        json={"filename": "rows.json", "content_base64": "@@@@notbase64@@@@"},
+    )
+    assert bad.status_code == 400
+    # valid base64 but not a parseable strict-format payload -> 422, not a 500
+    garbage = base64.b64encode(b"not a real table file").decode()
+    unparseable = client.post(
+        "/projects/demo/ingest",
+        json={"filename": "rows.json", "content_base64": garbage},
+    )
+    assert unparseable.status_code == 422

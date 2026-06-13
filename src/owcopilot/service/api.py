@@ -49,14 +49,18 @@ from pydantic import BaseModel, Field, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ..app.actions import (
+    add_reference_action,
     decide_review_action,
     delete_object_action,
+    list_references_action,
     list_review_items_action,
     probe_llm_connection_action,
     run_character_action,
     run_extraction_action,
+    run_ingest_action,
     run_theme_sweep_action,
     run_world_seed_action,
+    search_references_action,
     update_entity_action,
 )
 from ..app.view_models import build_content_inventory, build_project_overview
@@ -588,6 +592,25 @@ class ProjectSweepResponse(BaseModel):
     review_suggested: list[dict[str, Any]]
     markdown: str
     cost_budget: dict[str, Any]
+
+
+class ReferenceAddRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=400_000)
+    source_type: str = Field(default="uploaded_file", max_length=40)
+    original_filename: str | None = Field(default=None, max_length=200)
+
+
+class ReferenceSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    budget_tokens: int = Field(default=1000, ge=1, le=8000)
+
+
+class IngestRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=200)
+    content_base64: str = Field(min_length=1)
+    dry_run: bool = True
+    write_non_conflicting: bool = False
 
 
 _JOB_KINDS = ("world_seed", "extraction", "theme_sweep", "character_profile")
@@ -1392,29 +1415,18 @@ def create_app() -> FastAPI:
         return project_context
 
     def _task_gateway(
-        req: _LLMModeRequest, *, task: str, offline_provider: Any
+        req: _LLMModeRequest, *, request: Request, task: str, offline_provider: Any
     ) -> tuple[LLMGateway | None, TelemetryCollector]:
         """Per-request gateway for v2 assist tasks. `offline_provider=None` with offline mode
         means the caller runs deterministically without any gateway (suggest).
 
-        Real mode is fail-closed: it spends money, so it refuses to run unless the service is
-        key-gated AND a provider is configured. The shared app-lifetime cache backs every
-        request, so repeated questions/briefs hit L1/L2 instead of the provider."""
+        Real mode uses the same loopback-aware gate as every other generator: localhost owns
+        the key, a remote caller must set OWCOPILOT_API_KEY (fail-closed), and either way a
+        provider must be configured. The shared app-lifetime cache backs every request, so
+        repeated questions/briefs hit L1/L2 instead of the provider."""
         telemetry = TelemetryCollector()
         if req.llm_mode == "real":
-            if not os.getenv("OWCOPILOT_API_KEY"):
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        "llm_mode=real over the API requires OWCOPILOT_API_KEY to be "
-                        "configured (fail-closed: real mode spends provider credit)"
-                    ),
-                )
-            if not os.getenv("OPENAI_API_KEY"):
-                raise HTTPException(
-                    status_code=503,
-                    detail="real provider is not configured (OPENAI_BASE_URL / OPENAI_API_KEY)",
-                )
+            _require_real_allowed(request)
             model: str = req.llm_model or os.getenv("OWCOPILOT_CHEAP_MODEL") or "deepseek-v4-flash"
             provider: Any = OpenAICompatProvider(model=model)
         elif offline_provider is None:
@@ -1496,7 +1508,9 @@ def create_app() -> FastAPI:
                 issue = find_issue(project_context, issue_id)
             except FileNotFoundError as e:
                 raise HTTPException(status_code=404, detail=str(e)) from e
-            gateway, telemetry = _task_gateway(req, task="patch_suggest", offline_provider=None)
+            gateway, telemetry = _task_gateway(
+                req, request=request, task="patch_suggest", offline_provider=None
+            )
             result = suggest_for_issue(
                 project_context,
                 issue,
@@ -1619,7 +1633,10 @@ def create_app() -> FastAPI:
         project_context = _registered_project(project)
         try:
             gateway, telemetry = _task_gateway(
-                req, task="quest_draft", offline_provider=OfflineQuestDraftProvider()
+                req,
+                request=request,
+                task="quest_draft",
+                offline_provider=OfflineQuestDraftProvider(),
             )
             assert gateway is not None
             result = QuestDraftService(
@@ -1672,7 +1689,7 @@ def create_app() -> FastAPI:
                     detail=f"unknown speaker entities: {', '.join(unknown)}",
                 )
             gateway, telemetry = _task_gateway(
-                req, task="barks_batch", offline_provider=OfflineBarksProvider()
+                req, request=request, task="barks_batch", offline_provider=OfflineBarksProvider()
             )
             assert gateway is not None
             allowed = set(req.speaker_ids) | set(req.allowed_entity_ids)
@@ -1726,7 +1743,10 @@ def create_app() -> FastAPI:
         project_context = _registered_project(project)
         try:
             gateway, telemetry = _task_gateway(
-                req, task="extract_lore", offline_provider=OfflineExtractionProvider()
+                req,
+                request=request,
+                task="extract_lore",
+                offline_provider=OfflineExtractionProvider(),
             )
             assert gateway is not None
             draft = ExtractionService(gateway=gateway, bundle=project_context.bundle).extract(
@@ -1822,7 +1842,10 @@ def create_app() -> FastAPI:
                     detail=f"unknown participant entities: {', '.join(unknown)}",
                 )
             gateway, telemetry = _task_gateway(
-                req, task="dialogue_tree", offline_provider=OfflineDialogueTreeProvider()
+                req,
+                request=request,
+                task="dialogue_tree",
+                offline_provider=OfflineDialogueTreeProvider(),
             )
             assert gateway is not None
             result = DialogueTreeService(
@@ -1866,7 +1889,7 @@ def create_app() -> FastAPI:
         project_context = _registered_project(project)
         try:
             gateway, telemetry = _task_gateway(
-                req, task="flavor_batch", offline_provider=OfflineFlavorProvider()
+                req, request=request, task="flavor_batch", offline_provider=OfflineFlavorProvider()
             )
             assert gateway is not None
             result = FlavorBatchService(
@@ -2346,6 +2369,82 @@ def create_app() -> FastAPI:
                 )
             },
         )
+
+    @app.get("/projects/{project}/references")
+    def list_references(
+        project: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        return list_references_action(_project_root_or_404(project))
+
+    @app.post("/projects/{project}/references", status_code=201)
+    def add_reference(
+        project: str,
+        req: ReferenceAddRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        return add_reference_action(
+            _project_root_or_404(project),
+            title=req.title,
+            text=req.text,
+            source_type=req.source_type,
+            original_filename=req.original_filename,
+        )
+
+    @app.post("/projects/{project}/references:search")
+    def search_references(
+        project: str,
+        req: ReferenceSearchRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> dict[str, Any]:
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        return search_references_action(
+            _project_root_or_404(project), query=req.query, budget_tokens=req.budget_tokens
+        )
+
+    @app.post("/projects/{project}/ingest")
+    def ingest_table(
+        project: str,
+        req: IngestRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> dict[str, Any]:
+        """Strict-format table import. The upload lands in the project's own tmp dir and
+        the parser reads it by extension; the caller never controls a path on the server."""
+        _require_api_key(x_api_key)
+        limiter.check(_client_key(x_api_key, request))
+        content_root = _project_root_or_404(project)
+        try:
+            raw = base64.b64decode(req.content_base64, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise HTTPException(status_code=400, detail=f"invalid base64: {e}") from e
+        # strip any directory parts the client sent; keep only the bare name + extension
+        safe_name = Path(req.filename).name
+        if not safe_name or safe_name.startswith("."):
+            raise HTTPException(status_code=400, detail="filename must have a name and extension")
+        tmp_dir = Path(content_root) / ".owcopilot" / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / safe_name
+        tmp_path.write_bytes(raw)
+        try:
+            return run_ingest_action(
+                content_root,
+                paths=[str(tmp_path)],
+                dry_run=req.dry_run,
+                write_non_conflicting=req.write_non_conflicting,
+            )
+        except (ValueError, KeyError) as e:
+            raise HTTPException(status_code=422, detail=f"import failed: {e}") from e
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
     if frontend_dist is not None:
         # One process, one port: the built Vue app ships from the API itself, so launch

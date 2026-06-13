@@ -33,6 +33,9 @@ def client(tmp_path, monkeypatch) -> TestClient:
         "OWCOPILOT_PROJECTS_JSON", json.dumps({"demo": str(root).replace("\\", "/")})
     )
     monkeypatch.delenv("OWCOPILOT_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # real gate dotenv-loads like the gateway; neutralize the repo .env in tests
+    monkeypatch.setattr("owcopilot.service.api.load_dotenv", lambda: None)
     return TestClient(create_app())
 
 
@@ -90,9 +93,22 @@ def test_flavor_endpoint_batches_into_review(client: TestClient) -> None:
     assert body["review_item_id"]
 
 
-def test_creator_endpoints_real_mode_fail_closed(client: TestClient) -> None:
+def test_creator_endpoints_real_mode_on_loopback_needs_provider(client: TestClient) -> None:
+    # loopback (TestClient) is the owner: real is allowed without OWCOPILOT_API_KEY, but with
+    # no provider configured it's a 503 setup prompt rather than a 403
     response = client.post(
         "/projects/demo/extractions:run",
         json={"title": "t", "text": "x", "llm_mode": "real"},
     )
-    assert response.status_code == 403  # no OWCOPILOT_API_KEY configured
+    assert response.status_code == 503
+
+
+def test_creator_endpoints_real_mode_fail_closed_for_remote(
+    client: TestClient, monkeypatch
+) -> None:
+    monkeypatch.setattr("owcopilot.service.api._is_loopback", lambda request: False)
+    response = client.post(
+        "/projects/demo/extractions:run",
+        json={"title": "t", "text": "x", "llm_mode": "real"},
+    )
+    assert response.status_code == 403  # remote caller, no OWCOPILOT_API_KEY

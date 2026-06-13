@@ -32,11 +32,27 @@ def client(tmp_path, monkeypatch) -> TestClient:
     )
     monkeypatch.delenv("OWCOPILOT_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # the real gate dotenv-loads exactly like the gateway; neutralize the repo .env so the
+    # developer's real key can't leak in and turn a fail-closed assertion into a live call
+    monkeypatch.setattr("owcopilot.service.api.load_dotenv", lambda: None)
     return TestClient(create_app())
 
 
-def test_real_mode_fails_closed_without_service_key(client: TestClient) -> None:
-    """llm_mode=real spends money — without OWCOPILOT_API_KEY the API must refuse."""
+def test_real_mode_on_loopback_needs_provider_not_service_key(client: TestClient) -> None:
+    """Localhost owns the machine and the key: real mode is allowed without
+    OWCOPILOT_API_KEY, but still needs a provider — so it's a 503 setup prompt, not a 403."""
+    response = client.post(
+        "/projects/demo/contents/quests:draft",
+        json={"brief": "a quest", "llm_mode": "real"},
+    )
+    assert response.status_code == 503
+
+
+def test_real_mode_fails_closed_for_remote_without_service_key(
+    client: TestClient, monkeypatch
+) -> None:
+    """A non-loopback caller with no OWCOPILOT_API_KEY is refused outright (real spends money)."""
+    monkeypatch.setattr("owcopilot.service.api._is_loopback", lambda request: False)
     response = client.post(
         "/projects/demo/contents/quests:draft",
         json={"brief": "a quest", "llm_mode": "real"},
