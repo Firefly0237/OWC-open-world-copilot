@@ -138,7 +138,7 @@ onUnmounted(() => {
       <code>.venv\Scripts\python.exe -m uvicorn owcopilot.service.api:create_app --factory --port 8000</code>
       ——构建版前端与 API 同端口（8000），无需任何环境变量。
     </p>
-    <main>
+    <main v-if="!booting">
       <RouterView v-slot="{ Component }">
         <Transition name="page" mode="out-in">
           <component :is="Component" />
