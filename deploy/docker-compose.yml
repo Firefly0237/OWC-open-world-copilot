@@ -1,0 +1,34 @@
+# owcopilot SaaS stack (WS-P): API (serving the SPA) + Postgres control plane.
+# Artifact — verify on a machine with Docker (`docker compose up`). Not runtime-verified in the
+# dev sandbox. The canon stays file-backed under the ./data volume; Postgres holds only platform
+# metadata + audit (the control plane).
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      OWCOPILOT_JWT_SECRET: ${OWCOPILOT_JWT_SECRET:?set a long random secret}
+      OWCOPILOT_API_KEY: ${OWCOPILOT_API_KEY:?set the service API key}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OWCOPILOT_WORLDS_HOME: /data/worlds
+      # Point the control plane at Postgres in production (sqlite path shown for the file fallback):
+      OWCOPILOT_PLATFORM_DB: /data/platform.sqlite
+      DATABASE_URL: postgresql://owcopilot:owcopilot@db:5432/owcopilot
+    volumes:
+      - ./data:/data
+    depends_on:
+      - db
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: owcopilot
+      POSTGRES_PASSWORD: owcopilot
+      POSTGRES_DB: owcopilot
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:

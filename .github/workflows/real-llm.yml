@@ -28,12 +28,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[live]"
 
-      - name: Run the real-LLM validation suite
+      - name: Run the real-LLM validation suite (staged grounded world generation)
         env:
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python scripts/run_real_llm_round2.py \
+          python scripts/run_real_staged_world_seed.py \
             --model "${{ inputs.model }}" \
             --workspace .tmp/real_llm_ci \
             --output .tmp/real_llm_ci/report.json
