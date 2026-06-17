@@ -6,6 +6,7 @@ from typing import Any
 
 from ..content.models import ContentBundle
 from .models import PatchOp, PatchOperation
+from .pointer import pointer_parts
 
 
 def inverse_operations(
@@ -32,7 +33,7 @@ def inverse_operations(
 
 def _get_path(document: Any, path: str) -> Any:
     current = document
-    for part in _parts(path):
+    for part in pointer_parts(path):
         if isinstance(current, list):
             current = current[int(part)]
         elif isinstance(current, dict):
@@ -60,7 +61,7 @@ def _apply_to_document(document: Any, op: PatchOperation) -> None:
 
 
 def _resolve_parent(document: Any, path: str) -> tuple[Any, str]:
-    parts = _parts(path)
+    parts = pointer_parts(path)
     current = document
     for part in parts[:-1]:
         if isinstance(current, list):
@@ -81,9 +82,3 @@ def _replace_last_pointer_part(path: str, new_part: str) -> str:
     parts = path.split("/")
     parts[-1] = new_part.replace("~", "~0").replace("/", "~1")
     return "/".join(parts)
-
-
-def _parts(path: str) -> list[str]:
-    if not path.startswith("/"):
-        raise ValueError(f"patch path must be a JSON pointer: {path!r}")
-    return [part.replace("~1", "/").replace("~0", "~") for part in path.split("/")[1:]]

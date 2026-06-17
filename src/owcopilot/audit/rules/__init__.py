@@ -1,6 +1,7 @@
 """Audit rule implementations."""
 
 from .dialogue_rules import (
+    DialogueChoiceConditionRule,
     DialogueTreeBrokenLinkRule,
     DialogueTreeUnknownSpeakerRule,
     DialogueTreeUnreachableNodeRule,
@@ -13,6 +14,7 @@ from .graph_rules import (
     RelationshipConflictRule,
 )
 from .import_rules import detect_import_conflicts
+from .logic_rules import QuestLogicRule
 from .lore_rules import (
     CharacterStateContradictionRule,
     EventResultReferencedTooEarlyRule,
@@ -42,6 +44,7 @@ from .trust_rules import UnreviewedAIContentRule
 
 __all__ = [
     "CharacterStateContradictionRule",
+    "DialogueChoiceConditionRule",
     "DialogueTreeBrokenLinkRule",
     "DialogueTreeUnknownSpeakerRule",
     "DialogueTreeUnreachableNodeRule",
@@ -59,6 +62,7 @@ __all__ = [
     "PlaceholderMismatchRule",
     "PrerequisiteCycleRule",
     "PromptInjectionRule",
+    "QuestLogicRule",
     "QuestMissingObjectiveRule",
     "RegionBannedContentRule",
     "RegionLevelBoundsRule",

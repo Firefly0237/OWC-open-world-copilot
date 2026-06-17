@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from ...content.models import EntityType
+from ...logic import parse_expr, refs_in
+from ...logic.expr import LogicSyntaxError
 from ..context import AuditContext
 from ..models import Category, Evidence, Issue, Severity
 
@@ -62,6 +65,61 @@ class DialogueTreeUnknownSpeakerRule:
                         ),
                         evidence=[Evidence(kind="dialogue_tree", path=f"speaker:{speaker}")],
                     )
+
+
+class DialogueChoiceConditionRule:
+    """A choice's gate condition must reference state that actually exists. For a tree tied to a
+    quest (`quest_id`), the variables it reads must be declared in that quest's logic; cross-quest
+    state (`quest:<id>.done`) and faction reputation (`rep:<faction>`) are recognized by convention.
+    Otherwise a branch silently never (or always) fires — exactly the consistency gap the audit
+    exists to surface. Standalone trees (no quest_id / no logic) have no variable scope to check."""
+
+    code = "DIALOGUE_CONDITION_UNDEFINED_VAR"
+    severity = Severity.WARNING
+    category = Category.LOGIC
+
+    def check(self, ctx: AuditContext) -> Iterable[Issue]:
+        factions = {e.id for e in ctx.bundle.entities.values() if e.type == EntityType.FACTION}
+        for tree in ctx.bundle.dialogue_trees.values():
+            quest = ctx.bundle.quests.get(tree.quest_id or "")
+            if quest is None or quest.logic is None:
+                continue  # no quest-logic scope to validate the condition's variables against
+            declared = {var.id for var in quest.logic.variables}
+            for node in tree.nodes.values():
+                for index, choice in enumerate(node.choices):
+                    if not choice.condition.strip():
+                        continue
+                    path = f"nodes/{node.id}/choices/{index}"
+                    try:
+                        tree_expr = parse_expr(choice.condition)
+                    except LogicSyntaxError as exc:
+                        yield self._issue(
+                            tree.id, "DIALOGUE_CONDITION_SYNTAX_ERROR", path,
+                            f"condition does not parse: {exc}",
+                        )
+                        continue
+                    for ref in sorted(refs_in(tree_expr)):
+                        if ref in declared:
+                            continue
+                        if ref.startswith("quest:") and ref.endswith(".done"):
+                            continue
+                        if ref.startswith("rep:") and ref[len("rep:") :] in factions:
+                            continue
+                        yield self._issue(
+                            tree.id, self.code, path,
+                            f"condition references '{ref}', not declared in quest "
+                            f"'{quest.id}' logic (nor a known quest/reputation ref)",
+                        )
+
+    def _issue(self, tree_id: str, code: str, path: str, message: str) -> Issue:
+        return Issue(
+            rule_code=self.code,
+            severity=self.severity,
+            category=self.category,
+            target_ref=f"dialogue_tree:{tree_id}",
+            message=f"[{code}] Dialogue tree '{tree_id}' {message}",
+            evidence=[Evidence(kind="dialogue_tree", path=path)],
+        )
 
 
 class DialogueTreeUnreachableNodeRule:

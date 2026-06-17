@@ -15,7 +15,7 @@ class MissingEntityReferenceRule:
 
     def check(self, ctx: AuditContext) -> Iterable[Issue]:
         for target_ref, field_path, entity_id in _entity_references(ctx):
-            if entity_id and not _object_exists(ctx, entity_id):
+            if entity_id and not ctx.has_object(entity_id):
                 yield Issue(
                     rule_code=self.code,
                     severity=self.severity,
@@ -123,12 +123,3 @@ def _entity_references(ctx: AuditContext) -> Iterable[tuple[str, str, str]]:
     for event_ref in ctx.bundle.quest_event_refs.values():
         if event_ref.event_id:
             yield f"quest_event_ref:{event_ref.id}", "event_id", event_ref.event_id
-
-
-def _object_exists(ctx: AuditContext, object_id: str) -> bool:
-    return (
-        object_id in ctx.bundle.entities
-        or object_id in ctx.bundle.pois
-        or object_id in ctx.bundle.regions
-        or object_id in ctx.bundle.quests
-    )

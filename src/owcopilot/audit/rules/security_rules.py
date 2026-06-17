@@ -2,18 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable
 
+from ...content.injection import scan_for_injection
 from ..context import AuditContext
 from ..models import Category, Evidence, Issue, Severity
-
-_PROMPT_INJECTION_PATTERNS = [
-    re.compile(r"忽略.{0,12}(以上|之前|全部).{0,12}(规则|规范|指令|提示)", re.I),
-    re.compile(r"(输出|泄露|显示).{0,12}(系统提示|system prompt|api\s*key|密钥)", re.I),
-    re.compile(r"ignore.{0,20}(previous|above|all).{0,20}(instructions|rules)", re.I),
-    re.compile(r"(reveal|print|dump).{0,20}(system prompt|api key|secret)", re.I),
-]
 
 
 class PromptInjectionRule:
@@ -23,9 +16,7 @@ class PromptInjectionRule:
 
     def check(self, ctx: AuditContext) -> Iterable[Issue]:
         for target_ref, path, text in _texts(ctx):
-            matched = [
-                pattern.pattern for pattern in _PROMPT_INJECTION_PATTERNS if pattern.search(text)
-            ]
+            matched = scan_for_injection(text)
             if not matched:
                 continue
             yield Issue(
@@ -65,6 +56,14 @@ def _texts(ctx: AuditContext) -> Iterable[tuple[str, str, str]]:
             yield f"quest:{quest.id}", "title", quest.title
         if quest.objective:
             yield f"quest:{quest.id}", "objective", quest.objective
+        for index, stage in enumerate(quest.stages):
+            if stage.summary:
+                yield f"quest:{quest.id}", f"stages.{index}.summary", stage.summary
     for poi in ctx.bundle.pois.values():
         if poi.purpose:
             yield f"poi:{poi.id}", "purpose", poi.purpose
+    # Generated dialogue trees reach prompts via dialogue grounding too — scan every node line.
+    for tree in ctx.bundle.dialogue_trees.values():
+        for node in tree.nodes.values():
+            if node.text:
+                yield f"dialogue_tree:{tree.id}", f"nodes.{node.id}.text", node.text

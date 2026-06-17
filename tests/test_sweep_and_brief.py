@@ -126,6 +126,121 @@ def test_sweep_judge_layer_adds_semantic_hits_with_evidence() -> None:
     assert report.judge_skipped == 0
 
 
+def test_sweep_term_layer_uses_word_boundaries_for_latin() -> None:
+    # a Latin compliance term must not false-hit a longer word (war ⊄ warden), while a CJK term
+    # stays a substring match (no word boundaries in Chinese) and a real Latin word still hits.
+    bundle = ContentBundle(
+        entities={
+            "npc_warden": Entity(
+                id="npc_warden", name="Warden", type=EntityType.NPC, description="A toward ally."
+            ),
+            "npc_soldier": Entity(
+                id="npc_soldier", name="Vey", type=EntityType.NPC, description="Veteran of the war."
+            ),
+        }
+    )
+    report = ThemeSweepService(bundle=bundle).sweep("war")
+    refs = {f.ref for f in report.hits}
+    assert "entity:npc_soldier" in refs  # "the war." — a real word match
+    assert "entity:npc_warden" not in refs  # "warden"/"toward" must NOT false-hit
+
+
+class _FencedJudgeProvider:
+    """A judge whose reply wraps the JSON in a markdown fence + prose — the shared extractor
+    must still recover it (round 31's jsonio dedup had missed the sweep judge)."""
+
+    def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
+        first_index = next(
+            int(line.split(".", 1)[0])
+            for line in user.splitlines()
+            if line.strip() and line.strip()[0].isdigit() and "." in line
+        )
+        verdict = (
+            f'{{"judgements": [{{"index": {first_index}, "related": true, '
+            '"reason": "涉赌", "quote": "押注"}]}'
+        )
+        body = f"Sure, here is the result:\n```json\n{verdict}\n```\n"
+        return body, 10, 10
+
+
+def test_sweep_judge_parser_tolerates_fenced_and_prose_json() -> None:
+    bundle = _sweep_bundle()
+    gateway = LLMGateway(
+        providers={"cheap": _FencedJudgeProvider()},
+        router=StaticRouter(mapping={"theme_sweep": "cheap"}),
+        cache=NoOpCache(),
+        telemetry=TelemetryCollector(),
+    )
+    report = ThemeSweepService(bundle=bundle, gateway=gateway).sweep(
+        "无此词条", use_llm=True, max_judge=10
+    )
+    # the fenced reply parsed → at least one judge hit landed (no crash, no silent loss)
+    assert any(f.layer == "judge" for f in report.findings)
+
+
+class _StubSemanticEmbedder:
+    """Deterministic semantic stand-in (model_id ``st:*`` so the sweep treats it as real). Maps any
+    gambling-flavoured text to one axis and everything else to an orthogonal one, so a paraphrase
+    with NO shared term still scores 1.0 against the theme."""
+
+    model_id = "st:stub"
+    _GAMBLE = ("赌", "骰", "押", "钱庄", "博彩", "输赢")
+
+    def embed(self, text: str) -> list[float]:
+        return self.embed_many([text])[0]
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0] if any(k in t for k in self._GAMBLE) else [0.0, 1.0] for t in texts]
+
+
+def test_sweep_semantic_layer_flags_paraphrase_without_shared_terms() -> None:
+    bundle = _sweep_bundle()
+    # "博彩" appears literally nowhere, so the lexical layer finds nothing; the semantic layer must
+    # still surface the gambling objects by meaning, and leave the herb-gatherer alone.
+    report = ThemeSweepService(bundle=bundle, embedder=_StubSemanticEmbedder()).sweep(
+        "博彩", semantic_threshold=0.5
+    )
+    assert report.semantic_used is True
+    assert not [f for f in report.findings if f.layer == "term"]
+    semantic = {f.ref: f for f in report.findings if f.layer == "semantic"}
+    assert "entity:npc_dicer" in semantic  # 赌坊老千 — paraphrase, no shared term
+    assert semantic["entity:npc_dicer"].verdict == "review"
+    assert "相似度" in semantic["entity:npc_dicer"].evidence
+    assert "entity:npc_clean" not in semantic  # 采药童 — unrelated, must stay clean
+
+
+def test_sweep_semantic_layer_catches_real_euphemism_with_bge_m3() -> None:
+    # Real-model guard (skips without [semantic]): a gambling euphemism carrying NO literal theme
+    # word is surfaced by meaning alone — the whole point of S7's embedding layer. Constructs the
+    # SemanticEmbedder directly to bypass the conftest pin that forces the deterministic stub.
+    pytest.importorskip("sentence_transformers")
+    from owcopilot.retrieval.embedding import DEFAULT_SEMANTIC_MODEL, SemanticEmbedder
+
+    embedder = SemanticEmbedder(DEFAULT_SEMANTIC_MODEL)
+
+    bundle = ContentBundle(
+        entities={
+            "npc_a": Entity(
+                id="npc_a",
+                name="老周",
+                type=EntityType.NPC,
+                description="在后巷支起桌子，让人押大小、摇骰子分输赢，抽水为生。",
+            ),
+            "npc_b": Entity(
+                id="npc_b",
+                name="春娘",
+                type=EntityType.NPC,
+                description="城西医馆的坐堂郎中，专治跌打损伤。",
+            ),
+        }
+    )
+    report = ThemeSweepService(bundle=bundle, embedder=embedder).sweep("赌博")
+    assert not [f for f in report.findings if f.layer == "term"]  # no literal "赌博" anywhere
+    semantic = {f.ref for f in report.findings if f.layer == "semantic"}
+    assert "entity:npc_a" in semantic  # the euphemism is caught by meaning
+    assert "entity:npc_b" not in semantic  # the doctor is left alone
+
+
 def test_sweep_work_order_markdown_and_action(tmp_path) -> None:
     root = tmp_path / "world"
     ContentStore(root).save(_sweep_bundle())
@@ -182,22 +297,32 @@ def test_brief_new_bible_dimensions_round_trip() -> None:
         assert label not in empty
 
 
-def test_offline_seed_carries_creator_cast_through() -> None:
-    """The offline double mirrors the production contract: creator-given characters must
-    appear in the generated npcs (so the whole pass-through is testable at $0)."""
+def test_offline_seed_cast_stage_carries_creator_cast_through() -> None:
+    """The offline double mirrors the staged production contract: on the CAST stage, creator-given
+    characters must lead the generated npcs (so the whole pass-through is testable at $0)."""
+    import json as _json
+
     from owcopilot.worldgen.offline import OfflineWorldSeedProvider
     from owcopilot.worldgen.service import _brief_user_message as build_message
+    from owcopilot.worldgen.stages import CAST, stage_marker
 
     brief = WorldSeedBrief(idea="灯塔群岛", key_characters=["沈横舟：守灯二十年的老领航员"])
     raw, _, _ = OfflineWorldSeedProvider().complete(
-        system="", user=build_message(brief), model="cheap"
+        system=stage_marker(CAST), user=build_message(brief), model="cheap"
     )
-    import json as _json
-
     payload = _json.loads(raw)
     names = [npc["name"] for npc in payload["npcs"]]
     assert "沈横舟" in names
     assert payload["npcs"][0]["description"].startswith("守灯二十年")
+
+
+def test_offline_seed_requires_a_stage_marker() -> None:
+    """No stage marker means the caller is off the staged contract — fail loud rather than guess,
+    so drift between the double and production can't hide."""
+    from owcopilot.worldgen.offline import OfflineWorldSeedProvider
+
+    with pytest.raises(ValueError, match="stage marker"):
+        OfflineWorldSeedProvider().complete(system="", user="核心想法：x", model="cheap")
 
 
 def test_brief_key_characters_block_present_only_when_given() -> None:

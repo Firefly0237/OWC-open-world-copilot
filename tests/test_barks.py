@@ -23,6 +23,38 @@ def test_parse_bark_texts_accepts_fenced_json() -> None:
     assert parse_bark_texts("""```json\n["Hold!", "Move."]\n```""") == ["Hold!", "Move."]
 
 
+class _FlakyBarkProvider:
+    """Returns valid barks for npc_a, an unparseable reply for npc_b."""
+
+    def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
+        if '"name": "B"' in system or '"name":"B"' in system.replace(" ", ""):
+            return "Sorry, no JSON here.", 5, 5
+        return json.dumps({"variants": ["你好！"]}), 5, 5
+
+
+def test_bark_batch_skips_unparseable_speaker_without_crashing() -> None:
+    bundle = ContentBundle(
+        entities={
+            "npc_a": Entity(id="npc_a", name="A", type=EntityType.NPC),
+            "npc_b": Entity(id="npc_b", name="B", type=EntityType.NPC),
+        }
+    )
+    service = BarkBatchService(
+        gateway=LLMGateway(
+            providers={"cheap": _FlakyBarkProvider()},
+            router=StaticRouter(mapping={"barks_batch": "cheap"}),
+        ),
+        bundle=bundle,
+    )
+
+    result = service.generate(
+        speaker_ids=["npc_a", "npc_b"], topic="问候", variants_per_speaker=2, max_chars=40
+    )
+
+    # A's bark survives; B's unparseable reply is skipped, not a crash for the whole batch.
+    assert [variant.speaker_id for variant in result.accepted] == ["npc_a"]
+
+
 def test_bark_batch_service_filters_invalid_variants_and_enqueues_valid_ones() -> None:
     bundle = ContentBundle(
         entities={

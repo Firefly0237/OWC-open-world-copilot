@@ -122,8 +122,8 @@ class PlaceholderMismatchRule:
                         category=self.category,
                         target_ref=target_ref,
                         message=(
-                            f"Dialogue key '{text_key}' has placeholder mismatch in locale "
-                            f"'{locale}'"
+                            f"Dialogue key '{text_key}' placeholder set in locale '{locale}' "
+                            f"differs from other locales"
                         ),
                         evidence=[
                             Evidence(
@@ -155,7 +155,7 @@ class TermInconsistentRule:
         for target_ref, path, text in _texts(ctx):
             lowered = text.lower()
             for forbidden, canonical in forbidden_terms.items():
-                if forbidden in lowered:
+                if _term_appears(forbidden, lowered):
                     yield Issue(
                         rule_code=self.code,
                         severity=self.severity,
@@ -174,6 +174,20 @@ class TermInconsistentRule:
                             )
                         ],
                     )
+
+
+_LATIN_TERM_RE = re.compile(r"[a-z0-9][a-z0-9 _-]*")
+
+
+def _term_appears(forbidden: str, lowered: str) -> bool:
+    """Whether ``forbidden`` occurs in ``lowered`` as a term, not a coincidental substring.
+
+    A Latin term needs word boundaries so a forbidden 'war' does not flag 'warden' or 'toward'
+    (a false positive). CJK has no word boundaries, so a substring match is the only option there
+    and is acceptable because CJK terms are seldom substrings of unrelated words."""
+    if _LATIN_TERM_RE.fullmatch(forbidden):
+        return re.search(rf"\b{re.escape(forbidden)}\b", lowered) is not None
+    return forbidden in lowered
 
 
 def _placeholders(text: str) -> set[str]:

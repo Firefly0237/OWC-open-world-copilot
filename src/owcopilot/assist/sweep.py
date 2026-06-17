@@ -9,6 +9,12 @@ layered instead:
   1. term layer    — the user's theme + their synonyms, matched lexically over EVERY
                      string field of EVERY object (fields are walked generically from the
                      serialized model, so new content types join the sweep for free);
+  1.5 semantic layer — a real multilingual embedder (bge-m3) scores each not-yet-hit object
+                     against the theme by cosine; a near-match is surfaced for review even when
+                     it shares NO word with the theme (euphemism / paraphrase). This is the
+                     "DFA + word embeddings" idea — a lexical word-list alone misses the
+                     euphemisms a compliance pass exists to find. Deterministic, $0/local; it
+                     self-disables on the hashing stub. The scores also order the capped judge.
   2. judge layer   — optionally, an LLM reads each not-yet-hit object and answers
                      "related to this theme?" with a reason and a quote (classification
                      with evidence, never generation);
@@ -24,16 +30,37 @@ the user of this feature must be able to say "we checked everything".
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
+
 from ..content.models import ContentBundle
+from ..llm.cache import Embedder
 from ..llm.gateway import LLMGateway
+from ..llm.jsonio import extract_json_object
 
 _SNIPPET_CHARS = 90
 _JUDGE_BATCH_SIZE = 10
 _JUDGE_TEXT_CHARS = 320
+_EMBED_TEXT_CHARS = 1200  # how much of an object's text the semantic layer embeds (speed cap)
+
+
+def _is_semantic(embedder: Embedder) -> bool:
+    """A real neural embedder (bge-m3) tags its model_id ``st:*``; the hashing stub does not."""
+    return embedder.model_id.startswith("st:")
+
+
+def _normalise_rows(matrix: np.ndarray) -> np.ndarray:
+    """L2-normalise each row so a plain dot product is cosine similarity."""
+    if matrix.size == 0:
+        return matrix
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return matrix / norms
+
 
 _JUDGE_SYSTEM_PROMPT = (
     "You are a content-compliance reviewer. You will receive a THEME and a numbered list "
@@ -52,7 +79,7 @@ class SweepFinding:
     ref: str
     name: str
     object_kind: str
-    layer: str  # "term" | "judge" | "graph"
+    layer: str  # "term" | "semantic" | "judge" | "graph"
     evidence: str
     verdict: str  # "hit" | "review"
 
@@ -67,6 +94,9 @@ class SweepReport:
     llm_used: bool
     judged_count: int
     judge_skipped: int  # objects NOT shown to the judge (cap reached) — honesty counter
+    semantic_used: bool = False  # whether the bge-m3 paraphrase layer ran (needs a real model)
+    semantic_flagged: int = 0  # objects surfaced by meaning alone (no lexical hit)
+    semantic_threshold: float = 0.0
 
     @property
     def hits(self) -> list[SweepFinding]:
@@ -127,6 +157,22 @@ def _corpus(bundle: ContentBundle) -> list[dict[str, Any]]:
     return rows
 
 
+def _has_cjk(text: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in text)
+
+
+def _term_matches(term: str, text: str) -> bool:
+    """Lexical membership of ``term`` in ``text``. CJK has no word boundaries, so it stays a
+    substring test; a pure-Latin term uses ``\\b`` word boundaries so a compliance term like
+    ``war`` does not false-hit ``warden`` / ``toward`` (same precision fix as S3's term rule)."""
+    term = term.strip()
+    if not term:
+        return False
+    if _has_cjk(term):
+        return term.lower() in text.lower()
+    return re.search(rf"\b{re.escape(term)}\b", text, re.IGNORECASE) is not None
+
+
 def _snippet(text: str, term: str) -> str:
     lowered = text.lower()
     pos = lowered.find(term.lower())
@@ -142,9 +188,18 @@ def _snippet(text: str, term: str) -> str:
 
 
 class ThemeSweepService:
-    def __init__(self, *, bundle: ContentBundle, gateway: LLMGateway | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        bundle: ContentBundle,
+        gateway: LLMGateway | None = None,
+        embedder: Embedder | None = None,
+    ) -> None:
         self.bundle = bundle
         self.gateway = gateway
+        # A real semantic embedder (bge-m3) turns on the paraphrase layer; the hashing stub is
+        # lexical, so it stays off to avoid surfacing char-overlap noise as "meaning".
+        self.embedder = embedder if (embedder is not None and _is_semantic(embedder)) else None
 
     def sweep(
         self,
@@ -153,6 +208,7 @@ class ThemeSweepService:
         extra_terms: list[str] | None = None,
         use_llm: bool = False,
         max_judge: int = 400,
+        semantic_threshold: float = 0.5,
         progress: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> SweepReport:
         theme = theme.strip()
@@ -164,7 +220,7 @@ class ThemeSweepService:
 
         # ---- layer 1: lexical, over every string field of every object
         for row in corpus:
-            matched = [t for t in terms if t.lower() in row["text"].lower()]
+            matched = [t for t in terms if _term_matches(t, row["text"])]
             if matched:
                 findings[row["ref"]] = SweepFinding(
                     ref=row["ref"],
@@ -175,13 +231,37 @@ class ThemeSweepService:
                     verdict="hit",
                 )
 
-        # ---- layer 2: LLM judge on everything the lexical pass did not already flag
+        # ---- layer 1.5: semantic — catch paraphrase/euphemism the lexical layer cannot (the
+        # "DFA + word embeddings" idea, with a multilingual model). Deterministic, $0/local. Each
+        # unflagged object is scored against the terms by cosine; a near-match is surfaced for
+        # review, and the scores order the (capped) LLM judge so its budget hits likeliest first.
+        pending = [row for row in corpus if row["ref"] not in findings]
+        semantic_scores = self._semantic_scores(terms, pending) if self.embedder else {}
+        semantic_flagged = 0
+        for row in pending:
+            score = semantic_scores.get(row["ref"], 0.0)
+            if score >= semantic_threshold:
+                findings[row["ref"]] = SweepFinding(
+                    ref=row["ref"],
+                    name=row["name"],
+                    object_kind=row["kind"],
+                    layer="semantic",
+                    evidence=f"语义相近（相似度 {score:.2f}）：{row['text'][:_SNIPPET_CHARS]}",
+                    verdict="review",
+                )
+                semantic_flagged += 1
+
+        # ---- layer 2: LLM judge on everything the lexical pass did not confirm, ordered by
+        # semantic similarity so the cap is spent on the likeliest. A "related" verdict upgrades a
+        # provisional semantic review to a confirmed hit with the model's reason.
         judged_count = 0
         judge_skipped = 0
         if use_llm and self.gateway is not None:
-            pending = [row for row in corpus if row["ref"] not in findings]
-            to_judge = pending[:max_judge]
-            judge_skipped = len(pending) - len(to_judge)
+            judge_pool = sorted(
+                pending, key=lambda r: (-semantic_scores.get(r["ref"], 0.0), r["ref"])
+            )
+            to_judge = judge_pool[:max_judge]
+            judge_skipped = len(judge_pool) - len(to_judge)
             for start in range(0, len(to_judge), _JUDGE_BATCH_SIZE):
                 batch = to_judge[start : start + _JUDGE_BATCH_SIZE]
                 judged_count += len(batch)
@@ -238,7 +318,32 @@ class ThemeSweepService:
             llm_used=bool(use_llm and self.gateway is not None),
             judged_count=judged_count,
             judge_skipped=judge_skipped,
+            semantic_used=self.embedder is not None,
+            semantic_flagged=semantic_flagged,
+            semantic_threshold=semantic_threshold if self.embedder is not None else 0.0,
         )
+
+    def _semantic_scores(self, terms: list[str], rows: list[dict[str, Any]]) -> dict[str, float]:
+        """Cosine of each object to its closest term, computed locally with the project embedder.
+
+        Returns the max similarity over terms per object ref. Empty when there is nothing to score,
+        so the lexical/judge layers are unaffected."""
+        assert self.embedder is not None
+        if not rows:
+            return {}
+        term_matrix = _normalise_rows(np.asarray(self.embedder.embed_many(terms), dtype=np.float32))
+        object_matrix = _normalise_rows(
+            np.asarray(
+                self.embedder.embed_many([row["text"][:_EMBED_TEXT_CHARS] for row in rows]),
+                dtype=np.float32,
+            )
+        )
+        if term_matrix.size == 0 or object_matrix.size == 0:
+            return {}
+        # (objects × dim) @ (dim × terms) → (objects × terms); take each object's best term
+        sims = object_matrix @ term_matrix.T
+        best = sims.max(axis=1)
+        return {row["ref"]: float(best[index]) for index, row in enumerate(rows)}
 
     def _ref_of(self, object_id: str) -> str | None:
         if object_id in self.bundle.entities:
@@ -274,8 +379,10 @@ class ThemeSweepService:
         )
         results: list[tuple[int, str, str]] = []
         try:
-            payload = json.loads(raw[raw.find("{") : raw.rfind("}") + 1])
-        except (json.JSONDecodeError, ValueError):
+            # shared balanced-brace extractor (tolerates fences/prose), same as every other LLM
+            # parse site — round 31's jsonio dedup had missed the sweep judge.
+            payload = extract_json_object(raw)
+        except ValueError:
             return results  # one bad batch must not sink the sweep; coverage stays in stats
         for item in payload.get("judgements") or []:
             if not isinstance(item, dict) or not item.get("related"):
@@ -328,7 +435,14 @@ def render_sweep_markdown(report: SweepReport) -> str:
         f"- 扫描范围：全库 {report.scanned_total} 个对象（"
         + "，".join(f"{kind} {count}" for kind, count in sorted(report.scanned_by_kind.items()))
         + "）",
-        "- 语义判定："
+        "- 语义近似（向量）："
+        + (
+            f"已启用（bge-m3，阈值 {report.semantic_threshold:.2f}），按义召回 "
+            f"{report.semantic_flagged} 个待查"
+            if report.semantic_used
+            else "未启用（需安装语义模型；当前仅词面）"
+        ),
+        "- 语义判定（模型逐项）："
         + (
             f"已启用，逐项判定 {report.judged_count} 个"
             if report.llm_used

@@ -143,3 +143,27 @@ def test_term_inconsistent_rule_flags_forbidden_terms() -> None:
     assert len(issues) == 1
     assert issues[0].rule_code == "TERM_INCONSISTENT"
     assert issues[0].evidence[0].data["canonical"] == "Iron Vow"
+
+
+def test_term_inconsistent_rule_uses_word_boundaries_for_latin_terms() -> None:
+    # A short Latin forbidden term must not flag a coincidental substring (war != warden),
+    # but a real standalone use is still caught; CJK (no word boundaries) stays substring-based.
+    ctx = AuditContext.from_bundle(
+        ContentBundle(
+            terms={
+                "t_war": Term(id="t_war", canonical="Conflict", forbidden=["war"]),
+                "t_lich": Term(id="t_lich", canonical="亡灵君主", forbidden=["巫妖王"]),
+            },
+            quests={
+                "q_fp": Quest(id="q_fp", title="The warden walks toward Northward"),
+                "q_real": Quest(id="q_real", title="The great war begins"),
+                "q_cjk": Quest(id="q_cjk", title="讨伐巫妖王"),
+            },
+        )
+    )
+
+    flagged = {issue.target_ref for issue in TermInconsistentRule().check(ctx)}
+
+    assert "quest:q_fp" not in flagged  # warden / toward / Northward are not the term "war"
+    assert "quest:q_real" in flagged  # a standalone "war" is
+    assert "quest:q_cjk" in flagged  # CJK forbidden term still caught

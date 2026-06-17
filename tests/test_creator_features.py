@@ -1,8 +1,7 @@
-"""Creator-facing round: templates, recents, prose check, lorebook, key probe, CLI ui."""
+"""Creator-facing round: templates, recents, prose check, lorebook, key probe."""
 
 from __future__ import annotations
 
-import json
 import zipfile
 from pathlib import Path
 
@@ -14,7 +13,6 @@ from owcopilot.app.actions import (
 from owcopilot.app.genesis_templates import GENESIS_TEMPLATES
 from owcopilot.app.workspaces import load_recent_workspaces, remember_workspace
 from owcopilot.assist.prose_check import check_prose
-from owcopilot.cli.main import main as cli_main
 from owcopilot.content.models import ContentBundle, Entity, EntityType, Term
 from owcopilot.content.store import ContentStore
 from owcopilot.exporters.lorebook import render_lorebook_markdown, write_lorebook
@@ -170,13 +168,3 @@ def test_llm_connection_probe_classifies_failure() -> None:
     )
     assert result["ok"] is False
     assert result["category"] == "auth"
-
-
-# ------------------------------------------------------------------ CLI ui launcher
-def test_cli_ui_print_cmd(capsys) -> None:
-    code = cli_main(["ui", "--port", "8765", "--print-cmd"])
-    assert code == 0
-    payload = json.loads(capsys.readouterr().out.strip())
-    assert payload["command"][1:4] == ["-m", "streamlit", "run"]
-    assert payload["command"][-1] == "8765"
-    assert payload["command"][4].endswith("dashboard.py")

@@ -6,6 +6,7 @@ from .registry import RuleRegistry
 from .rules import (
     CharacterStateContradictionRule,
     DeprecatedEntityReferenceRule,
+    DialogueChoiceConditionRule,
     DialogueTreeBrokenLinkRule,
     DialogueTreeUnknownSpeakerRule,
     DialogueTreeUnreachableNodeRule,
@@ -22,6 +23,7 @@ from .rules import (
     POIWithoutNarrativePurposeRule,
     PrerequisiteCycleRule,
     PromptInjectionRule,
+    QuestLogicRule,
     QuestMissingObjectiveRule,
     RegionBannedContentRule,
     RegionLevelBoundsRule,
@@ -60,6 +62,8 @@ def build_default_rule_registry() -> RuleRegistry:
             DialogueTreeBrokenLinkRule(),
             DialogueTreeUnknownSpeakerRule(),
             DialogueTreeUnreachableNodeRule(),
+            DialogueChoiceConditionRule(),
+            QuestLogicRule(),
             PromptInjectionRule(),
             UnreviewedAIContentRule(),
         ]

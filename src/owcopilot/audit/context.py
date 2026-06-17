@@ -23,3 +23,15 @@ class AuditContext(BaseModel):
             graph=build_content_graph(bundle),
             content_hash=content_hash(bundle),
         )
+
+    def has_object(self, object_id: str) -> bool:
+        """Whether ``object_id`` names any referenceable canon object. Terms are included: the graph
+        index makes them nodes and the editor can wire relations to them, so a relation endpoint
+        that names a term is valid, not a dangling reference."""
+        return (
+            object_id in self.bundle.entities
+            or object_id in self.bundle.pois
+            or object_id in self.bundle.regions
+            or object_id in self.bundle.quests
+            or object_id in self.bundle.terms
+        )

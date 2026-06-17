@@ -24,6 +24,7 @@ class Category(str, Enum):
     PIPELINE = "pipeline"
     STYLE = "style"
     TRUST = "trust"
+    LOGIC = "logic"
 
 
 class IssueStatus(str, Enum):

@@ -31,6 +31,12 @@ class ContentGraph:
         self._index_nodes()
         self._index_relations()
         self._index_derived_references()
+        # The graph is immutable once built, so the per-`kinds` filtered view (and its undirected
+        # form) is the same every call — memoize both instead of deep-copying the whole graph twice
+        # on every neighbors()/ego_distances() (impact analysis and graph retrieval call these in a
+        # tight loop over many seeds). Keyed by frozenset(kinds) | None.
+        self._filtered_cache: dict[frozenset[str] | None, Any] = {}
+        self._undirected_cache: dict[frozenset[str] | None, Any] = {}
 
     def has_node(self, node_ref: str) -> bool:
         return node_ref in self.g
@@ -66,13 +72,26 @@ class ContentGraph:
         radius: int = 1,
         kinds: set[str] | None = None,
     ) -> list[str]:
+        return sorted(self.ego_distances(node_ref, radius=radius, kinds=kinds))
+
+    def ego_distances(
+        self,
+        node_ref: str,
+        *,
+        radius: int = 1,
+        kinds: set[str] | None = None,
+    ) -> dict[str, int]:
+        """BFS hop-distance from ``node_ref`` to every node within ``radius`` (focus itself = 0).
+
+        ``neighbors`` is just ``sorted(this.keys())``; layout needs the distances too (which ring a
+        node sits on), so the shortest-path call lives here once."""
         if node_ref not in self.g:
-            return []
-        graph = self._filtered_graph(kinds)
+            return {}
+        graph = self._undirected_filtered_graph(kinds)
         if node_ref not in graph:
-            return []
-        refs = nx.single_source_shortest_path_length(graph.to_undirected(), node_ref, cutoff=radius)
-        return sorted(str(ref) for ref in refs)
+            return {}
+        lengths = nx.single_source_shortest_path_length(graph, node_ref, cutoff=radius)
+        return {str(ref): int(dist) for ref, dist in lengths.items()}
 
     def active_edges(self, timeline_order: int) -> list[EdgeRef]:
         return [
@@ -219,14 +238,23 @@ class ContentGraph:
         )
 
     def _filtered_graph(self, kinds: set[str] | None) -> Any:
-        graph = nx.MultiDiGraph()
-        graph.add_nodes_from(self.g.nodes(data=True))
-        for source, target, key, data in self.g.edges(keys=True, data=True):
-            if kinds is None and data.get("edge_type") == "relation_ref":
-                continue
-            if kinds is None or data.get("kind") in kinds:
-                graph.add_edge(source, target, key=key, **data)
-        return graph
+        cache_key = frozenset(kinds) if kinds is not None else None
+        if cache_key not in self._filtered_cache:
+            graph = nx.MultiDiGraph()
+            graph.add_nodes_from(self.g.nodes(data=True))
+            for source, target, key, data in self.g.edges(keys=True, data=True):
+                if kinds is None and data.get("edge_type") == "relation_ref":
+                    continue
+                if kinds is None or data.get("kind") in kinds:
+                    graph.add_edge(source, target, key=key, **data)
+            self._filtered_cache[cache_key] = graph
+        return self._filtered_cache[cache_key]
+
+    def _undirected_filtered_graph(self, kinds: set[str] | None) -> Any:
+        cache_key = frozenset(kinds) if kinds is not None else None
+        if cache_key not in self._undirected_cache:
+            self._undirected_cache[cache_key] = self._filtered_graph(kinds).to_undirected()
+        return self._undirected_cache[cache_key]
 
 
 def build_content_graph(bundle: ContentBundle) -> ContentGraph:

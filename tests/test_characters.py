@@ -121,3 +121,28 @@ def test_long_idea_within_limit_is_accepted_offline(tmp_path) -> None:
         brief={"idea": long_idea, "npc_count": 0, "quest_count": 0},
     )
     assert result["bundle"]["entities"]
+
+
+def test_character_brief_hints_accept_str_or_list_uniformly() -> None:
+    # 扫尾: the three hint fields are now uniformly list[str]; a plain string is split tolerantly so
+    # old callers (and the UI sending one string) don't break
+    from owcopilot.assist.characters import CharacterBrief
+
+    from_str = CharacterBrief(
+        name="甲",
+        concept="c",
+        personality_hints="克制、责任重",
+        voice_hints="话少",
+        relationship_hints="与某人有羁绊",
+    )
+    assert from_str.personality_hints == ["克制", "责任重"]
+    assert from_str.voice_hints == ["话少"]
+    assert from_str.relationship_hints == ["与某人有羁绊"]
+
+    from_list = CharacterBrief(
+        name="乙",
+        concept="c",
+        personality_hints=["冷静", "多疑"],
+        voice_hints=["低沉"],
+    )
+    assert from_list.personality_hints == ["冷静", "多疑"]

@@ -60,6 +60,26 @@ def test_parse_quest_draft_tolerates_real_model_shape_drift() -> None:
     assert quest.metadata == {}
 
 
+def test_parse_quest_draft_coerces_dialogue_refs_as_objects() -> None:
+    """Round-29 real-LLM run: deepseek returned `dialogue_refs` as a list of inline dialogue
+    OBJECTS, which 500ed on ValidationError. The id is pulled out so the draft never crashes;
+    whether the ref resolves is the audit's job, not the parser's."""
+    quest = parse_quest_draft(
+        json.dumps(
+            {
+                "title": "矿镇失踪",
+                "objective": "调查失踪的矿工。",
+                "dialogue_refs": [
+                    {"id": "dial_001", "speaker": "npc_white", "text": "你来干什么？"},
+                    {"id": "dial_002"},
+                    "dial_003",
+                ],
+            }
+        )
+    )
+    assert quest.dialogue_refs == ["dial_001", "dial_002", "dial_003"]
+
+
 def test_parse_quest_draft_coerces_timeline_order_drift() -> None:
     """Round-10 live run: deepseek answered `"timeline_order": "side"` and the draft action
     500ed on ValidationError. Numeric strings coerce; junk degrades to None but stays
@@ -113,6 +133,27 @@ def test_parse_quest_draft_aliases_reward_type_and_amount() -> None:
     assert quest.rewards[0].value == "100"
     assert quest.rewards[0].amount == 100
     assert quest.rewards[1].kind == "currency"
+
+
+def test_parse_quest_draft_tolerates_reward_without_kind() -> None:
+    """Output-quality round: richer drafts emit rewards with no `kind` (type in `description`, empty
+    value). Alias the descriptive field to kind so the draft lands for review, not a crash."""
+    quest = parse_quest_draft(
+        json.dumps(
+            {
+                "title": "T",
+                "objective": "O",
+                "rewards": [
+                    {"id": "reward_x", "description": "亲和力", "value": ""},
+                    {"name": "好感度"},
+                    {"value": "10"},  # nothing descriptive -> generic "reward"
+                ],
+            }
+        )
+    )
+    assert quest.rewards[0].kind == "亲和力"
+    assert quest.rewards[1].kind == "好感度"
+    assert quest.rewards[2].kind == "reward"
 
 
 def test_parse_quest_draft_tolerates_null_lists_and_stage_aliases() -> None:

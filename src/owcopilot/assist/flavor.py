@@ -14,7 +14,12 @@ from pydantic import BaseModel, Field
 
 from ..content.models import ContentBundle, Entity, EntityType, Origin, ReviewStatus
 from ..llm.gateway import LLMGateway
+from ..llm.jsonio import extract_json
+from ..util import unique_id
+from .critic import FLAVOR_CRITIQUE_MARKER, CritiqueResult, FlavorCritic
 from .lint import AssistLintIssue, lint_text
+from .offline import _offline_quality_critique
+from .refine import run_refine_loop
 from .review_queue import ReviewItem, ReviewQueue
 
 FLAVOR_CATEGORIES: dict[str, EntityType] = {
@@ -51,6 +56,8 @@ class FlavorBatchResult(BaseModel):
     rejected: list[RejectedFlavor] = Field(default_factory=list)
     entities: list[Entity] = Field(default_factory=list)
     review_item: ReviewItem | None = None
+    refine_rounds: int = 0
+    auto_review_incomplete: bool = False
 
 
 class FlavorBatchService:
@@ -60,10 +67,16 @@ class FlavorBatchService:
         gateway: LLMGateway,
         bundle: ContentBundle,
         review_queue: ReviewQueue | None = None,
+        critic: FlavorCritic | None = None,
+        max_refine_rounds: int = 0,
     ) -> None:
         self.gateway = gateway
         self.bundle = bundle
         self.review_queue = review_queue
+        # Opt-in critique→refine loop, identical pattern to characters/dialogue/barks: no critic =
+        # the original single shot.
+        self.critic = critic
+        self.max_refine_rounds = max_refine_rounds if critic is not None else 0
 
     def generate(
         self,
@@ -82,23 +95,31 @@ class FlavorBatchService:
             raise ValueError("at least one name is required")
         style = self.bundle.style_guides.get("style_guide")
         style_text = style.body[:600] if style is not None else ""
-        raw = self.gateway.complete(
-            task="flavor_batch",
-            system=(
-                f"{_SYSTEM_PROMPT}\nCategory: {category}. Character budget: {max_chars}.\n"
-                f"Style guide: {style_text or '(none)'}"
-            ),
-            user=f"Theme: {theme or '(none)'}\nNames: {', '.join(cleaned)}",
-        )
-        entries = parse_flavor_entries(raw, expected_names=cleaned)
+        entries = self._draft_entries(category, cleaned, theme, max_chars, style_text)
+        refine_rounds = 0
+        auto_incomplete = False
+        if self.critic is not None:
+            entries, refine_rounds, auto_incomplete = self._refine_entries(
+                category, cleaned, theme, max_chars, style_text, entries
+            )
         batch_id = (
             "flavor_"
             + hashlib.sha256(f"{category}|{theme}|{','.join(cleaned)}".encode()).hexdigest()[:10]
         )
-        result = FlavorBatchResult(batch_id=batch_id, category=category)
+        result = FlavorBatchResult(
+            batch_id=batch_id,
+            category=category,
+            refine_rounds=refine_rounds,
+            auto_review_incomplete=auto_incomplete,
+        )
         used_ids = set(self.bundle.entities)
         for entry in entries:
             combined = f"{entry.description} {entry.flavor}".strip()
+            if not combined:
+                # The model produced nothing usable for this name (e.g. an unparseable reply);
+                # surface it as rejected rather than queuing an empty entity for review.
+                result.rejected.append(RejectedFlavor(name=entry.name, text="", issues=[]))
+                continue
             issues = lint_text(
                 combined, bundle=self.bundle, max_chars=max_chars * 2, allowed_entity_ids=set()
             )
@@ -144,13 +165,99 @@ class FlavorBatchService:
             )
         return result
 
+    def _draft_entries(
+        self,
+        category: str,
+        names: list[str],
+        theme: str,
+        max_chars: int,
+        style_text: str,
+        *,
+        feedback: list[str] | None = None,
+    ) -> list[FlavorEntry]:
+        user = f"Theme: {theme or '(none)'}\nNames: {', '.join(names)}"
+        if feedback:
+            user += "\n[REFINE] Address this reviewer feedback:\n" + "\n".join(feedback)
+        raw = self.gateway.complete(
+            task="flavor_batch",
+            system=(
+                f"{_SYSTEM_PROMPT}\nCategory: {category}. Character budget: {max_chars}.\n"
+                f"Style guide: {style_text or '(none)'}"
+            ),
+            user=user,
+        )
+        return parse_flavor_entries(raw, expected_names=names)
+
+    def _refine_entries(
+        self,
+        category: str,
+        names: list[str],
+        theme: str,
+        max_chars: int,
+        style_text: str,
+        entries: list[FlavorEntry],
+    ) -> tuple[list[FlavorEntry], int, bool]:
+        assert self.critic is not None
+
+        def assess(current: list[FlavorEntry]) -> tuple[list[str], CritiqueResult]:
+            assert self.critic is not None
+            problems = self._lint_problems(current, max_chars)
+            critique = self.critic.critique(
+                category=category,
+                theme=theme,
+                style_text=style_text,
+                entries=[
+                    {"name": e.name, "description": e.description, "flavor": e.flavor}
+                    for e in current
+                ],
+                lint_problems=problems,
+            )
+            return problems, critique
+
+        def regenerate(current: list[FlavorEntry], fixes: list[str]) -> list[FlavorEntry]:
+            return self._draft_entries(
+                category, names, theme, max_chars, style_text, feedback=fixes
+            )
+
+        outcome = run_refine_loop(
+            initial=entries,
+            max_rounds=self.max_refine_rounds,
+            assess=assess,
+            regenerate=regenerate,
+        )
+        return outcome.artifact, len(outcome.trail), outcome.auto_review_incomplete
+
+    def _lint_problems(self, entries: list[FlavorEntry], max_chars: int) -> list[str]:
+        problems: list[str] = []
+        for entry in entries:
+            combined = f"{entry.description} {entry.flavor}".strip()
+            if not combined:
+                problems.append(f"「{entry.name}」：未产出可用文本")
+                continue
+            issues = lint_text(
+                combined, bundle=self.bundle, max_chars=max_chars * 2, allowed_entity_ids=set()
+            )
+            if entry.flavor:
+                issues.extend(lint_text(entry.flavor, bundle=self.bundle, max_chars=max_chars))
+            for issue in issues:
+                problems.append(f"「{entry.name}」：{issue.message}")
+        return problems
+
 
 def parse_flavor_entries(raw: str, *, expected_names: list[str]) -> list[FlavorEntry]:
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text[text.find("{") : text.rfind("}") + 1]
-    payload = json.loads(text)
-    entries_raw = payload.get("entries") if isinstance(payload, dict) else None
+    try:
+        data: object = extract_json(raw)
+    except ValueError:
+        # An unparseable reply must not crash the batch: every name falls through to an empty
+        # entry, which generate() then surfaces as rejected (no silent empty content, no crash).
+        data = {}
+    # tolerate both {"entries": [...]} and a bare top-level array of entries
+    if isinstance(data, dict):
+        entries_raw = data.get("entries") or []
+    elif isinstance(data, list):
+        entries_raw = data
+    else:
+        entries_raw = []
     entries: list[FlavorEntry] = []
     by_name: dict[str, dict[str, str]] = {}
     for item in entries_raw or []:
@@ -171,9 +278,14 @@ def parse_flavor_entries(raw: str, *, expected_names: list[str]) -> list[FlavorE
 
 
 class OfflineFlavorProvider:
-    """Deterministic per-name entries so the batch pipeline is testable at $0."""
+    """Deterministic stand-in for the flavor generator AND its refine-loop critic: a critique
+    request (marker in the system prompt) returns a verdict, otherwise per-name entries — so one
+    provider drives the whole generate→critique→refine loop at $0."""
 
     def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
+        if FLAVOR_CRITIQUE_MARKER in system:
+            text = _offline_quality_critique(user)
+            return text, max(1, (len(system) + len(user)) // 4), max(1, len(text) // 4)
         names_match = re.search(r"Names:\s*(.+)", user)
         theme_match = re.search(r"Theme:\s*(.+)", user)
         names = [
@@ -197,18 +309,4 @@ class OfflineFlavorProvider:
 
 
 def _unique_id(prefix: str, raw: str, used: set[str]) -> str:
-    stem = _slug(raw)
-    base = stem if stem.startswith(f"{prefix}_") else f"{prefix}_{stem or 'entry'}"
-    candidate = base
-    index = 2
-    while candidate in used:
-        candidate = f"{base}_{index}"
-        index += 1
-    used.add(candidate)
-    return candidate
-
-
-def _slug(value: str) -> str:
-    text = value.strip().lower()
-    text = re.sub(r"[^a-z0-9㐀-鿿]+", "_", text)
-    return text.strip("_")
+    return unique_id(prefix, raw, used, fallback="entry")

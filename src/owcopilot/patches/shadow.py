@@ -6,6 +6,7 @@ from typing import Any
 
 from ..content.models import ContentBundle
 from .models import PatchOp, PatchOperation
+from .pointer import pointer_parts
 
 
 def apply_patch_shadow(bundle: ContentBundle, ops: list[PatchOperation]) -> ContentBundle:
@@ -27,19 +28,13 @@ def _apply_op(document: dict[str, Any], op: PatchOperation) -> None:
 
 
 def _resolve_parent(document: Any, path: str) -> tuple[Any, str]:
-    parts = _parts(path)
+    parts = pointer_parts(path)
     if not parts:
         raise ValueError("patch path must not be empty")
     current = document
     for part in parts[:-1]:
         current = _get(current, part)
     return current, parts[-1]
-
-
-def _parts(path: str) -> list[str]:
-    if not path.startswith("/"):
-        raise ValueError(f"patch path must be a JSON pointer: {path!r}")
-    return [part.replace("~1", "/").replace("~0", "~") for part in path.split("/")[1:]]
 
 
 def _get(value: Any, key: str) -> Any:

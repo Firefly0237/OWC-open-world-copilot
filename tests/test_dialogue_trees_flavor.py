@@ -12,6 +12,7 @@ from owcopilot.app.actions import (
 from owcopilot.assist.dialogue_trees import (
     DialogueTreeService,
     OfflineDialogueTreeProvider,
+    parse_dialogue_tree,
     tree_structure_problems,
 )
 from owcopilot.assist.flavor import FlavorBatchService, OfflineFlavorProvider
@@ -62,6 +63,34 @@ def test_dialogue_tree_offline_generation_is_structurally_sound() -> None:
     assert result.tree.root_node in result.tree.nodes
     assert any(node.choices for node in result.tree.nodes.values())
     assert result.lint_issues == []
+
+
+def test_parse_resolves_speaker_given_as_display_name() -> None:
+    """Output-quality round: models often answer with the display NAME, not the id, which used to
+    null every speaker. The name->id alias map maps it back so each line keeps its speaker."""
+    import json
+
+    raw = json.dumps(
+        {
+            "title": "T",
+            "root": "n1",
+            "nodes": [
+                {"id": "n1", "speaker": "艾尔德林", "text": "潮来了", "next": "n2"},
+                {"id": "n2", "speaker": "莱拉", "text": "别去", "next": None},
+            ],
+        }
+    )
+    tree = parse_dialogue_tree(
+        raw,
+        brief="b",
+        participant_ids=["npc_eldrin", "npc_lyra"],
+        quest_id=None,
+        existing_ids=set(),
+        max_nodes=12,
+        speaker_aliases={"艾尔德林": "npc_eldrin", "莱拉": "npc_lyra"},
+    )
+    speakers = [n.speaker_id for n in tree.nodes.values()]
+    assert speakers == ["npc_eldrin", "npc_lyra"]  # names resolved to ids, no None
 
 
 def test_tree_structure_problems_flags_broken_links_and_unknown_speakers() -> None:
@@ -131,6 +160,23 @@ def test_flavor_batch_offline_generates_typed_entities() -> None:
     assert [entry.name for entry in result.accepted] == ["疾风步", "落叶斩"]
     assert all(entity.type is EntityType.SKILL for entity in result.entities)
     assert all(entity.metadata.get("flavor_text") for entity in result.entities)
+
+
+class _NoJsonFlavorProvider:
+    def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
+        return "Here is your flavor text, enjoy!", 5, 5
+
+
+def test_flavor_batch_does_not_crash_on_unparseable_reply() -> None:
+    service = FlavorBatchService(
+        gateway=_gateway(_NoJsonFlavorProvider(), "flavor_batch"), bundle=_bundle_with_npcs()
+    )
+
+    result = service.generate(category="item", names=["长剑", "盾牌"])
+
+    # No crash; the unparseable batch yields no accepted entities, the names surface as rejected.
+    assert result.accepted == []
+    assert {r.name for r in result.rejected} == {"长剑", "盾牌"}
 
 
 def test_flavor_action_lands_entities_via_review(tmp_path: Path) -> None:

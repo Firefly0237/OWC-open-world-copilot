@@ -19,7 +19,7 @@ class MissingRelationEndpointRule:
     def check(self, ctx: AuditContext) -> Iterable[Issue]:
         for relation in ctx.bundle.relations:
             for side, entity_id in (("source", relation.source), ("target", relation.target)):
-                if not _object_exists(ctx, entity_id):
+                if not ctx.has_object(entity_id):
                     yield Issue(
                         rule_code=self.code,
                         severity=self.severity,
@@ -178,12 +178,3 @@ def _is_main_quest(quest: object) -> bool:
         str(metadata.get(key, "")).strip().lower() for key in ("type", "quest_type", "category")
     }
     return bool({"main", "mainline", "主线"} & (tags | metadata_values))
-
-
-def _object_exists(ctx: AuditContext, object_id: str) -> bool:
-    return (
-        object_id in ctx.bundle.entities
-        or object_id in ctx.bundle.pois
-        or object_id in ctx.bundle.regions
-        or object_id in ctx.bundle.quests
-    )

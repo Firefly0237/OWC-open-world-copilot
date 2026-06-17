@@ -19,6 +19,7 @@ from ..storage import SQLiteStore
 
 class ReviewItemType(str, Enum):
     QUEST_DRAFT = "quest_draft"
+    QUEST_LOGIC_DRAFT = "quest_logic_draft"  # B7: AI-drafted logic layer for an EXISTING quest
     PATCH_CANDIDATE = "patch_candidate"
     BARK_VARIANT = "bark_variant"
     WORLD_SEED = "world_seed"
@@ -35,6 +36,10 @@ class ReviewItem(BaseModel):
     payload: dict[str, Any]
     issue_refs: list[str] = Field(default_factory=list)
     status: str = "pending_review"
+    # The critic's final verdict/score (when a critic→refine loop ran), recorded so reviewer
+    # calibration can pair it with the human decision. None for single-shot / lint-only kinds.
+    critic_verdict: str | None = None
+    critic_score: float | None = None
 
 
 class ReviewQueue:
@@ -52,13 +57,20 @@ class ReviewQueue:
                     "payload": item.payload,
                     "issue_refs": item.issue_refs,
                     "status": item.status,
+                    "critic_verdict": item.critic_verdict,
+                    "critic_score": item.critic_score,
                 }
             )
         self._items.append(item)
         return item
 
     def add_quest_draft(
-        self, payload: dict[str, Any], *, issue_refs: list[str] | None = None
+        self,
+        payload: dict[str, Any],
+        *,
+        issue_refs: list[str] | None = None,
+        critic_verdict: str | None = None,
+        critic_score: float | None = None,
     ) -> ReviewItem:
         quest_id = str(payload.get("id") or "unknown")
         return self.add(
@@ -67,6 +79,30 @@ class ReviewQueue:
                 object_ref=f"quest:{quest_id}",
                 payload=payload,
                 issue_refs=issue_refs or [],
+                critic_verdict=critic_verdict,
+                critic_score=critic_score,
+            )
+        )
+
+    def add_quest_logic_draft(
+        self,
+        payload: dict[str, Any],
+        *,
+        issue_refs: list[str] | None = None,
+        critic_verdict: str | None = None,
+        critic_score: float | None = None,
+    ) -> ReviewItem:
+        """B7: a logic layer drafted for an EXISTING quest. payload = {quest_id, quest_title,
+        logic}. On accept it applies ONLY the logic to that quest (it does not create a quest)."""
+        quest_id = str(payload.get("quest_id") or "unknown")
+        return self.add(
+            ReviewItem(
+                item_type=ReviewItemType.QUEST_LOGIC_DRAFT,
+                object_ref=f"quest:{quest_id}",
+                payload=payload,
+                issue_refs=issue_refs or [],
+                critic_verdict=critic_verdict,
+                critic_score=critic_score,
             )
         )
 
@@ -97,7 +133,12 @@ class ReviewQueue:
         )
 
     def add_dialogue_tree(
-        self, payload: dict[str, Any], *, issue_refs: list[str] | None = None
+        self,
+        payload: dict[str, Any],
+        *,
+        issue_refs: list[str] | None = None,
+        critic_verdict: str | None = None,
+        critic_score: float | None = None,
     ) -> ReviewItem:
         tree_id = str(payload.get("id") or "unknown")
         return self.add(
@@ -106,11 +147,18 @@ class ReviewQueue:
                 object_ref=f"dialogue_tree:{tree_id}",
                 payload=payload,
                 issue_refs=issue_refs or [],
+                critic_verdict=critic_verdict,
+                critic_score=critic_score,
             )
         )
 
     def add_character_profile(
-        self, payload: dict[str, Any], *, issue_refs: list[str] | None = None
+        self,
+        payload: dict[str, Any],
+        *,
+        issue_refs: list[str] | None = None,
+        critic_verdict: str | None = None,
+        critic_score: float | None = None,
     ) -> ReviewItem:
         entity_id = str((payload.get("entity") or {}).get("id") or "unknown")
         return self.add(
@@ -119,6 +167,8 @@ class ReviewQueue:
                 object_ref=f"character:{entity_id}",
                 payload=payload,
                 issue_refs=issue_refs or [],
+                critic_verdict=critic_verdict,
+                critic_score=critic_score,
             )
         )
 
@@ -154,6 +204,32 @@ class ReviewQueue:
             ]
         return [item for item in self._items if item.status == "pending_review"]
 
+    def list_resolved(self) -> list[ReviewItem]:
+        """Items a human decided on (accepted/rejected) — the input to reviewer calibration."""
+        if self._store is not None:
+            return [
+                _item_from_dict(stored)
+                for status in ("accepted", "rejected")
+                for stored in self._store.list_review_items(status=status)
+            ]
+        return [item for item in self._items if item.status in ("accepted", "rejected")]
+
+    def update_payload(self, item_id: str, payload: dict[str, Any]) -> ReviewItem:
+        """Replace a pending item's draft with a feedback-revised version, keeping it pending."""
+        if self._store is not None:
+            updated = self._store.update_review_item(
+                item_id, status="pending_review", payload=payload
+            )
+            for item in self._items:
+                if item.id == item_id:
+                    item.payload = payload
+            return _item_from_dict(updated)
+        for item in self._items:
+            if item.id == item_id:
+                item.payload = payload
+                return item
+        raise KeyError(item_id)
+
     def mark(self, item_id: str, status: str, *, decided_by: str | None = None) -> ReviewItem:
         if self._store is not None:
             updated = self._store.update_review_item(
@@ -174,6 +250,7 @@ class ReviewQueue:
 
 
 def _item_from_dict(stored: dict[str, Any]) -> ReviewItem:
+    score = stored.get("critic_score")
     return ReviewItem(
         id=str(stored["id"]),
         item_type=ReviewItemType(stored["item_type"]),
@@ -181,4 +258,6 @@ def _item_from_dict(stored: dict[str, Any]) -> ReviewItem:
         payload=dict(stored["payload"]),
         issue_refs=list(stored["issue_refs"]),
         status=str(stored["status"]),
+        critic_verdict=stored.get("critic_verdict"),
+        critic_score=float(score) if score is not None else None,
     )

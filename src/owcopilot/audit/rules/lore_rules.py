@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable
 from typing import Any
 
 import networkx as nx
 
 from ...content.models import QuestEventRefKind
+from ...graph.ordering import timeline_order_of
 from ..context import AuditContext
 from ..models import Category, Evidence, Issue, Severity
-
-_ORDER_RE = re.compile(r"^order\s*=\s*(-?\d+)$")
 
 
 class TimelineViolationRule:
@@ -155,23 +153,9 @@ class CharacterStateContradictionRule:
                 )
 
 
-def _timeline_order(metadata: dict[str, Any] | None, tags: list[str]) -> int | None:
-    if metadata:
-        raw = metadata.get("timeline_order")
-        if isinstance(raw, int) and not isinstance(raw, bool):
-            return raw
-        if isinstance(raw, str) and raw.strip().lstrip("-").isdigit():
-            return int(raw.strip())
-    for tag in tags:
-        match = _ORDER_RE.match(tag.strip())
-        if match:
-            return int(match.group(1))
-    return None
-
-
 def _event_order(ctx: AuditContext, event_id: str) -> int | None:
     event = ctx.bundle.entities.get(event_id)
-    return _timeline_order(event.metadata if event else None, event.tags if event else [])
+    return timeline_order_of(event.metadata if event else None, event.tags if event else [])
 
 
 def _cyclic_quest_ids(ctx: AuditContext) -> set[str]:

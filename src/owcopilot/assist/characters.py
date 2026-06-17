@@ -15,11 +15,15 @@ import json
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..content.models import ContentBundle, Entity, EntityType, Origin, Relation, ReviewStatus
 from ..llm.gateway import LLMGateway
+from ..llm.jsonio import extract_json_object
 from ..retrieval.context_pack import ContextPackBuilder
+from ..util import slugify
+from .critic import CHARACTER_CRITIQUE_MARKER, CharacterCritic
+from .refine import RefineStep, run_refine_loop
 
 PROFILE_SECTIONS: list[tuple[str, str]] = [
     ("appearance", "外貌"),
@@ -37,9 +41,12 @@ _BRIEF_OPTIONAL_LABELS: list[tuple[str, str]] = [
     ("role_function", "戏剧定位"),
     ("faction_id", "所属阵营（既有 id）"),
     ("location_id", "常驻地点（既有 id）"),
+    ("notes", "补充要求"),
+]
+# hint fields are list[str]; rendered joined (kept out of the str-only optional-labels loop above)
+_BRIEF_HINT_LABELS: list[tuple[str, str]] = [
     ("personality_hints", "性格倾向"),
     ("voice_hints", "说话方式"),
-    ("notes", "补充要求"),
 ]
 
 _SYSTEM_PROMPT = (
@@ -50,7 +57,15 @@ _SYSTEM_PROMPT = (
     "appearance, personality, backstory, motivation, abilities, weakness, voice, "
     "relationships (list of {target, kind, note} — target MUST be an entity id that "
     "appears in the world facts context; if no suitable entity exists, leave the list "
-    "empty rather than inventing ids). Honor every constraint the brief states."
+    "empty rather than inventing ids). Honor every constraint the brief states.\n"
+    # Quality bar (二游 character rubric — same bar applied to quests/dialogue):
+    "QUALITY BAR — a memorable character, not an archetype with a label:\n"
+    "1. MOTIVATION has an inner contradiction: a want PLUS a fear/cost that pulls against it "
+    "(动机要有内在矛盾/反差), so the character could change — not a static trait list.\n"
+    "2. VOICE is distinctive and concrete: name a verbal tic / rhythm / signature imagery in "
+    "'voice' so their dialogue would be recognizable without the name.\n"
+    "3. Use concrete sensory detail (objects, scars, habits), never generic adjectives like "
+    "'mysterious/strong/kind' alone. weakness must be real and exploitable, not cosmetic."
 )
 
 
@@ -62,10 +77,23 @@ class CharacterBrief(BaseModel):
     role_function: str = ""
     faction_id: str = ""
     location_id: str = ""
-    personality_hints: str = ""
-    voice_hints: str = ""
+    # All three hint fields are list[str] for a consistent API; a plain string is still accepted and
+    # split on common separators (so callers/UI sending one string don't break).
+    personality_hints: list[str] = Field(default_factory=list)
+    voice_hints: list[str] = Field(default_factory=list)
     relationship_hints: list[str] = Field(default_factory=list)
     notes: str = ""
+
+    @field_validator("personality_hints", "voice_hints", "relationship_hints", mode="before")
+    @classmethod
+    def _coerce_hint_list(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [p.strip() for p in re.split(r"[、，,；;\n]+", value) if p.strip()]
+        if isinstance(value, list):
+            return [str(p).strip() for p in value if str(p).strip()]
+        return [str(value).strip()]
 
 
 class CharacterDraft(BaseModel):
@@ -73,25 +101,44 @@ class CharacterDraft(BaseModel):
     relations: list[Relation] = Field(default_factory=list)
     profile: dict[str, str] = Field(default_factory=dict)
     suggested_relations: list[str] = Field(default_factory=list)
+    refine_trail: list[RefineStep] = Field(default_factory=list)
+    auto_review_incomplete: bool = False
 
 
-def _brief_user_message(brief: CharacterBrief) -> str:
+def _brief_user_message(
+    brief: CharacterBrief,
+    *,
+    prior: CharacterDraft | None = None,
+    feedback: list[str] | None = None,
+) -> str:
     lines = [f"名字：{brief.name.strip()}", f"一句话概念：{brief.concept.strip()}"]
     for field, label in _BRIEF_OPTIONAL_LABELS:
         value = str(getattr(brief, field) or "").strip()
         if value:
             lines.append(f"{label}：{value}")
+    for field, label in _BRIEF_HINT_LABELS:
+        items = [h.strip() for h in getattr(brief, field) if h.strip()]
+        if items:
+            lines.append(f"{label}：{'、'.join(items)}")
     hints = [h.strip() for h in brief.relationship_hints if h.strip()]
     if hints:
         lines.append("人际关系提示（尽量落到既有实体上）：")
         lines.extend(f"- {hint}" for hint in hints)
     lines.append("未提及的维度由你根据概念与世界事实自行设计，保持内在一致。")
+    if prior is not None and feedback:
+        prior_json = json.dumps(
+            {"summary": prior.entity.description, **prior.profile}, ensure_ascii=False
+        )
+        fix_lines = "\n".join(f"- {fix}" for fix in feedback)
+        lines.append(
+            "\n[REFINE] 这是上一版人设。请产出改进后的完整 JSON，逐条解决下列意见、补全空缺小节、"
+            f"让人物更具体可用：\n上一版：\n{prior_json}\n\n必须解决：\n{fix_lines}"
+        )
     return "\n".join(lines)
 
 
 def _slug(name: str) -> str:
-    cleaned = re.sub(r"[^0-9A-Za-z一-鿿]+", "_", name).strip("_").lower()
-    return cleaned or "character"
+    return slugify(name, fallback="character")
 
 
 class CharacterProfileService:
@@ -101,10 +148,15 @@ class CharacterProfileService:
         gateway: LLMGateway,
         bundle: ContentBundle,
         context_builder: ContextPackBuilder,
+        critic: CharacterCritic | None = None,
+        max_refine_rounds: int = 0,
     ) -> None:
         self.gateway = gateway
         self.bundle = bundle
         self.context_builder = context_builder
+        # Opt-in critique→refine loop: without a critic the service is the original single shot.
+        self.critic = critic
+        self.max_refine_rounds = max_refine_rounds if critic is not None else 0
 
     def generate(self, brief: CharacterBrief, *, budget_tokens: int = 1200) -> CharacterDraft:
         query = " ".join(
@@ -120,15 +172,80 @@ class CharacterProfileService:
         )
         pack = self.context_builder.build(query, budget_tokens=budget_tokens, limit=8)
         context_lines = [f"- [{hit.ref}] {hit.title}: {hit.body}".strip() for hit in pack.hits]
+        draft = self._draft(brief, context_lines)
+        if self.critic is None:
+            return draft
+
+        def assess(d: CharacterDraft) -> tuple[list[str], Any]:
+            assert self.critic is not None
+            missing = [
+                label for key, label in PROFILE_SECTIONS if not d.profile.get(key, "").strip()
+            ]
+            critique = self.critic.critique(
+                concept=brief.concept,
+                profile=d.profile,
+                summary=d.entity.description,
+                context_lines=context_lines,
+                missing_sections=missing,
+            )
+            return missing, critique
+
+        outcome = run_refine_loop(
+            initial=draft,
+            max_rounds=self.max_refine_rounds,
+            assess=assess,
+            regenerate=lambda d, fixes: self._draft(brief, context_lines, prior=d, feedback=fixes),
+        )
+        final = outcome.artifact
+        if outcome.trail:
+            final.entity.metadata["refine_rounds"] = len(outcome.trail)
+        if outcome.auto_review_incomplete:
+            final.entity.metadata["auto_review_incomplete"] = True
+        final.refine_trail = outcome.trail
+        final.auto_review_incomplete = outcome.auto_review_incomplete
+        return final
+
+    def revise(
+        self, prior: CharacterDraft, feedback: str, *, budget_tokens: int = 1200
+    ) -> CharacterDraft:
+        """Regenerate the sheet to address reviewer feedback; the stored brief grounds retrieval."""
+        brief_data = dict(prior.entity.metadata.get("character_brief") or {})
+        brief_data.setdefault("name", prior.entity.name)
+        brief_data.setdefault("concept", prior.entity.description or prior.entity.name)
+        brief = CharacterBrief.model_validate(brief_data)
+        query = " ".join(
+            part
+            for part in (
+                brief.name,
+                brief.concept,
+                brief.faction_id,
+                brief.location_id,
+                *brief.relationship_hints,
+            )
+            if part.strip()
+        )
+        pack = self.context_builder.build(query, budget_tokens=budget_tokens, limit=8)
+        context_lines = [f"- [{hit.ref}] {hit.title}: {hit.body}".strip() for hit in pack.hits]
+        revised = self._draft(brief, context_lines, prior=prior, feedback=[feedback.strip()])
+        revised.entity.metadata["revised_from_feedback"] = True
+        return revised
+
+    def _draft(
+        self,
+        brief: CharacterBrief,
+        context_lines: list[str],
+        *,
+        prior: CharacterDraft | None = None,
+        feedback: list[str] | None = None,
+    ) -> CharacterDraft:
         raw = self.gateway.complete(
             task="character_profile",
             system=_SYSTEM_PROMPT
             + "\n\nWorld facts context:\n"
             + ("\n".join(context_lines) if context_lines else "(none)"),
-            user=_brief_user_message(brief),
+            user=_brief_user_message(brief, prior=prior, feedback=feedback),
         )
-        payload = _parse_payload(raw)
-        return self._draft_from_payload(payload, brief)
+        return self._draft_from_payload(_parse_payload(raw), brief)
 
     def _draft_from_payload(self, payload: dict[str, Any], brief: CharacterBrief) -> CharacterDraft:
         name = str(payload.get("name") or brief.name).strip() or brief.name
@@ -199,13 +316,7 @@ class CharacterProfileService:
 
 
 def _parse_payload(raw: str) -> dict[str, Any]:
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text[text.find("{") : text.rfind("}") + 1]
-    payload = json.loads(text)
-    if not isinstance(payload, dict):
-        raise ValueError("character provider returned non-object JSON")
-    return payload
+    return extract_json_object(raw)
 
 
 class OfflineCharacterProvider:
@@ -214,6 +325,9 @@ class OfflineCharacterProvider:
     present in the world-facts context (by id token match)."""
 
     def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
+        if CHARACTER_CRITIQUE_MARKER in system:
+            text = _offline_character_critique(user)
+            return text, max(1, (len(system) + len(user)) // 4), max(1, len(text) // 4)
         fields: dict[str, str] = {}
         hints: list[str] = []
         in_hints = False
@@ -255,3 +369,30 @@ class OfflineCharacterProvider:
         }
         text = json.dumps(payload, ensure_ascii=False)
         return text, max(1, (len(system) + len(user)) // 4), max(1, len(text) // 4)
+
+
+def _offline_character_critique(user: str) -> str:
+    """The critic only lists "completeness blockers" when a profile section is empty; the offline
+    sheet fills every section, so the default verdict is pass (the loop converges at round 0)."""
+    if "completeness blockers" in user:
+        result = {
+            "verdict": "revise",
+            "score": 0.5,
+            "summary": "人设小节有缺。",
+            "dimensions": [
+                {
+                    "dimension": "completeness",
+                    "severity": "blocker",
+                    "issue": "部分人设小节为空。",
+                    "fix": "补全空缺的人设小节。",
+                }
+            ],
+        }
+    else:
+        result = {
+            "verdict": "pass",
+            "score": 0.9,
+            "summary": "人设完整、与世界一致。",
+            "dimensions": [{"dimension": "completeness", "severity": "ok", "issue": "", "fix": ""}],
+        }
+    return json.dumps(result, ensure_ascii=False)

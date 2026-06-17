@@ -1,6 +1,8 @@
 """Graph index package for v2 content graphs."""
 
 from .index import ContentGraph, EdgeRef, build_content_graph, entity_ref, ref
+from .layout import concentric_layout, layered_layout
+from .ordering import timeline_order_of
 from .query import edges_by_kind, edges_by_type, neighbors
 from .timeline import active_edges_at, is_active
 
@@ -9,10 +11,13 @@ __all__ = [
     "EdgeRef",
     "active_edges_at",
     "build_content_graph",
+    "concentric_layout",
     "edges_by_kind",
     "edges_by_type",
     "entity_ref",
     "is_active",
+    "layered_layout",
     "neighbors",
     "ref",
+    "timeline_order_of",
 ]
