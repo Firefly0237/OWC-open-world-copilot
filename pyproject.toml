@@ -30,13 +30,14 @@ dependencies = [
     "networkx>=3.2",
     "langgraph>=0.2",
     "openpyxl>=3.1",
+    "numpy>=1.26",          # exact in-SQLite vector search (retrieval/vector.py); light, ubiquitous
+    "pypdf>=4.0",           # PDF manuscript import (extraction/inspiration); small, pure-Python
 ]
 
 # No [project.urls] yet — the project is local-only (not published to a public repo).
 # Add Homepage/Repository/Issues here once it lives on GitHub.
 
 [project.optional-dependencies]
-app = ["streamlit>=1.46"]  # st.pills/segmented controls + newer [theme] config keys
 dev = [
     "pytest>=8.0",
     "httpx2>=2.0",          # Starlette/FastAPI testclient prefers httpx2; avoids deprecation warnings
@@ -46,6 +47,7 @@ dev = [
     "fakeredis>=2.20",      # in-memory Redis stand-in for the RedisCache tests (offline, $0)
 ]
 live = ["openai>=1.0"]            # real provider (DeepSeek/OpenAI-compatible); offline runs don't need it
+semantic = ["sentence-transformers>=3.0"]   # real multilingual embeddings (bge-m3) for hybrid RAG; pulls torch
 serve = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]   # the deployable HTTP API (service/api.py)
 redis = ["redis>=5.0"]            # optional RedisCache backend for multi-instance stateless deploys
 mcp = ["mcp>=1.0"]                # optional MCP transport; core tool handlers do not require it
@@ -72,9 +74,6 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Tests deliberately import the app under test after a runtime importorskip guard.
 "tests/*" = ["E402"]
-# The dashboard flushes a boot splash before its heavy imports, so a cold start paints
-# starlight instead of a white page; imports therefore sit after the first st calls.
-"src/owcopilot/app/dashboard.py" = ["E402"]
 
 [tool.mypy]
 # Pragmatic start (per Round 5 §2.5): check our package, tolerate third-party stub gaps,
