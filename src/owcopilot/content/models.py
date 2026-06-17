@@ -7,7 +7,7 @@ facts that later pipeline stages index, audit, retrieve, patch, review and expor
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -113,6 +113,66 @@ class Reward(BaseModel):
         return "" if value is None else str(value)
 
 
+# >>> WS-A logic contract (frozen; downstream workstreams consume, do not edit shape) >>>
+class LogicVarType(str, Enum):
+    BOOL = "bool"
+    INT = "int"
+    ENUM = "enum"
+
+
+class LogicVar(BaseModel):
+    """A quest/world state variable the logic layer reads and writes."""
+
+    id: str
+    name: str = ""
+    type: LogicVarType = LogicVarType.BOOL
+    default: bool | int | str = False
+    enum_values: list[str] = Field(default_factory=list)  # only for type=enum
+
+
+class Effect(BaseModel):
+    """A mutation applied to a variable when a stage completes."""
+
+    var: str
+    op: Literal["set", "inc", "dec"] = "set"
+    value: bool | int | str = True
+
+
+class StageLogic(BaseModel):
+    stage_id: str
+    precondition: str = ""  # boolean expression source; empty = always enterable
+    effects_on_complete: list[Effect] = Field(default_factory=list)
+
+
+class Branch(BaseModel):
+    id: str
+    from_stage: str
+    condition: str = ""  # taken when this evaluates true
+    to_stage: str = ""  # next stage id; empty + outcome set = a terminal outcome
+    outcome: str = ""
+    # Consequences applied when this branch is taken — the structural home for a choice's results
+    # (e.g. faction reputation deltas via a `rep:<faction_id>` target, or any logic variable). This
+    # is what keeps a generated "choice → reputation/standing change" out of an unstructured string.
+    effects: list[Effect] = Field(default_factory=list)
+
+
+class QuestLogic(BaseModel):
+    """The native quest logic/state layer (single source of truth; exported to ink/Yarn).
+
+    Variables + boolean preconditions + on-complete effects + branches turn a quest from metadata
+    into playable logic. Deterministic audit (see audit/rules/logic_rules.py) checks it for
+    unreachable stages, deadlocks, undefined variables and type errors."""
+
+    variables: list[LogicVar] = Field(default_factory=list)
+    precondition: str = ""  # quest-level gate
+    stage_logic: list[StageLogic] = Field(default_factory=list)
+    branches: list[Branch] = Field(default_factory=list)
+    unlocks: list[str] = Field(default_factory=list)  # quest ids unlocked on completion
+
+
+# <<< WS-A logic contract <<<
+
+
 class Quest(ProvenanceMixin):
     id: str
     title: str
@@ -127,6 +187,7 @@ class Quest(ProvenanceMixin):
     localization_keys: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    logic: QuestLogic | None = None  # None = legacy quest, behaviour unchanged
 
 
 class RegionBrief(ProvenanceMixin):

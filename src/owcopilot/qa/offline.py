@@ -6,6 +6,7 @@ import json
 import re
 
 from ..retrieval.text_match import lexical_score, query_terms
+from .service import QA_EXPAND_MARKER
 
 
 class OfflineQAProvider:
@@ -17,6 +18,10 @@ class OfflineQAProvider:
     """
 
     def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
+        if QA_EXPAND_MARKER in system:
+            # A query-expansion call: the deterministic provider offers no rephrasings (real
+            # models do), so retrieval falls back to the original query — offline stays stable.
+            return "[]", max(1, len(system) // 4), 1
         context = _context_rows(system)
         selected = _select_rows(user, context)
         refused = _should_refuse(user, selected)
@@ -30,6 +35,45 @@ class OfflineQAProvider:
         }
         text = json.dumps(payload)
         return text, max(1, (len(system) + len(user)) // 4), max(1, len(text) // 4)
+
+
+class OfflineCommunityReportProvider:
+    """Deterministic stand-in for the GraphRAG community/global report writer.
+
+    Produces parseable ``{title, summary}`` JSON from the member/cluster names in the prompt, so the
+    whole indexing + retrieval + macro-QA flow can run end-to-end at $0 (real mode swaps in a model
+    and nothing else changes). Names come straight from the prompt — no invention.
+    """
+
+    def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
+        ties = _section_lines(user, "Ties:") + _section_lines(user, "Cross-cluster ties:")
+        tie_text = ("；关系：" + "、".join(ties[:8])) if ties else ""
+        if user.startswith("Cluster reports:"):
+            titles = re.findall(r"^- (.+?):", user, re.M)
+            title = "世界结构概览"
+            summary = "本世界的主要势力与聚类包括：" + "、".join(titles[:12]) + tie_text + "。"
+        else:
+            names = re.findall(r"^- \[[^\]]+\]\s*(.+?)\s*\(", user, re.M)
+            title = (f"{names[0]} 等 {len(names)} 个对象的聚类") if names else "聚类"
+            summary = "本聚类的成员势力包括：" + "、".join(names[:12]) + tie_text + "。"
+        text = json.dumps({"title": title, "summary": summary}, ensure_ascii=False)
+        return text, max(1, (len(system) + len(user)) // 4), max(1, len(text) // 4)
+
+
+def _section_lines(text: str, header: str) -> list[str]:
+    """The ``- …`` bullet lines under a header (e.g. ``Ties:``), up to the next header/blank."""
+    out: list[str] = []
+    capture = False
+    for line in text.splitlines():
+        if line.strip() == header:
+            capture = True
+            continue
+        if capture:
+            if line.startswith("- "):
+                out.append(line[2:].strip())
+            elif line.strip().endswith(":") or not line.strip():
+                break
+    return out
 
 
 def _context_rows(system: str) -> list[tuple[str, str, str]]:

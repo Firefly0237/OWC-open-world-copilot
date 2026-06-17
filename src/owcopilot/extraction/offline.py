@@ -10,6 +10,21 @@ from __future__ import annotations
 import json
 import re
 
+from .service import EXTRACTION_GLEAN_MARKER
+
+_EMPTY_PAYLOAD = json.dumps(
+    {
+        "characters": [],
+        "locations": [],
+        "factions": [],
+        "items": [],
+        "terms": [],
+        "relations": [],
+        "beats": [],
+    },
+    ensure_ascii=False,
+)
+
 _CHAR_PATTERNS = [
     re.compile(r"^(?:角色|人物)[:：]\s*([^\s，。;；]{1,12})", re.MULTILINE),
     re.compile(r"([一-鿿]{2,4})(?:说道|喊道|低声道|答道|说)"),
@@ -30,6 +45,10 @@ class OfflineExtractionProvider:
     """Extract a minimal structured payload from one manuscript chunk, deterministically."""
 
     def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
+        if EXTRACTION_GLEAN_MARKER in system:
+            # A gleaning second pass: the deterministic extractor already returned everything it
+            # can find on the first pass, so it has nothing to add. Real models find missed items.
+            return _EMPTY_PAYLOAD, max(1, len(system) // 4), max(1, len(_EMPTY_PAYLOAD) // 4)
         body = re.sub(r"^\[chunk[^\n]*\n+", "", user.strip())
         characters = _collect(_CHAR_PATTERNS, body)
         locations = _collect(_LOC_PATTERNS, body)

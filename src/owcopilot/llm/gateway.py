@@ -18,6 +18,29 @@ from .cache import CacheBackend, CacheKey, NoOpCache
 from .router import Router, StaticRouter
 from .telemetry import CallRecord, TelemetryCollector
 
+# Offline/fake LLM providers are a TEST, CI and eval fixture — never a shipped product mode. A real
+# deployment must connect a model for any AI feature (generate / ask / extract …), so it can never
+# silently serve canned output as if it were the model's. The fixture is enabled only by an explicit
+# opt-in the test conftest sets; the eval harness builds its gateways straight from the doubles and
+# so bypasses this gate entirely (those gateways are constructed directly, not via the runtime
+# builders that call `require_offline_llm_allowed`).
+OFFLINE_LLM_ENV = "OWCOPILOT_ALLOW_OFFLINE_LLM"
+OFFLINE_LLM_FORBIDDEN_MESSAGE = (
+    "未接入模型：AI 功能（创世 / 生成 / 问答 / 提炼）需要先在「设置」接入服务商与 API Key。"
+    "（离线占位模型仅用于测试与 CI，不作为产品能力提供。）"
+)
+
+
+def offline_llm_allowed() -> bool:
+    """True only when the offline fake-LLM fixture is explicitly enabled (tests / CI / eval)."""
+    return os.getenv(OFFLINE_LLM_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def require_offline_llm_allowed() -> None:
+    """Fail closed before a runtime path would hand back fake LLM output to a real caller."""
+    if not offline_llm_allowed():
+        raise RuntimeError(OFFLINE_LLM_FORBIDDEN_MESSAGE)
+
 
 class LLMProvider(Protocol):
     def complete(self, *, system: str, user: str, model: str) -> tuple:
@@ -132,6 +155,7 @@ class LLMGateway:
         telemetry: TelemetryCollector | None = None,
         max_retries: int = 0,
         retry_backoff_seconds: float = 0.0,
+        namespace: str = "",
     ):
         self.providers = providers
         self.router = router or StaticRouter()
@@ -139,10 +163,20 @@ class LLMGateway:
         self.telemetry = telemetry or TelemetryCollector()
         self.max_retries = max(0, max_retries)
         self.retry_backoff_seconds = max(0.0, retry_backoff_seconds)
+        # Scopes every cache key this gateway builds to one project, so a shared process/app
+        # lifetime cache can't serve project B the completion generated for project A. "" = global.
+        self.namespace = namespace
 
     def complete(self, *, task: str, system: str, user: str, tier: str | None = None) -> str:
         tier = self.router.choose(task=task, hint=tier)
-        key = CacheKey(tier=tier, system=system, user=user)
+        provider = self.providers[tier]
+        # The cache key must include the *real* model behind the tier: `llm_model` is request-driven
+        # while the tier label stays "cheap", so two different models share a tier — without the
+        # model id a request that switches models would be served the other model's cached answer.
+        model = getattr(provider, "model", None) or tier
+        key = CacheKey(
+            tier=tier, system=system, user=user, namespace=self.namespace, model=model
+        )
 
         t0 = time.perf_counter()
         cached = self.cache.get(key)
@@ -159,7 +193,6 @@ class LLMGateway:
             )
             return cached
 
-        provider = self.providers[tier]
         result = self._complete_with_retries(
             provider, task=task, tier=tier, system=system, user=user
         )

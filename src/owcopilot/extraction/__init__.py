@@ -1,6 +1,6 @@
 """Distill unstructured manuscripts (novels, scripts, notes) into reviewable content drafts."""
 
-from .models import ExtractionDraft, ExtractionGap, PlotBeat
+from .models import CoverageReport, ExtractionDraft, ExtractionGap, PlotBeat
 from .offline import OfflineExtractionProvider, OfflineGapFillProvider
 from .service import (
     ExtractionService,
@@ -8,10 +8,12 @@ from .service import (
     chunk_text,
     decode_document_bytes,
     parse_extraction_payload,
+    plan_coverage,
     quests_from_beats,
 )
 
 __all__ = [
+    "CoverageReport",
     "ExtractionDraft",
     "ExtractionGap",
     "ExtractionService",
@@ -22,5 +24,6 @@ __all__ = [
     "chunk_text",
     "decode_document_bytes",
     "parse_extraction_payload",
+    "plan_coverage",
     "quests_from_beats",
 ]

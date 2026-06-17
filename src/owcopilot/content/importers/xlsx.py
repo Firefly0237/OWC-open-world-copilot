@@ -16,7 +16,12 @@ class XLSXImporter:
         from openpyxl import load_workbook
 
         source = Path(path)
-        workbook = load_workbook(source, read_only=True, data_only=True)
+        # A corrupted upload or a CSV renamed to .xlsx makes openpyxl raise BadZipFile /
+        # InvalidFileException; turn that into a clean domain error like docx/epub do.
+        try:
+            workbook = load_workbook(source, read_only=True, data_only=True)
+        except Exception as e:  # noqa: BLE001 - openpyxl raises several types on malformed input
+            raise ValueError("not a valid .xlsx file") from e
         objects: list[RawObject] = []
         try:
             for sheet in workbook.worksheets:

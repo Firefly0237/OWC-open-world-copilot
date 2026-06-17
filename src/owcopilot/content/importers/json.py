@@ -6,18 +6,25 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..encoding import decode_bytes
 from .base import RawObject
 
 
 class JSONImporter:
     def parse(self, path: str | Path) -> list[RawObject]:
         source = Path(path)
+        # Decode tolerantly (a JSON exported on a Chinese Windows box may be GB18030/UTF-16, not
+        # UTF-8) and turn a malformed file into a clean domain error like the xlsx/docx importers.
+        text = decode_bytes(source.read_bytes())
         if source.suffix.lower() == ".jsonl":
             objects: list[RawObject] = []
-            for line_number, raw in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
+            for line_number, raw in enumerate(text.splitlines(), 1):
                 if not raw.strip():
                     continue
-                data = json.loads(raw)
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"第 {line_number} 行不是合法 JSON，请检查该行格式。") from e
                 if isinstance(data, dict):
                     objects.append(
                         RawObject(
@@ -28,7 +35,12 @@ class JSONImporter:
                         )
                     )
             return objects
-        data = json.loads(source.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                "文件不是合法 JSON，可能已损坏或格式不对（应是对象或对象数组）。"
+            ) from e
         return _objects_from_json(data, source_path=str(source))
 
 

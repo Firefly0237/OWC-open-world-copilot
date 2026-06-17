@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ..encoding import decode_bytes
 from .base import RawObject
 
 _TYPE_BY_SECTION = {
@@ -23,7 +24,9 @@ _TYPE_BY_SECTION = {
 class MarkdownImporter:
     def parse(self, path: str | Path) -> list[RawObject]:
         source = Path(path)
-        return parse_markdown(source.read_text(encoding="utf-8"), source_path=str(source))
+        # Tolerant decode (GB18030/UTF-16 markdown from a Chinese editor), matching the CSV/JSON
+        # importers rather than crashing on a non-UTF-8 file.
+        return parse_markdown(decode_bytes(source.read_bytes()), source_path=str(source))
 
 
 def parse_markdown(text: str, *, source_path: str = "<memory>") -> list[RawObject]:

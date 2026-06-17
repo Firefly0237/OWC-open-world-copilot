@@ -54,9 +54,8 @@ class ContentStore:
             bundle.localized_texts[text.id] = text
         for term in self._load_terms():
             bundle.terms[term.id] = term
-        style = self.root / "world" / "style_guide.md"
-        if style.exists():
-            bundle.style_guides["style_guide"] = StyleGuide(body=style.read_text(encoding="utf-8"))
+        for style in self._load_style_guides():
+            bundle.style_guides[style.id] = style
         return bundle
 
     def save(self, bundle: ContentBundle) -> None:
@@ -104,6 +103,20 @@ class ContentStore:
                 refs[ref.id] = ref
         return refs
 
+    def _load_style_guides(self) -> list[StyleGuide]:
+        """Full-fidelity JSON is canonical; an old body-only ``style_guide.md`` still loads (so
+        worlds saved before this format upgrade keep working, just without their rules)."""
+        path = self.root / "world" / "style_guides.json"
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return [StyleGuide.model_validate(raw) for raw in data.values()]
+            return []
+        legacy = self.root / "world" / "style_guide.md"
+        if legacy.exists():
+            return [StyleGuide(body=legacy.read_text(encoding="utf-8"))]
+        return []
+
     def _load_terms(self) -> list[Term]:
         path = self.root / "world" / "terms.json"
         if not path.exists():
@@ -143,12 +156,22 @@ class ContentStore:
         path.write_text(_json(payload), encoding="utf-8")
 
     def _write_style_guides(self, style_guides: dict[str, StyleGuide]) -> None:
-        style = style_guides.get("style_guide")
-        if style is None:
+        """Persist EVERY style guide with all its fields (id, body, rules, …) — the old code only
+        wrote the single ``"style_guide"`` key's ``body``, silently dropping rules and any other
+        guide. The legacy ``.md`` is removed once the full-fidelity JSON exists."""
+        path = self.root / "world" / "style_guides.json"
+        legacy = self.root / "world" / "style_guide.md"
+        if not style_guides:
+            path.unlink(missing_ok=True)
+            legacy.unlink(missing_ok=True)
             return
-        path = self.root / "world" / "style_guide.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(style.body, encoding="utf-8")
+        payload = {
+            style_id: guide.model_dump(mode="json", exclude_none=True)
+            for style_id, guide in sorted(style_guides.items())
+        }
+        path.write_text(_json(payload), encoding="utf-8")
+        legacy.unlink(missing_ok=True)
 
     def _write_json(self, path: Path, model: BaseModel) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

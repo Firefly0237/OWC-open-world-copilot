@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -26,23 +27,35 @@ from typing import Any, Protocol
 @dataclass(frozen=True)
 class CacheKey:
     """What the gateway hands a cache for one call. Each backend takes what it needs:
-    ExactCache uses `.exact` (the full hash); SemanticCache embeds `.text` and scopes by `tier`."""
+    ExactCache uses `.exact` (the full hash); SemanticCache embeds `.text` and scopes by `.scope`.
+
+    The key captures *everything that determines the completion*: not just the prompt
+    (`tier`/`system`/`user`) but also which `model` produced it and which `namespace` (project) it
+    belongs to. Omitting either silently serves one project — or one model — the answer computed for
+    another: a request that explicitly switches `llm_model` (or asks the same question in another
+    project) must never be short-circuited by a stale entry.
+    """
 
     tier: str
     system: str
     user: str
+    namespace: str = ""  # project / content-root scope; "" = un-scoped (single-project) default
+    model: str = ""  # the real model id behind the tier (a different model must miss, not reuse)
 
     @property
     def exact(self) -> str:
-        return hashlib.sha256(f"{self.tier}\x00{self.system}\x00{self.user}".encode()).hexdigest()
+        parts = (self.namespace, self.model, self.tier, self.system, self.user)
+        return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
 
     @property
     def scope(self) -> str:
-        """Bucket key for L2: same tier + same system prompt. Two requests are candidates for a
-        semantic match only if their grounding context (system) is identical — so a paraphrased
-        intent that retrieves the same lore can hit, while a plan call (different system) or a
-        request that pulls different lore never collides with a generate call."""
-        return hashlib.sha256(f"{self.tier}\x00{self.system}".encode()).hexdigest()
+        """Bucket key for L2: same namespace + model + tier + system prompt. Two requests are
+        candidates for a semantic match only if they share the same project, the same model, and an
+        identical grounding context (system) — so a paraphrased intent that retrieves the same lore
+        can hit, while a plan call (different system), a request that pulls different lore, a
+        different model, or another project never collides with a generate call."""
+        parts = (self.namespace, self.model, self.tier, self.system)
+        return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
 
     @property
     def text(self) -> str:
@@ -82,17 +95,30 @@ class ExactCache:
 
     def __init__(self) -> None:
         self._store: dict[str, str] = {}
+        # One shared instance backs every request thread (FastAPI runs sync endpoints in a
+        # threadpool); guard the dict so concurrent get/set never race.
+        self._lock = threading.Lock()
 
     def get(self, key: CacheKey) -> str | None:
-        return self._store.get(key.exact)
+        with self._lock:
+            return self._store.get(key.exact)
 
     def set(self, key: CacheKey, value: str) -> None:
-        self._store[key.exact] = value
+        with self._lock:
+            self._store[key.exact] = value
 
 
 # --------------------------------------------------------------------------- L2 embeddings
 class Embedder(Protocol):
+    # A short, stable id of the embedding space; the vector retriever keys its persisted
+    # cache on it so swapping models never mixes incompatible vectors.
+    model_id: str
+
     def embed(self, text: str) -> list[float]: ...
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch. Neural backends override this for batched throughput."""
+        ...
 
 
 def _tokenize(text: str) -> list[str]:
@@ -116,6 +142,7 @@ class HashingEmbedder:
 
     def __init__(self, dim: int = 1024) -> None:
         self.dim = dim
+        self.model_id = f"hashing-{dim}"
 
     def embed(self, text: str) -> list[float]:
         vec = [0.0] * self.dim
@@ -123,6 +150,9 @@ class HashingEmbedder:
             h = int(hashlib.md5(tok.encode()).hexdigest(), 16)
             vec[h % self.dim] += 1.0
         return vec
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed(text) for text in texts]
 
 
 class SemanticCache:
@@ -138,12 +168,17 @@ class SemanticCache:
         self.embedder = embedder or HashingEmbedder()
         self.threshold = threshold
         self._entries: list[tuple[str, list[float], str]] = []  # (scope, vector, value)
+        # The index is shared across request threads; guard mutation so a concurrent set() can't
+        # grow the list mid-scan (which would raise "list changed size during iteration").
+        self._lock = threading.Lock()
 
     def get(self, key: CacheKey) -> str | None:
-        q = self.embedder.embed(key.text)
+        q = self.embedder.embed(key.text)  # embed outside the lock — a neural backend is slow
+        with self._lock:
+            entries = tuple(self._entries)  # cheap snapshot of references; scan it lock-free
         best_sim, best_val = 0.0, None
-        for scope, vec, val in self._entries:
-            if scope != key.scope:  # only compare within identical tier+context
+        for scope, vec, val in entries:
+            if scope != key.scope:  # only compare within identical project+model+tier+context
                 continue
             sim = cosine(q, vec)
             if sim > best_sim:
@@ -151,7 +186,9 @@ class SemanticCache:
         return best_val if best_sim >= self.threshold else None
 
     def set(self, key: CacheKey, value: str) -> None:
-        self._entries.append((key.scope, self.embedder.embed(key.text), value))
+        vec = self.embedder.embed(key.text)  # embed outside the lock
+        with self._lock:
+            self._entries.append((key.scope, vec, value))
 
 
 class LayeredCache:
@@ -195,6 +232,7 @@ class RedisCache:
         self.url = url
         self.prefix = prefix
         self.ttl_seconds = ttl_seconds
+        self._client_lock = threading.Lock()
 
     def get(self, key: CacheKey) -> str | None:
         value = self._conn().get(self.prefix + key.exact)
@@ -210,9 +248,11 @@ class RedisCache:
 
     def _conn(self):
         if self._client is None:
-            import redis
+            with self._client_lock:
+                if self._client is None:  # double-checked: only one thread builds the client
+                    import redis
 
-            self._client = redis.Redis.from_url(self.url, decode_responses=True)
+                    self._client = redis.Redis.from_url(self.url, decode_responses=True)
         return self._client
 
 
@@ -220,24 +260,29 @@ def build_cache_backend(
     mode: str,
     *,
     semantic_threshold: float = 0.9,
+    embedder: Embedder | None = None,
     redis_url: str = "redis://127.0.0.1:6379/0",
     redis_client: Any | None = None,
     redis_ttl_seconds: int | None = None,
 ) -> CacheBackend:
-    """Factory for the cache backends used by benchmark and service assembly."""
+    """Factory for the cache backends used by benchmark and service assembly.
+
+    ``embedder`` backs the L2 semantic layer. Pass a real multilingual model (bge-m3) so the
+    paraphrase cache works for non-Latin content — the default ``HashingEmbedder`` tokenizes
+    ``[a-z0-9]+`` and so produces an empty vector (never a hit) for CJK text."""
     if mode == "off":
         return NoOpCache()
     if mode == "exact":
         return ExactCache()
     if mode == "exact+semantic":
-        return LayeredCache([ExactCache(), SemanticCache(threshold=semantic_threshold)])
+        return LayeredCache([ExactCache(), SemanticCache(embedder, threshold=semantic_threshold)])
     if mode == "redis":
         return RedisCache(redis_client, url=redis_url, ttl_seconds=redis_ttl_seconds)
     if mode == "redis+semantic":
         return LayeredCache(
             [
                 RedisCache(redis_client, url=redis_url, ttl_seconds=redis_ttl_seconds),
-                SemanticCache(threshold=semantic_threshold),
+                SemanticCache(embedder, threshold=semantic_threshold),
             ]
         )
     raise ValueError(f"unknown cache mode: {mode!r}")

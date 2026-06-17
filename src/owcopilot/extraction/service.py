@@ -8,15 +8,16 @@ it is submitted to the review queue and lands only when a human accepts it.
 from __future__ import annotations
 
 import hashlib
-import io
 import json
+import math
 import re
-import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from xml.etree import ElementTree
 
+from ..content.documents import binary_document_text
+from ..content.encoding import decode_bytes
+from ..content.lang import LanguageProfile, detect_language, language_directive
 from ..content.models import (
     ContentBundle,
     Entity,
@@ -29,7 +30,21 @@ from ..content.models import (
     Term,
 )
 from ..llm.gateway import LLMGateway
-from .models import ExtractionDraft, ExtractionGap, PlotBeat
+from ..llm.jsonio import extract_json_object
+from ..util import unique_id
+from .faithfulness import check_deterministic, llm_unsupported
+from .models import CoverageReport, ExtractionDraft, ExtractionGap, PlotBeat
+
+# Coverage budget: the WHOLE document is always read, but in at most this many model calls.
+# When the natural fine-grained chunking would exceed the budget, chunk size is enlarged (up
+# to MAX_CHUNK_CHARS) so coverage stays 100% while cost stays bounded. Only a document larger
+# than BUDGET * MAX_CHUNK_CHARS (~768K chars — longer than most single novels) is read
+# partially, and the uncovered tail is then reported honestly. These are server-side constants
+# on purpose: choosing a coverage/cost trade-off is the system's responsibility, not the user's.
+_COVERAGE_BUDGET_CHUNKS = 48
+_BASE_CHUNK_CHARS = 3500
+_MAX_CHUNK_CHARS = 16000
+_CHUNK_OVERLAP_CHARS = 200
 
 _KIND_PREFIX = {
     EntityType.NPC: "npc",
@@ -43,16 +58,36 @@ _SYSTEM_PROMPT = (
     "ONE chunk of a manuscript (novel, script or design notes). Return ONE JSON object only, "
     "no markdown fences. Keys: characters, locations, factions, items, terms "
     "(each a list of {name, description, aliases?, traits?}), relations "
-    "(list of {source, target, kind} using names), beats "
+    "(list of {source, target, kind, description?} using names, where description says HOW or "
+    "WHY they are related), beats "
     "(list of {title, summary, location?, participants?} describing plot beats in order). "
-    "Only record facts present in the chunk; leave description empty when the chunk gives "
-    "none. Keep names exactly as written in the manuscript."
+    "List EVERY alternate name a character is called in the chunk under aliases, so the same "
+    "person is not recorded twice. Only record facts present in the chunk; leave description "
+    "empty when the chunk gives none. Keep names exactly as written in the manuscript."
 )
 
 _FILL_SYSTEM_PROMPT = (
     "You complete missing fields for game-world content extracted from a manuscript. "
     'Return ONE JSON object: {"suggestion": "..."}. Write 1-2 sentences in the '
     "manuscript's language, consistent with the provided context, no new proper nouns."
+)
+
+# Appended on a retry after a chunk's reply could not be parsed as JSON — the single most common
+# real-model failure (a prose preamble or trailing sentence around the object).
+_STRICT_JSON_RETRY = (
+    "\n\nIMPORTANT: return ONLY the JSON object, with no preamble, explanation or markdown fences."
+)
+
+# Sentinel marking a gleaning (second) pass over a chunk, so the deterministic offline provider can
+# recognise it and return nothing (it found everything on pass one); real models use it to add what
+# they missed. This is GraphRAG's "gleaning" idea: one extra pass recovers entities a single pass
+# overlooks, at the cost of one more model call per chunk.
+EXTRACTION_GLEAN_MARKER = "[[GLEAN_PASS]]"
+_GLEAN_INSTRUCTION = (
+    "\n\nThis is a SECOND pass over the SAME chunk. The user lists the names already extracted. "
+    "Re-read carefully and return ONLY entities/relations/terms/beats that were MISSED — the same "
+    "JSON object shape and keys, empty lists when nothing was missed. Do not repeat known names. "
+    + EXTRACTION_GLEAN_MARKER
 )
 
 
@@ -67,31 +102,122 @@ class ExtractionService:
         title: str,
         text: str,
         source_kind: str = "文稿",
-        max_chunks: int = 12,
+        glean_rounds: int = 1,
+        verify_faithfulness: bool = False,
         progress: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> ExtractionDraft:
+        """Distill a manuscript of any length into a reviewable draft.
+
+        The whole document is read — short notes at fine granularity, a full novel by
+        coarsening chunk size within a bounded call budget (see :func:`plan_coverage`). The
+        detected language drives a directive so the model answers in the source language and
+        keeps proper nouns verbatim, even in a mixed-language manuscript. Nothing about input
+        length or language is asked of the creator.
+
+        ``glean_rounds`` adds up to N extra recovery passes per chunk (GraphRAG-style gleaning)
+        that pick up entities a single pass overlooks; each pass is one more model call.
+        """
         clean = text.strip()
         if not clean:
             raise ValueError("manuscript text is empty")
-        chunks = chunk_text(clean)[:max_chunks]
+        chunks, coverage = plan_coverage(clean)
+        directive = language_directive(detect_language(clean))
+        system = f"{_SYSTEM_PROMPT}\n\n{directive}"
         merged = _MergedFacts()
+        failed: list[int] = []
         for index, chunk in enumerate(chunks):
             if progress is not None:
                 progress("chunk", {"index": index + 1, "total": len(chunks)})
-            raw = self.gateway.complete(
-                task="extract_lore",
-                system=_SYSTEM_PROMPT,
-                user=f"[chunk {index + 1}/{len(chunks)}] 来源：{title}（{source_kind}）\n\n{chunk}",
+            payload = self._extract_chunk(system, title, source_kind, chunk, index, len(chunks))
+            if payload is None:
+                # One unparseable chunk must not lose the other 47. Skip it, record it, and report
+                # it honestly below — never crash the whole run, never drop it in silence.
+                failed.append(index + 1)
+                continue
+            merged.add(payload, chunk_order=index)
+            self._glean_chunk(
+                system, title, source_kind, chunk, index, len(chunks), payload, merged, glean_rounds
             )
-            merged.add(parse_extraction_payload(raw), chunk_order=index)
+        if failed:
+            _record_failed_chunks(coverage, failed)
+        merged.resolve_aliases()
         draft_id = "extract_" + hashlib.sha256(f"{title}\n{clean}".encode()).hexdigest()[:12]
-        return _draft_from_merged(
+        draft = _draft_from_merged(
             merged,
             draft_id=draft_id,
             title=title,
             source_kind=source_kind,
             existing=self.bundle,
+            source_text=clean,
+            coverage=coverage,
         )
+        # optional RAGAS-style tier: NLI-judge each structured relation claim against the source,
+        # catching invented links the deterministic co-occurrence pass let through. Opt-in (one
+        # extra model call); a parse failure never fabricates a flag.
+        if verify_faithfulness:
+            if progress is not None:
+                progress("verify", {"claims": len(draft.bundle.relations)})
+            extra = llm_unsupported(
+                draft.bundle,
+                clean,
+                self.gateway,
+                already_flagged={item.ref for item in draft.unsupported},
+            )
+            if extra:
+                draft.unsupported.extend(extra)
+                draft.stats["unsupported"] = len(draft.unsupported)
+        return draft
+
+    def _extract_chunk(
+        self, system: str, title: str, source_kind: str, chunk: str, index: int, total: int
+    ) -> dict[str, Any] | None:
+        """Extract one chunk, retrying once with a stricter JSON directive before giving up.
+
+        Returns ``None`` when the model's reply still has no usable JSON after the retry, so the
+        caller can skip-and-report rather than crash the whole manuscript run."""
+        user = f"[chunk {index + 1}/{total}] 来源：{title}（{source_kind}）\n\n{chunk}"
+        for attempt_system in (system, system + _STRICT_JSON_RETRY):
+            raw = self.gateway.complete(task="extract_lore", system=attempt_system, user=user)
+            try:
+                return parse_extraction_payload(raw)
+            except ValueError:
+                continue
+        return None
+
+    def _glean_chunk(
+        self,
+        system: str,
+        title: str,
+        source_kind: str,
+        chunk: str,
+        index: int,
+        total: int,
+        first_pass: dict[str, Any],
+        merged: _MergedFacts,
+        rounds: int,
+    ) -> None:
+        """Run up to ``rounds`` recovery passes, merging only genuinely new findings.
+
+        Stops early once a pass surfaces no new names (diminishing returns). Best-effort: a glean
+        pass that fails to parse is simply skipped — the first pass already landed."""
+        glean_system = system + _GLEAN_INSTRUCTION
+        seen = _payload_names(first_pass)
+        for _ in range(max(0, rounds)):
+            known = "、".join(sorted(seen)) or "（无）"
+            user = (
+                f"[chunk {index + 1}/{total}] 来源：{title}（{source_kind}）\n"
+                f"已提取：{known}\n\n{chunk}"
+            )
+            raw = self.gateway.complete(task="extract_lore", system=glean_system, user=user)
+            try:
+                extra = parse_extraction_payload(raw)
+            except ValueError:
+                return
+            new_names = _payload_names(extra) - seen
+            if not new_names:
+                return
+            merged.add(extra, chunk_order=index)
+            seen |= new_names
 
     def fill_gaps(
         self,
@@ -166,12 +292,12 @@ def quests_from_beats(draft: ExtractionDraft) -> dict[str, Quest]:
 
 
 def decode_document_bytes(data: bytes, filename: str) -> str:
-    """Decode an uploaded manuscript: txt/md/json/csv plus .docx (stdlib-only)."""
-    suffix = Path(filename).suffix.lower()
-    if suffix == ".docx":
-        return _docx_text(data)
-    text = _decode_text(data)
-    if suffix == ".json":
+    """Decode an uploaded manuscript: txt/md/json/csv plus .docx/.pdf/.epub."""
+    binary = binary_document_text(data, filename)
+    if binary is not None:
+        return binary
+    text = decode_bytes(data)
+    if Path(filename).suffix.lower() == ".json":
         try:
             return json.dumps(json.loads(text), ensure_ascii=False, indent=2)
         except json.JSONDecodeError:
@@ -180,13 +306,124 @@ def decode_document_bytes(data: bytes, filename: str) -> str:
 
 
 def parse_extraction_payload(raw: str) -> dict[str, Any]:
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text[text.find("{") : text.rfind("}") + 1]
-    payload = json.loads(text)
-    if not isinstance(payload, dict):
-        raise ValueError("extraction provider returned non-object JSON")
-    return payload
+    """Parse one chunk's extraction JSON, tolerating prose and markdown fences.
+
+    Real models prepend "Here is the extraction:" or append a trailing sentence; a strict
+    ``json.loads`` crashes on those, and a crash here would abort the whole multi-chunk run.
+    ``extract_json_object`` pulls the first balanced object out instead, raising ``ValueError``
+    only when there is genuinely no JSON — which the caller handles per chunk."""
+    return extract_json_object(raw)
+
+
+def plan_coverage(
+    text: str,
+    *,
+    budget_chunks: int = _COVERAGE_BUDGET_CHUNKS,
+    base_chunk_chars: int = _BASE_CHUNK_CHARS,
+    max_chunk_chars: int = _MAX_CHUNK_CHARS,
+    overlap_chars: int = _CHUNK_OVERLAP_CHARS,
+) -> tuple[list[str], CoverageReport]:
+    """Plan how to read ``text`` completely within a bounded number of model calls.
+
+    Strategy, in order:
+      1. Chunk at fine granularity (``base_chunk_chars``). If that fits the call budget, done —
+         coverage is "full".
+      2. Otherwise enlarge chunk size just enough to fit the whole document in ``budget_chunks``
+         chunks (capped at ``max_chunk_chars``) — coverage is still 100%, granularity "coarsened".
+      3. Only if the document is larger than ``budget_chunks * max_chunk_chars`` do we read the
+         head and report the rest as uncovered — granularity "partial", never silent.
+
+    ``chunk_text`` packs every paragraph into some chunk, so a non-truncated plan genuinely
+    covers the whole source; the report states which case applies and in what language.
+    """
+    clean = text.strip()
+    total = len(clean)
+    profile = detect_language(clean)
+    chunks = chunk_text(clean, max_chars=base_chunk_chars, overlap_chars=overlap_chars)
+    chunk_chars = base_chunk_chars
+    granularity = "full"
+
+    if len(chunks) > budget_chunks:
+        # Enlarge chunk size until the whole document fits in `budget_chunks` chunks. Paragraph
+        # packing leaves slack (a chunk stops before exceeding its cap), so a single proportional
+        # estimate can fall short — grow iteratively until it fits or we hit max_chunk_chars.
+        granularity = "coarsened"
+        while len(chunks) > budget_chunks and chunk_chars < max_chunk_chars:
+            scale = len(chunks) / budget_chunks
+            chunk_chars = min(
+                max_chunk_chars, max(chunk_chars + 500, math.ceil(chunk_chars * scale))
+            )
+            chunks = chunk_text(clean, max_chars=chunk_chars, overlap_chars=overlap_chars)
+
+    if len(chunks) > budget_chunks:
+        # The document exceeds the whole budget. Read the head and be honest about the tail.
+        kept = chunks[:budget_chunks]
+        unique = sum(len(c) for c in kept) - overlap_chars * max(0, len(kept) - 1)
+        covered = max(0, min(total, unique))
+        report = CoverageReport(
+            total_chars=total,
+            covered_chars=covered,
+            chunk_count=len(kept),
+            chunk_chars=chunk_chars,
+            granularity="partial",
+            language=profile.label,
+            languages=profile.labels,
+            mixed=profile.mixed,
+            note=_coverage_note("partial", total, covered, len(kept), profile),
+        )
+        return kept, report
+
+    report = CoverageReport(
+        total_chars=total,
+        covered_chars=total,
+        chunk_count=len(chunks),
+        chunk_chars=chunk_chars,
+        granularity=granularity,
+        language=profile.label,
+        languages=profile.labels,
+        mixed=profile.mixed,
+        note=_coverage_note(granularity, total, total, len(chunks), profile),
+    )
+    return chunks, report
+
+
+def _payload_names(payload: dict[str, Any]) -> set[str]:
+    """Distinct entity/term names in one extraction payload (for gleaning dedup)."""
+    names: set[str] = set()
+    for key in ("characters", "locations", "factions", "items", "terms"):
+        for item in _list(payload.get(key)):
+            name = str(_dict(item).get("name") or _dict(item).get("canonical") or "").strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def _record_failed_chunks(coverage: CoverageReport, failed: list[int]) -> None:
+    """Note chunks whose reply could not be parsed even after a retry — surfaced, not hidden."""
+    coverage.failed_chunks = failed
+    coverage.note = (
+        f"{coverage.note} 其中 {len(failed)} 个分块的模型返回无法解析、已跳过"
+        f"（第 {'、'.join(str(i) for i in failed)} 块），可重试提炼这些段落。"
+    )
+
+
+def _coverage_note(
+    granularity: str, total: int, covered: int, chunks: int, profile: LanguageProfile
+) -> str:
+    lang = (
+        f"识别为{profile.label}（多语言混排，专有名词保留原文）"
+        if profile.mixed
+        else f"识别为{profile.label}"
+    )
+    if granularity == "partial":
+        pct = round(100 * covered / total) if total else 0
+        return (
+            f"文档较长，本次完整读取了前约 {covered:,} 字（约 {pct}%，共 {chunks} 块），"
+            f"其余部分未在本次提炼——可对剩余章节另行提炼。{lang}。"
+        )
+    if granularity == "coarsened":
+        return f"长文已整篇覆盖，自动放大分块粒度以控制成本（{total:,} 字 / {chunks} 块）。{lang}。"
+    return f"全文已整篇覆盖（{total:,} 字 / {chunks} 块）。{lang}。"
 
 
 def chunk_text(text: str, *, max_chars: int = 3500, overlap_chars: int = 200) -> list[str]:
@@ -257,7 +494,14 @@ class _MergedFacts:
             target = str(raw.get("target") or "").strip()
             rel_kind = str(raw.get("kind") or "").strip() or "相关"
             if source and target and source != target:
-                self.relations.append({"source": source, "target": target, "kind": rel_kind})
+                self.relations.append(
+                    {
+                        "source": source,
+                        "target": target,
+                        "kind": rel_kind,
+                        "description": str(raw.get("description") or "").strip(),
+                    }
+                )
         for item in _list(payload.get("beats")):
             raw = _dict(item)
             title = str(raw.get("title") or "").strip()
@@ -273,6 +517,26 @@ class _MergedFacts:
                 }
             )
 
+    def resolve_aliases(self) -> None:
+        """Merge entities the model flagged as the same person via aliases (李白 ≡ 李太白).
+
+        Without this, "李白" and "李太白" become two entities and a human has to spot and merge
+        them by hand — pushing a check onto the reviewer that the machine can do. We only merge
+        when the model itself asserted the alias link (one slot's alias exactly equals another
+        slot's name, same kind), so this stays deterministic and conservative, never a fuzzy guess.
+        Relation and beat name references are remapped onto the surviving canonical name."""
+        name_map: dict[str, str] = {}
+        for slots in self.by_kind.values():
+            name_map.update(_merge_aliased_slots(slots))
+        for relation in self.relations:
+            relation["source"] = name_map.get(relation["source"], relation["source"])
+            relation["target"] = name_map.get(relation["target"], relation["target"])
+        self.relations = [r for r in self.relations if r["source"] != r["target"]]
+        for beat in self.beats:
+            if beat["location"]:
+                beat["location"] = name_map.get(beat["location"], beat["location"])
+            beat["participants"] = [name_map.get(p, p) for p in beat["participants"]]
+
 
 def _draft_from_merged(
     merged: _MergedFacts,
@@ -281,6 +545,8 @@ def _draft_from_merged(
     title: str,
     source_kind: str,
     existing: ContentBundle,
+    source_text: str = "",
+    coverage: CoverageReport | None = None,
 ) -> ExtractionDraft:
     bundle = ContentBundle()
     name_to_id: dict[str, str] = {}
@@ -292,6 +558,9 @@ def _draft_from_merged(
         for name, slot in facts.items():
             entity_id = _unique_id(prefix, name, used)
             name_to_id[name] = entity_id
+            # Aliases resolve to the same entity, so a relation naming an alias still wires up.
+            for alias in slot["aliases"]:
+                name_to_id.setdefault(str(alias), entity_id)
             bundle.entities[entity_id] = Entity(
                 id=entity_id,
                 name=name,
@@ -316,7 +585,7 @@ def _draft_from_merged(
         )
 
     unresolved: list[dict[str, str]] = []
-    seen_relations: set[tuple[str, str, str]] = set()
+    relation_by_key: dict[tuple[str, str, str], Relation] = {}
     for relation in merged.relations:
         source_id = name_to_id.get(relation["source"])
         target_id = name_to_id.get(relation["target"])
@@ -324,19 +593,26 @@ def _draft_from_merged(
             unresolved.append(relation)
             continue
         key = (source_id, relation["kind"], target_id)
-        if key in seen_relations:
+        description = relation.get("description", "")
+        existing_rel = relation_by_key.get(key)
+        if existing_rel is not None:
+            # Same edge seen again: keep the more informative "how/why" description.
+            if len(description) > len(existing_rel.metadata.get("description", "")):
+                existing_rel.metadata["description"] = description
             continue
-        seen_relations.add(key)
-        bundle.relations.append(
-            Relation(
-                source=source_id,
-                target=target_id,
-                kind=relation["kind"],
-                metadata=dict(meta),
-                origin=Origin.AI_DRAFT,
-                review_status=ReviewStatus.PENDING_REVIEW,
-            )
+        rel_meta = dict(meta)
+        if description:
+            rel_meta["description"] = description
+        new_rel = Relation(
+            source=source_id,
+            target=target_id,
+            kind=relation["kind"],
+            metadata=rel_meta,
+            origin=Origin.AI_DRAFT,
+            review_status=ReviewStatus.PENDING_REVIEW,
         )
+        relation_by_key[key] = new_rel
+        bundle.relations.append(new_rel)
 
     beats = [
         PlotBeat(
@@ -371,6 +647,8 @@ def _draft_from_merged(
                 )
             )
 
+    unsupported = check_deterministic(bundle, source_text)
+
     summary = (
         f"从《{title}》提炼：角色 {len(merged.by_kind[EntityType.NPC])}、"
         f"地点 {len(merged.by_kind[EntityType.LOCATION])}、"
@@ -386,12 +664,15 @@ def _draft_from_merged(
         plot_beats=beats,
         gaps=gaps,
         unresolved_relations=unresolved,
+        unsupported=unsupported,
+        coverage=coverage,
         stats={
             "entities": len(bundle.entities),
             "relations": len(bundle.relations),
             "terms": len(bundle.terms),
             "beats": len(beats),
             "gaps": len(gaps),
+            "unsupported": len(unsupported),
         },
     )
 
@@ -425,49 +706,8 @@ def _parse_suggestion(raw: str) -> str:
     return text[:200]
 
 
-def _docx_text(data: bytes) -> str:
-    """Extract paragraph text from a .docx (a zip of XML) without extra dependencies."""
-    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            xml = archive.read("word/document.xml")
-    except (zipfile.BadZipFile, KeyError) as e:
-        raise ValueError("not a valid .docx file") from e
-    root = ElementTree.fromstring(xml)
-    paragraphs: list[str] = []
-    for paragraph in root.iter(f"{ns}p"):
-        runs = [node.text or "" for node in paragraph.iter(f"{ns}t")]
-        text = "".join(runs).strip()
-        if text:
-            paragraphs.append(text)
-    return "\n\n".join(paragraphs)
-
-
-def _decode_text(data: bytes) -> str:
-    for encoding in ("utf-8-sig", "utf-8", "gb18030", "cp1252"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
-
-
 def _unique_id(prefix: str, raw: str, used: set[str]) -> str:
-    stem = _slug(raw)
-    base = stem if stem.startswith(f"{prefix}_") else f"{prefix}_{stem or 'item'}"
-    candidate = base
-    index = 2
-    while candidate in used:
-        candidate = f"{base}_{index}"
-        index += 1
-    used.add(candidate)
-    return candidate
-
-
-def _slug(value: str) -> str:
-    text = value.strip().lower()
-    text = re.sub(r"[^a-z0-9㐀-鿿]+", "_", text)
-    return text.strip("_")
+    return unique_id(prefix, raw, used)
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -489,3 +729,47 @@ def _merge_lists(current: list[Any], incoming: list[Any]) -> list[Any]:
         if text and text not in merged:
             merged.append(text)
     return merged
+
+
+def _merge_aliased_slots(slots: dict[str, dict[str, Any]]) -> dict[str, str]:
+    """Union slots linked by an asserted alias; merge each group into one canonical slot.
+
+    Returns a map of merged-away name -> surviving canonical name. Mutates ``slots`` in place."""
+    names = list(slots)
+    name_set = set(names)
+    parent = {name: name for name in names}
+
+    def find(name: str) -> str:
+        while parent[name] != name:
+            parent[name] = parent[parent[name]]
+            name = parent[name]
+        return name
+
+    for name in names:
+        for alias in slots[name]["aliases"]:
+            alias_name = str(alias).strip()
+            if alias_name in name_set and alias_name != name:
+                parent[find(alias_name)] = find(name)
+
+    groups: dict[str, list[str]] = {}
+    for name in names:
+        groups.setdefault(find(name), []).append(name)
+
+    name_map: dict[str, str] = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        # Canonical = the most informative slot (longest description), then shortest/earliest name.
+        canonical = sorted(members, key=lambda n: (-len(slots[n]["description"]), len(n), n))[0]
+        survivor = slots[canonical]
+        for member in members:
+            if member == canonical:
+                continue
+            other = slots.pop(member)
+            if len(other["description"]) > len(survivor["description"]):
+                survivor["description"] = other["description"]
+            survivor["aliases"] = _merge_lists(survivor["aliases"], [*other["aliases"], member])
+            survivor["traits"] = _merge_lists(survivor["traits"], other["traits"])
+            name_map[member] = canonical
+        survivor["aliases"] = [a for a in survivor["aliases"] if a != canonical]
+    return name_map

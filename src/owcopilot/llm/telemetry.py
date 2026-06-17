@@ -15,14 +15,49 @@ page is authoritative — do not hard-code long-term prices.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
-# tier -> (cache_hit_input, cache_miss_input, output)  USD per 1M tokens. ILLUSTRATIVE.
+# tier -> (cache_hit_input, cache_miss_input, output)  USD per 1M tokens. ILLUSTRATIVE DEFAULTS.
+# A studio tracking a real budget overrides a tier via env, e.g.
+# ``OWCOPILOT_PRICE_CHEAP="0.027,0.27,1.10"`` (hit,miss,out per 1M) — so the cost stops being an
+# estimate without us hard-coding volatile vendor prices into the repo.
 PRICES: dict[str, tuple[float, float, float]] = {
     "cheap": (0.006, 0.30, 1.20),  # e.g. deepseek-v4-flash class (hit ~= 1/50 of miss)
     "frontier": (0.10, 5.00, 25.00),  # e.g. deepseek-v4-pro / Opus / GPT-4 class
     "mock": (0.00, 0.00, 0.00),
 }
+
+
+def _parse_tier_prices(tier: str) -> tuple[float, float, float] | None:
+    """The env-configured (hit, miss, out) price for ``tier``, or None when it is unset/malformed —
+    in which case the caller falls back to the illustrative default and the figure is a ballpark."""
+    raw = os.getenv(f"OWCOPILOT_PRICE_{tier.upper()}")
+    if not raw:
+        return None
+    parts = raw.split(",")
+    if len(parts) != 3:
+        return None
+    try:
+        return (float(parts[0]), float(parts[1]), float(parts[2]))
+    except ValueError:
+        return None  # malformed override → fall back to the illustrative default
+
+
+def _tier_prices(tier: str) -> tuple[float, float, float]:
+    return _parse_tier_prices(tier) or PRICES.get(tier, (0.0, 0.0, 0.0))
+
+
+def tier_price_is_configured(tier: str) -> bool:
+    """True only when this tier's price is explicitly set (and valid) via env — the prerequisite for
+    its cost to be real rather than a ballpark from illustrative defaults."""
+    return _parse_tier_prices(tier) is not None
+
+
+def prices_are_configured() -> bool:
+    """True once *any* tier price is set via env. Note: a real (non-estimate) total also requires
+    every tier actually used to be configured — see ``TelemetryCollector.cost_is_estimate``."""
+    return any(tier_price_is_configured(tier) for tier in PRICES)
 
 
 @dataclass
@@ -37,7 +72,7 @@ class CallRecord:
 
     @property
     def cost_usd(self) -> float:
-        hit_price, miss_price, out_price = PRICES.get(self.tier, (0.0, 0.0, 0.0))
+        hit_price, miss_price, out_price = _tier_prices(self.tier)
         hit = min(max(self.cached_input_tokens, 0), self.input_tokens)
         miss = self.input_tokens - hit
         return (hit * hit_price + miss * miss_price + self.output_tokens * out_price) / 1_000_000
@@ -88,6 +123,22 @@ class TelemetryCollector:
             (sum(r.latency_ms for r in self.records) / len(self.records)) if self.records else 0.0
         )
 
+    @property
+    def cost_is_estimate(self) -> bool:
+        """True if the total cost is a ballpark. It is real only when EVERY tier that actually
+        billed (a non-cache-hit call that consumed tokens) has an explicitly configured price — so a
+        partially-configured table (e.g. only `cheap` set) still flags a `frontier` call as an
+        estimate, and a $0 run (no billable calls / all client-cache hits) is exact, not a guess.
+        """
+        for r in self.records:
+            if r.cache_hit:
+                continue  # client-cache hit: $0, contributes nothing to the cost figure
+            if r.input_tokens == 0 and r.output_tokens == 0:
+                continue  # no tokens billed
+            if not tier_price_is_configured(r.tier):
+                return True
+        return False
+
     def summary(self) -> dict:
         return {
             "calls": len(self.records),
@@ -97,6 +148,10 @@ class TelemetryCollector:
             "provider_cache_hit_token_share": round(self.provider_cache_hit_token_share, 3),
             "mean_latency_ms": round(self.mean_latency_ms, 3),
             "total_cost_usd": round(self.total_cost, 6),
+            # the reported cost is an estimate from illustrative tier prices unless a studio has set
+            # the real rate for every tier this run actually used (OWCOPILOT_PRICE_*) — the UI flags
+            # it so nobody mistakes the ballpark figure for an invoice.
+            "cost_is_estimate": self.cost_is_estimate,
         }
 
     def render_table(self) -> str:

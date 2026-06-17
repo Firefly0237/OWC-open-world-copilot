@@ -11,6 +11,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ..content.documents import binary_document_text
+from ..content.encoding import decode_bytes
+from ..content.injection import scan_for_injection
+from ..content.lang import detect_language
+from ..util import slugify
 from .models import ReferenceChunk, ReferenceIngestResult, ReferenceSource
 
 
@@ -35,6 +40,7 @@ class ReferenceStore:
             raise ValueError("reference text is empty")
         source_hash = hashlib.sha256(clean.encode("utf-8")).hexdigest()
         source_id = _unique_source_id(self.sources_dir, title, source_hash)
+        profile = detect_language(clean)
         source = ReferenceSource(
             id=source_id,
             title=title.strip() or original_filename or source_id,
@@ -43,19 +49,31 @@ class ReferenceStore:
             allowed_uses=allowed_uses or ["inspiration"],
             text_hash=source_hash,
             created_at=datetime.now(UTC).isoformat(),
+            language=profile.label,
+            languages=profile.labels,
+            char_count=len(clean),
             metadata=metadata or {},
         )
         self.sources_dir.mkdir(parents=True, exist_ok=True)
         self.raw_dir.mkdir(parents=True, exist_ok=True)
+        (self.raw_dir / f"{source.id}.txt").write_text(clean + "\n", encoding="utf-8")
+        # chunk_count records how many retrievable chunks a (possibly book-length) source produced,
+        # so the UI can show that a whole novel was indexed rather than silently capped.
+        chunks = self.chunks_for_source(source)
+        source.chunk_count = len(chunks)
+        # Scan untrusted reference text for prompt-injection before it can reach a grounding prompt.
+        flagged = [chunk.id for chunk in chunks if scan_for_injection(chunk.body)]
+        if flagged:
+            source.metadata["injection_flagged"] = "true"
         (self.sources_dir / f"{source.id}.json").write_text(
             json.dumps(source.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        (self.raw_dir / f"{source.id}.txt").write_text(clean + "\n", encoding="utf-8")
         return ReferenceIngestResult(
             source=source,
-            chunks=self.chunks_for_source(source),
-            indexed_count=len(self.chunks_for_source(source)),
+            chunks=chunks,
+            indexed_count=len(chunks),
+            injection_flagged_chunks=flagged,
         )
 
     def list_sources(self) -> list[ReferenceSource]:
@@ -84,7 +102,9 @@ class ReferenceStore:
         for index, body in enumerate(_chunk_text(text)):
             chunks.append(
                 ReferenceChunk(
-                    id=f"{source.id}_chunk_{index + 1:03d}",
+                    # 5-digit zero-pad so chunk ids still sort monotonically for a whole novel
+                    # (a 2M-char book is ~1100 chunks, well past the old 3-digit width).
+                    id=f"{source.id}_chunk_{index + 1:05d}",
                     source_id=source.id,
                     chunk_index=index,
                     title=f"{source.title} #{index + 1}",
@@ -99,8 +119,11 @@ class ReferenceStore:
 
 
 def decode_reference_bytes(data: bytes, filename: str) -> str:
+    binary = binary_document_text(data, filename)
+    if binary is not None:
+        return binary
     suffix = Path(filename).suffix.lower()
-    text = _decode_text(data)
+    text = decode_bytes(data)
     if suffix == ".json":
         try:
             parsed = json.loads(text)
@@ -114,15 +137,6 @@ def decode_reference_bytes(data: bytes, filename: str) -> str:
         except csv.Error:
             return text
     return text
-
-
-def _decode_text(data: bytes) -> str:
-    for encoding in ("utf-8-sig", "utf-8", "gb18030", "cp1252"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
 
 
 def _chunk_text(text: str, *, max_chars: int = 1800, overlap_chars: int = 160) -> list[str]:
@@ -156,6 +170,4 @@ def _unique_source_id(path: Path, title: str, text_hash: str) -> str:
 
 
 def _slug(value: str) -> str:
-    text = value.strip().lower()
-    text = re.sub(r"[^a-z0-9\u3400-\u9fff]+", "_", text)
-    return text.strip("_")
+    return slugify(value)

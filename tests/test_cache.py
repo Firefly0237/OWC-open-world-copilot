@@ -133,6 +133,40 @@ def test_redis_cache_round_trips_via_fakeredis():
     assert cache.get(key) == "QUEST"
 
 
+def test_hashing_embedder_semantic_cache_is_dead_for_cjk():
+    # documents the gap that motivated injecting a real embedder: the hashing embedder tokenizes
+    # [a-z0-9]+, so two (even identical-meaning) Chinese requests embed to empty vectors and never
+    # semantically match — L2 is useless for CJK content with the default stub.
+    c = SemanticCache(HashingEmbedder(), threshold=0.85)
+    c.set(CacheKey("cheap", "SYS", "护送商队穿过雾脊山道"), "QUEST")
+    # a would-be paraphrase still misses — CJK never reaches the bag-of-words vector
+    assert c.get(CacheKey("cheap", "SYS", "护送商队走雾脊山道")) is None
+
+
+class _StubSemanticEmbedder:
+    """A real-model stand-in (model_id 'st:*') that DOES see CJK: same gambling/escort topic →
+    same axis, so a Chinese paraphrase lands a semantic hit the hashing stub would miss."""
+
+    model_id = "st:stub"
+
+    def embed(self, text: str) -> list[float]:
+        return self.embed_many([text])[0]
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0] if "护送商队" in t else [0.0, 1.0] for t in texts]
+
+
+def test_semantic_cache_with_real_embedder_hits_cjk_paraphrase():
+    cache = build_cache_backend(
+        "exact+semantic", embedder=_StubSemanticEmbedder(), semantic_threshold=0.9
+    )
+    cache.set(CacheKey("cheap", "SYS", "护送商队穿过雾脊山道"), "QUEST")
+    # different wording, same meaning, same grounding → now a hit (L2 sees CJK)
+    assert cache.get(CacheKey("cheap", "SYS", "护送商队走另一条路")) == "QUEST"
+    # different topic, same grounding → still a miss
+    assert cache.get(CacheKey("cheap", "SYS", "米拉在河湾治疗村民")) is None
+
+
 def test_build_cache_backend_supports_redis_plus_semantic():
     fakeredis = pytest.importorskip("fakeredis")
     client = fakeredis.FakeStrictRedis(decode_responses=True)
@@ -142,3 +176,60 @@ def test_build_cache_backend_supports_redis_plus_semantic():
     cache.set(base, "QUEST")
     paraphrase = CacheKey("cheap", "SYS", "for Aldric escort the caravan to Northwatch please")
     assert cache.get(paraphrase) == "QUEST"
+
+
+# ----------------------------------------------------- cache key captures model + project scope
+class _ModelProvider:
+    """Fake real-provider stand-in that carries a `.model` id (like OpenAICompatProvider) and
+    returns a model-specific completion, so we can prove the cache distinguishes models."""
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+        self.calls = 0
+
+    def complete(self, *, system, user, model):
+        self.calls += 1
+        return f"{self.model}-resp", 10, 5
+
+
+def test_gateway_cache_key_includes_model_id():
+    # Two gateways share ONE cache but front different models on the same tier. A request to the
+    # second model must NOT be served the first model's cached completion (regression: the key
+    # omitted the model id, so switching llm_model silently returned the wrong model's answer).
+    cache = ExactCache()
+    flash = _ModelProvider("deepseek-v4-flash")
+    pro = _ModelProvider("deepseek-v4-pro")
+    gw_flash = LLMGateway(providers={"cheap": flash}, cache=cache)
+    gw_pro = LLMGateway(providers={"cheap": pro}, cache=cache)
+
+    a = gw_flash.complete(task="qa_answer", system="s", user="u", tier="cheap")
+    b = gw_pro.complete(task="qa_answer", system="s", user="u", tier="cheap")
+
+    assert a == "deepseek-v4-flash-resp"
+    assert b == "deepseek-v4-pro-resp"  # pro was actually called, not served flash's cache
+    assert pro.calls == 1
+
+
+def test_gateway_cache_key_scopes_by_namespace():
+    # One shared cache, two projects (namespaces), same model + prompt. Project B must not be served
+    # project A's completion (regression: the action/service cache had no project dimension).
+    cache = ExactCache()
+    prov_a = _ModelProvider("m")
+    prov_b = _ModelProvider("m")
+    gw_a = LLMGateway(providers={"cheap": prov_a}, cache=cache, namespace="projA")
+    gw_b = LLMGateway(providers={"cheap": prov_b}, cache=cache, namespace="projB")
+
+    gw_a.complete(task="world_seed", system="s", user="u", tier="cheap")
+    gw_b.complete(task="world_seed", system="s", user="u", tier="cheap")
+    assert prov_a.calls == 1 and prov_b.calls == 1  # neither served the other's entry
+
+    gw_a.complete(task="world_seed", system="s", user="u", tier="cheap")
+    assert prov_a.calls == 1  # ...but same project+model+prompt still hits (caching not broken)
+
+
+def test_cache_key_exact_and_scope_distinguish_model_and_namespace():
+    base = CacheKey("cheap", "sys", "u")
+    assert CacheKey("cheap", "sys", "u", model="x").exact != base.exact
+    assert CacheKey("cheap", "sys", "u", namespace="p").exact != base.exact
+    assert CacheKey("cheap", "sys", "u", model="x").scope != base.scope
+    assert CacheKey("cheap", "sys", "u", namespace="p").scope != base.scope
