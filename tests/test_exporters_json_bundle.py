@@ -27,13 +27,13 @@ def _bundle() -> ContentBundle:
 def test_export_content_bundle_writes_manifest_and_content_file(tmp_path) -> None:
     output_dir = tmp_path / "export"
 
-    manifest = export_content_bundle(_bundle(), output_dir, target_engine=EngineTarget.UNITY)
+    manifest = export_content_bundle(_bundle(), output_dir, target_engine=EngineTarget.GENERIC)
 
     content_path = output_dir / "content_bundle.json"
     manifest_path = output_dir / "manifest.json"
     assert content_path.exists()
     assert manifest_path.exists()
-    assert manifest.target_engine is EngineTarget.UNITY
+    assert manifest.target_engine is EngineTarget.GENERIC
     assert manifest.content_hash == content_hash(_bundle())
     assert manifest.files[0].path == "content_bundle.json"
     assert manifest.files[0].kind == "content_bundle"
@@ -44,12 +44,12 @@ def test_export_content_bundle_writes_manifest_and_content_file(tmp_path) -> Non
 
 
 def test_export_manifest_round_trips_from_disk(tmp_path) -> None:
-    manifest = export_content_bundle(_bundle(), tmp_path / "export", target_engine="unreal")
+    manifest = export_content_bundle(_bundle(), tmp_path / "export", target_engine="generic")
 
     loaded = load_export_manifest(tmp_path / "export" / "manifest.json")
 
     assert loaded == manifest
-    assert loaded.target_engine is EngineTarget.UNREAL
+    assert loaded.target_engine is EngineTarget.GENERIC
 
 
 def test_export_rejects_unknown_target_engine(tmp_path) -> None:

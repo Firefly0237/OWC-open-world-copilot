@@ -9,9 +9,9 @@ from pydantic import BaseModel, Field
 
 
 class EngineTarget(str, Enum):
+    # An engine-agnostic data + localization handoff (content_bundle.json + XLIFF/CSV), not a
+    # per-engine code generator — GENERIC is the only target. Kept as an enum for the manifest.
     GENERIC = "generic"
-    UNITY = "unity"
-    UNREAL = "unreal"
 
 
 class ExportedFile(BaseModel):

@@ -1,9 +1,10 @@
-"""Content export.
+"""Content export — the engine-agnostic data + localization handoff.
 
-The engine-agnostic `content_bundle.json` + `manifest.json` pair is the universal handoff path:
-deterministic files that importers or MCP workflows consume without a live editor. Unreal and
-Unity targets additionally write engine-native files (DataTable CSV / per-quest JSON) so the
-`--target-engine` flag changes the actual artifact set, not just the folder name.
+`content_bundle.json` + `manifest.json` is the universal handoff: deterministic, checksummed files
+that any importer or MCP workflow consumes without a live editor. Localization travels alongside as
+CSV + XLIFF 1.2 (the CAT/TMS interchange standard). This is intentionally NOT a per-engine code
+generator: engine schemas differ project to project, so the value is clean, verifiable data + the
+standard localization format — not bespoke scripts for a specific runtime.
 """
 
 from __future__ import annotations
@@ -14,8 +15,8 @@ from pathlib import Path
 
 from ..content.hash import content_hash
 from ..content.models import ContentBundle
-from .engines import write_localization_csv, write_ue_quests_csv, write_unity_quests
 from .models import EngineTarget, ExportedFile, ExportManifest
+from .xliff import write_localization_csv, write_localization_xliff
 
 
 def export_content_bundle(
@@ -26,24 +27,20 @@ def export_content_bundle(
 ) -> ExportManifest:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    engine = EngineTarget(target_engine)
+    engine = EngineTarget(target_engine)  # GENERIC is the only target; kept for manifest provenance
 
     content_payload = bundle.model_dump(mode="json", exclude_none=True)
-    content_text = _json(content_payload)
-    (output / "content_bundle.json").write_text(content_text, encoding="utf-8")
+    (output / "content_bundle.json").write_text(_json(content_payload), encoding="utf-8")
     files = [_file_entry(output, "content_bundle.json", "content_bundle")]
 
-    if engine is EngineTarget.UNREAL:
-        write_ue_quests_csv(bundle, output / "quests_datatable.csv")
-        files.append(_file_entry(output, "quests_datatable.csv", "ue_datatable_csv"))
+    # Localization handoff: CSV for spreadsheet workflows + XLIFF 1.2 for CAT/TMS/agencies
+    # (ui_max_len carried as the standard `maxwidth` attribute). Written whenever there is anything
+    # to localize, so the data bundle is self-sufficient for a localization pass.
+    if bundle.localized_texts or any(d.text and d.locale for d in bundle.dialogues.values()):
         write_localization_csv(bundle, output / "localized_texts.csv")
+        write_localization_xliff(bundle, output / "localized_texts.xlf")
         files.append(_file_entry(output, "localized_texts.csv", "localization_csv"))
-    elif engine is EngineTarget.UNITY:
-        for relative in write_unity_quests(bundle, output / "quests"):
-            files.append(_file_entry(output, relative, "unity_quest_json"))
-        files.append(_file_entry(output, "quests/index.json", "unity_index"))
-        write_localization_csv(bundle, output / "localized_texts.csv")
-        files.append(_file_entry(output, "localized_texts.csv", "localization_csv"))
+        files.append(_file_entry(output, "localized_texts.xlf", "localization_xliff"))
 
     manifest = ExportManifest(
         target_engine=engine,

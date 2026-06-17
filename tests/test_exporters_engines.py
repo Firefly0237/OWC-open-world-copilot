@@ -1,9 +1,8 @@
-"""Engine-specific export tests: UE DataTable CSV and Unity per-quest JSON."""
+"""Export tests: the engine-agnostic data bundle + localization (CSV + XLIFF 1.2)."""
 
 from __future__ import annotations
 
 import csv
-import json
 from pathlib import Path
 
 from owcopilot.content.models import (
@@ -31,17 +30,9 @@ def _bundle() -> ContentBundle:
                 title="巡逻边境",
                 giver_npc="npc_mara",
                 objective="在天黑前巡视边境线。",
-                prerequisites=["quest_intro"],
-                timeline_order=3,
                 localization_keys=["quest.quest_patrol.objective"],
                 rewards=[Reward(kind="gold", value="75", amount=75)],
-            ),
-            "quest_intro": Quest(
-                id="quest_intro",
-                title="新兵报到",
-                objective="向玛拉报到。",
-                localization_keys=["quest.quest_intro.objective"],
-            ),
+            )
         },
         dialogues={
             "dlg_hello": DialogueRef(
@@ -61,20 +52,10 @@ def _bundle() -> ContentBundle:
     )
 
 
-def test_unreal_export_writes_datatable_csv(tmp_path: Path) -> None:
-    manifest = export_content_bundle(_bundle(), tmp_path, target_engine=EngineTarget.UNREAL)
+def test_generic_export_writes_bundle_and_localization(tmp_path: Path) -> None:
+    manifest = export_content_bundle(_bundle(), tmp_path, target_engine=EngineTarget.GENERIC)
     kinds = {item.kind for item in manifest.files}
-    assert {"content_bundle", "ue_datatable_csv", "localization_csv"} <= kinds
-
-    with (tmp_path / "quests_datatable.csv").open(encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    assert {row["Name"] for row in rows} == {"Quest_quest_patrol", "Quest_quest_intro"}
-    patrol = next(row for row in rows if row["Name"] == "Quest_quest_patrol")
-    assert patrol["Title"] == "巡逻边境"
-    assert patrol["GiverNPC"] == "npc_mara"
-    assert json.loads(patrol["Prerequisites"]) == ["quest_intro"]
-    assert patrol["TimelineOrder"] == "3"
-    assert json.loads(patrol["Rewards"])[0]["kind"] == "gold"
+    assert kinds == {"content_bundle", "localization_csv", "localization_xliff"}
 
     with (tmp_path / "localized_texts.csv").open(encoding="utf-8", newline="") as handle:
         loc_rows = list(csv.DictReader(handle))
@@ -82,27 +63,43 @@ def test_unreal_export_writes_datatable_csv(tmp_path: Path) -> None:
     assert ("dlg.hello", "zh-CN") in locales and ("dlg.hello", "en") in locales
 
 
-def test_unity_export_writes_per_quest_json(tmp_path: Path) -> None:
-    manifest = export_content_bundle(_bundle(), tmp_path, target_engine=EngineTarget.UNITY)
-    kinds = {item.kind for item in manifest.files}
-    assert {"content_bundle", "unity_quest_json", "unity_index", "localization_csv"} <= kinds
+def test_localization_xliff_carries_maxwidth(tmp_path: Path) -> None:
+    import xml.etree.ElementTree as ET
 
-    quest = json.loads((tmp_path / "quests" / "quest_patrol.json").read_text(encoding="utf-8"))
-    assert quest["giverNpc"] == "npc_mara"  # camelCase for JsonUtility
-    assert quest["timelineOrder"] == 3
-    assert quest["reviewStatus"] == "approved"
-    index = json.loads((tmp_path / "quests" / "index.json").read_text(encoding="utf-8"))
-    assert set(index["quests"]) == {"quest_patrol.json", "quest_intro.json"}
+    export_content_bundle(_bundle(), tmp_path, target_engine=EngineTarget.GENERIC)
+    xlf = tmp_path / "localized_texts.xlf"
+    root = ET.fromstring(xlf.read_text(encoding="utf-8"))  # must be well-formed XML
+    assert root.tag.endswith("xliff")
+    text = xlf.read_text(encoding="utf-8")
+    assert 'source-language="zh-CN"' in text and 'source-language="en"' in text
+    assert 'maxwidth="40" size-unit="char"' in text  # the dialogue line's UI cap
+    assert "<source>站住，报上名来！</source>" in text
 
 
-def test_generic_export_stays_minimal(tmp_path: Path) -> None:
-    manifest = export_content_bundle(_bundle(), tmp_path, target_engine=EngineTarget.GENERIC)
+def test_xliff_escapes_xml_special_characters() -> None:
+    import xml.etree.ElementTree as ET
+
+    from owcopilot.exporters.xliff import render_xliff
+
+    bundle = ContentBundle(
+        localized_texts={
+            "t": LocalizedText(id="t", text_key="k", locale="en", text='A < B & "C" > D')
+        }
+    )
+    root = ET.fromstring(render_xliff(bundle))  # raises if escaping is wrong
+    unit = root.find(".//{urn:oasis:names:tc:xliff:document:1.2}source")
+    assert unit is not None and unit.text == 'A < B & "C" > D'
+
+
+def test_export_without_localization_is_just_the_bundle(tmp_path: Path) -> None:
+    bundle = ContentBundle(quests={"q": Quest(id="q", title="Q")})
+    manifest = export_content_bundle(bundle, tmp_path, target_engine=EngineTarget.GENERIC)
     assert [item.kind for item in manifest.files] == ["content_bundle"]
-    assert not (tmp_path / "quests_datatable.csv").exists()
+    assert not (tmp_path / "localized_texts.xlf").exists()
 
 
-def test_manifest_hashes_cover_engine_files(tmp_path: Path) -> None:
-    manifest = export_content_bundle(_bundle(), tmp_path, target_engine=EngineTarget.UNREAL)
+def test_manifest_hashes_cover_every_file(tmp_path: Path) -> None:
+    manifest = export_content_bundle(_bundle(), tmp_path, target_engine=EngineTarget.GENERIC)
     reloaded = load_export_manifest(tmp_path / "manifest.json")
     assert reloaded.content_hash == manifest.content_hash
     for item in reloaded.files:
