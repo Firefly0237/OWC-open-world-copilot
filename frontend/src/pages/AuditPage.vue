@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import {
+  humanizeError,
   addSessionCost,
   apiGet,
   apiPost,
@@ -10,6 +11,8 @@ import {
   llmConfig,
   setCurrentOperator,
 } from "../api";
+import PageHead from "../components/PageHead.vue";
+import { notifyError, pushToast } from "../toast";
 
 interface Issue {
   id: string;
@@ -35,7 +38,6 @@ const SEV_LABEL: Record<string, string> = { error: "错误", warn: "警告", war
 const operator = ref(currentOperator());
 const ran = ref(false);
 const running = ref(false);
-const error = ref("");
 const totals = ref<Record<string, number>>({});
 const issues = ref<Issue[]>([]);
 const filter = ref("all");
@@ -60,10 +62,42 @@ async function loadIssues(): Promise<void> {
   issues.value = body.issues;
 }
 
+// Batch-2: semantic contradiction scan (allies-here-enemies-there, conflicting attributes)
+interface Contra {
+  refs: string[];
+  subjects: string[];
+  statements: string[];
+  verdict: string;
+  point: string;
+  layer: string;
+}
+const contraScanning = ref(false);
+const contraRan = ref(false);
+const contra = ref<{ contradictions: Contra[]; review_suggested: Contra[]; llm_used: boolean }>({
+  contradictions: [],
+  review_suggested: [],
+  llm_used: false,
+});
+async function scanContradictions(): Promise<void> {
+  contraScanning.value = true;
+  try {
+    const body = await apiPost<typeof contra.value & { cost_budget?: Record<string, unknown> }>(
+      `/projects/${currentProject()}/contradictions:scan`,
+      { use_llm: true, llm_mode: "real" },
+    );
+    contra.value = body;
+    contraRan.value = true;
+    if (body.cost_budget) addSessionCost(costOf(body.cost_budget));
+  } catch (e) {
+    notifyError(e);
+  } finally {
+    contraScanning.value = false;
+  }
+}
+
 async function runAudit(): Promise<void> {
   if (running.value) return;
   running.value = true;
-  error.value = "";
   suggestState.value = {};
   patchState.value = {};
   try {
@@ -75,7 +109,7 @@ async function runAudit(): Promise<void> {
     await loadIssues();
     ran.value = true;
   } catch (e) {
-    error.value = String(e);
+    notifyError(e);
   } finally {
     running.value = false;
   }
@@ -111,18 +145,17 @@ async function suggest(issue: Issue): Promise<void> {
   } catch (e) {
     suggestState.value = {
       ...suggestState.value,
-      [issue.id]: { busy: false, candidates: cur?.candidates ?? [], note: String(e) },
+      [issue.id]: { busy: false, candidates: cur?.candidates ?? [], note: humanizeError(e) },
     };
   }
 }
 
 async function applyPatch(candidate: Candidate): Promise<void> {
   if (!operator.value.trim()) {
-    error.value = "先填署名再应用修复。";
+    pushToast("先填署名再应用修复。", "error");
     return;
   }
   setCurrentOperator(operator.value.trim());
-  error.value = "";
   try {
     const body = await apiPost<{ applied: boolean; reason: string; resolved_errors: number; introduced_errors: number }>(
       `/projects/${currentProject()}/patches/${encodeURIComponent(candidate.patch_id)}:apply`,
@@ -139,13 +172,13 @@ async function applyPatch(candidate: Candidate): Promise<void> {
     };
     if (body.applied) await runAudit();
   } catch (e) {
-    patchState.value = { ...patchState.value, [candidate.patch_id]: { note: String(e) } };
+    patchState.value = { ...patchState.value, [candidate.patch_id]: { note: humanizeError(e) } };
   }
 }
 
 async function rollback(candidate: Candidate): Promise<void> {
   if (!operator.value.trim()) {
-    error.value = "先填署名再回滚。";
+    pushToast("先填署名再回滚。", "error");
     return;
   }
   setCurrentOperator(operator.value.trim());
@@ -159,7 +192,7 @@ async function rollback(candidate: Candidate): Promise<void> {
     };
     await runAudit();
   } catch (e) {
-    patchState.value = { ...patchState.value, [candidate.patch_id]: { note: String(e) } };
+    patchState.value = { ...patchState.value, [candidate.patch_id]: { note: humanizeError(e) } };
   }
 }
 
@@ -171,8 +204,7 @@ function opSummary(ops: Record<string, unknown>[]): string {
 
 <template>
   <section>
-    <div class="section"><span class="t">校勘修复 · 你执朱笔</span></div>
-    <p class="muted hint">确定性审计先找出硬伤，再为每条生成可应用的修复——应用前影子副本复跑，会引新错的候选直接弃掉，应用记名、可回滚。</p>
+    <PageHead overline="AUDIT" title="校勘修复" purpose="检查一致性问题，每条给出可回滚的修复。" />
 
     <div class="bar">
       <input v-model="operator" class="op" placeholder="署名（应用/回滚时必填）" />
@@ -185,7 +217,33 @@ function opSummary(ops: Record<string, unknown>[]): string {
         <span class="chip">提示 <b>{{ totals.info ?? 0 }}</b></span>
       </span>
     </div>
-    <p v-if="error" class="error">{{ error }}</p>
+
+    <div class="pane contra">
+      <div class="contra-head">
+        <div class="section"><span class="t">设定矛盾检测</span></div>
+        <button class="ghost" :disabled="contraScanning" @click="scanContradictions">
+          {{ contraScanning ? "扫描中…" : "扫描设定矛盾" }}
+        </button>
+      </div>
+      <p class="muted small">
+        结构审计看不出"语义矛盾"——同一对势力这里写盟友、那里写死敌。先语义召回可疑对，模型判官确认真矛盾，人工消解。
+      </p>
+      <div v-if="contraRan">
+        <p v-if="!contra.contradictions.length && !contra.review_suggested.length" class="ok-text">
+          没有发现互相矛盾的设定——干净。
+        </p>
+        <div v-for="(c, k) in contra.contradictions" :key="'c' + k" class="contra-card hit">
+          <div class="contra-tag">矛盾 · {{ c.subjects.join(" ↔ ") }}</div>
+          <p class="contra-point">{{ c.point }}</p>
+          <p v-for="(s, i) in c.statements" :key="i" class="contra-stmt mono">{{ s }}</p>
+        </div>
+        <div v-for="(c, k) in contra.review_suggested" :key="'r' + k" class="contra-card review">
+          <div class="contra-tag review">待人工确认</div>
+          <p class="contra-point">{{ c.point }}</p>
+          <p v-for="(s, i) in c.statements" :key="i" class="contra-stmt mono">{{ s }}</p>
+        </div>
+      </div>
+    </div>
 
     <div v-if="ran" class="filters">
       <button v-for="f in ['all', 'error', 'warn', 'info']" :key="f" class="pill" :class="{ on: filter === f }" @click="filter = f">
@@ -340,6 +398,49 @@ button.ghost.sm {
 
 .ok-text {
   color: #8ed4ac;
+}
+
+.contra {
+  margin: 0.7rem 0;
+  padding: 0.8rem 1rem;
+}
+.contra-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+.contra .small {
+  font-size: 0.8rem;
+  margin: 0.2rem 0 0.5rem;
+}
+.contra-card {
+  border: 1px solid var(--ow-line);
+  border-radius: 0.6rem;
+  background: var(--ow-panel-2);
+  padding: 0.55rem 0.75rem;
+  margin-top: 0.5rem;
+}
+.contra-card.hit {
+  border-color: rgba(224, 133, 133, 0.5);
+}
+.contra-tag {
+  font-size: 0.78rem;
+  color: #e89a9a;
+  font-weight: 600;
+}
+.contra-tag.review {
+  color: var(--ow-gold-bright);
+}
+.contra-point {
+  margin: 0.25rem 0;
+  font-size: 0.86rem;
+  color: var(--ow-ink);
+}
+.contra-stmt {
+  font-size: 0.78rem;
+  color: var(--ow-cyan);
+  margin: 0.1rem 0;
 }
 
 .filters {

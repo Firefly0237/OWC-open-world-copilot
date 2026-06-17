@@ -1,6 +1,21 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from "vue";
-import { addSessionCost, apiPost, costOf, currentProject, llmConfig, llmParams } from "../api";
+import {
+  addSessionCost,
+  apiGet,
+  apiPost,
+  costOf,
+  currentProject,
+  llmConfig,
+  llmParams,
+  streamJobEvents,
+} from "../api";
+import { notifyError } from "../toast";
+import PageHead from "../components/PageHead.vue";
+import EmptyState from "../components/EmptyState.vue";
+import { example } from "../examples";
+
+const phQuery = example("askQuery");
 
 interface AskAnswer {
   answer: string;
@@ -19,10 +34,9 @@ interface Turn {
 const question = ref("");
 const turns = ref<Turn[]>([]);
 const busy = ref(false);
-const error = ref("");
 const llmReady = ref(llmConfig().ready);
-
-const REFUSAL_TEXT = "档案中查无此条——我不杜撰。";
+const indexing = ref(false);
+const overviewMsg = ref("");
 
 function onLlmChanged(): void {
   llmReady.value = llmConfig().ready;
@@ -31,11 +45,35 @@ function onLlmChanged(): void {
 onMounted(() => window.addEventListener("ow-llm-changed", onLlmChanged));
 onUnmounted(() => window.removeEventListener("ow-llm-changed", onLlmChanged));
 
+async function buildOverview(): Promise<void> {
+  if (indexing.value || !llmReady.value) return;
+  indexing.value = true;
+  overviewMsg.value = "";
+  try {
+    const { job_id } = await apiPost<{ job_id: string }>(
+      `/projects/${currentProject()}/jobs`,
+      { kind: "build_overview", params: { ...llmParams() } },
+    );
+    await streamJobEvents(job_id, () => {});
+    const job = await apiGet<{
+      status: string;
+      result?: { community_count?: number; regenerated?: number };
+    }>(`/jobs/${job_id}`);
+    if (job.status !== "done") throw new Error("总览索引构建失败");
+    const n = job.result?.community_count ?? 0;
+    const fresh = job.result?.regenerated ?? 0;
+    overviewMsg.value = `世界总览已就绪：${n} 个聚类（本次新写 ${fresh} 份摘要）。现在可以问宏观格局类问题了。`;
+  } catch (e) {
+    notifyError(e);
+  } finally {
+    indexing.value = false;
+  }
+}
+
 async function ask(): Promise<void> {
   const q = question.value.trim();
   if (!q || busy.value || !llmReady.value) return;
   busy.value = true;
-  error.value = "";
   try {
     const body = await apiPost<{ answer: AskAnswer; cost_budget?: { used_usd?: number } }>(
       `/projects/${currentProject()}/ask`,
@@ -45,14 +83,16 @@ async function ask(): Promise<void> {
     addSessionCost(used);
     turns.value.push({
       question: q,
-      answer: body.answer.refused ? REFUSAL_TEXT : body.answer.answer,
+      // The backend supplies an honest, case-specific message on refusal (nothing relevant exists
+      // vs. relevant lore found but the asked-for point isn't recorded), so surface it directly.
+      answer: body.answer.answer,
       refused: body.answer.refused,
       citations: (body.answer.citations ?? []).map((c) => c.ref),
       cost: used,
     });
     question.value = "";
   } catch (e) {
-    error.value = String(e);
+    notifyError(e);
   } finally {
     busy.value = false;
   }
@@ -61,25 +101,38 @@ async function ask(): Promise<void> {
 
 <template>
   <section>
-    <div class="section"><span class="t">世界问答</span></div>
-    <p class="muted hint">有问必有据；查无此条，绝不杜撰。</p>
-    <TransitionGroup name="turn" tag="div">
-      <div v-for="(turn, index) in turns" :key="index" class="turn">
-        <div class="pane q">{{ turn.question }}</div>
-        <div class="pane a" :class="{ refused: turn.refused }">
-          <p>{{ turn.answer }}</p>
-          <div v-if="turn.citations.length || turn.cost" class="chips">
-            <span v-for="ref in turn.citations" :key="ref" class="chip">{{ ref }}</span>
-            <span v-if="turn.cost" class="chip dim">${{ turn.cost.toFixed(4) }}</span>
+    <PageHead overline="ORACLE" title="世界问答" purpose="就世界设定提问，答案附依据，查不到会直说。" />
+    <div class="overview">
+      <button class="ghost" :disabled="indexing || !llmReady" @click="buildOverview">
+        {{ indexing ? "构建中…" : "构建世界总览索引" }}
+      </button>
+      <span class="muted small">宏观格局类问题需先建一次总览，世界改动后可重建。</span>
+    </div>
+    <p v-if="overviewMsg" class="flash">{{ overviewMsg }}</p>
+    <div class="thread">
+      <TransitionGroup v-if="turns.length" name="turn" tag="div">
+        <div v-for="(turn, index) in turns" :key="index" class="turn">
+          <div class="pane q">{{ turn.question }}</div>
+          <div class="pane a" :class="{ refused: turn.refused }">
+            <p>{{ turn.answer }}</p>
+            <div v-if="turn.citations.length || turn.cost" class="chips">
+              <span v-for="ref in turn.citations" :key="ref" class="chip">{{ ref }}</span>
+              <span v-if="turn.cost" class="chip dim">${{ turn.cost.toFixed(4) }}</span>
+            </div>
           </div>
         </div>
-      </div>
-    </TransitionGroup>
-    <p v-if="error" class="error">{{ error }}</p>
+      </TransitionGroup>
+      <EmptyState
+        v-else
+        :busy="busy"
+        :title="busy ? '翻阅档案中' : '世界问答'"
+        :hint="busy ? '' : '在下方输入问题，向世界发问'"
+      />
+    </div>
     <div class="composer">
       <input
         v-model="question"
-        placeholder="向你的世界提问……"
+        :placeholder="`例如：${phQuery}`"
         @keydown.enter="ask"
       />
       <button class="primary" :disabled="busy || !question.trim() || !llmReady" @click="ask">
@@ -87,9 +140,9 @@ async function ask(): Promise<void> {
       </button>
     </div>
     <p v-if="!llmReady" class="muted small">
-      问答走真实模型——先在
+      请先在
       <RouterLink to="/settings" class="golink">设置</RouterLink>
-      接入服务商与 API Key。
+      接入模型。
     </p>
   </section>
 </template>
@@ -97,6 +150,15 @@ async function ask(): Promise<void> {
 <style scoped>
 .hint {
   font-size: 0.85rem;
+}
+
+/* the conversation fills the vertical space so the page never reads as a lone composer floating in
+   a void — empty it shows the standing-by panel, with content it grows naturally. */
+.thread {
+  min-height: clamp(280px, 44vh, 520px);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
 }
 
 .turn {
@@ -172,6 +234,33 @@ button.primary {
 button.primary:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.overview {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin: 0.4rem 0 0.6rem;
+}
+
+button.ghost {
+  background: var(--ow-panel-2);
+  border: 1px solid var(--ow-gold-soft);
+  border-radius: 0.5rem;
+  color: var(--ow-gold-bright);
+  padding: 0.35rem 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+button.ghost:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.flash {
+  color: #8ed4ac;
 }
 
 .error {

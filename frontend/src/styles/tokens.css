@@ -1,6 +1,9 @@
-/* 星海之卷 design tokens — ported 1:1 from the Streamlit theme so both frontends
-   stay the same product. */
-@import url("https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap");
+/* 星海之卷 design tokens — Honkai: Star Rail-flavoured (S13).
+   Typography is a deliberate MIX, matching HSR's own screens: Cinzel carries the engraved,
+   gilded Latin OVERLINES (the "STORY"/"WORLD" small-caps), a geometric CJK sans (Noto Sans SC)
+   carries Chinese display + headings, and Saira (a DIN-class technical sans) carries numbers and
+   Latin readouts. Accent is gold + violet — the Herta/space-station palette. */
+@import url("https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600;700&family=Saira:wght@400;500;600&display=swap");
 
 :root {
   --ow-gold: #d9b56c;
@@ -8,16 +11,27 @@
   --ow-gold-deep: #a8853f;
   --ow-gold-soft: rgba(217, 181, 108, 0.34);
   --ow-gold-faint: rgba(217, 181, 108, 0.08);
+  /* violet accent — the space-station / Herta theme (gold's cool counterpart) */
+  --ow-violet: #b9a7ff;
+  --ow-violet-deep: #6f5fd0;
+  --ow-violet-soft: rgba(160, 138, 255, 0.32);
+  --ow-violet-faint: rgba(160, 138, 255, 0.1);
   --ow-night: #0f1530;
   --ow-night-deep: #0a0e24;
   --ow-panel: rgba(20, 27, 56, 0.72);
   --ow-panel-2: rgba(13, 18, 42, 0.55);
   --ow-edge: rgba(217, 181, 108, 0.26);
+  --ow-edge-violet: rgba(160, 138, 255, 0.28);
   --ow-line: #2e3658;
   --ow-ink: #ece5d3;
   --ow-muted: #9d97ad;
   --ow-cyan: #8fd6e8;
-  --ow-serif: "Noto Serif SC", Georgia, "Songti SC", "SimSun", serif;
+  /* cut-corner size for HSR panels; kept a token so panels stay consistent */
+  --ow-cut: 14px;
+  --ow-overline: "Cinzel", Georgia, serif;
+  --ow-serif: "Noto Serif SC", Georgia, "Songti SC", serif;
+  --ow-display: "Noto Sans SC", system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ow-num: "Saira", "Noto Sans SC", system-ui, sans-serif;
 }
 
 * {
@@ -34,12 +48,38 @@ body,
 body {
   color: var(--ow-ink);
   font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
   background:
-    radial-gradient(1100px 560px at 86% -12%, rgba(138, 123, 200, 0.14), transparent 60%),
-    radial-gradient(900px 480px at -6% 4%, rgba(143, 214, 232, 0.08), transparent 55%),
-    linear-gradient(168deg, #141b3e 0%, var(--ow-night) 46%, var(--ow-night-deep) 100%);
+    radial-gradient(1200px 600px at 84% -14%, rgba(150, 120, 230, 0.22), transparent 62%),
+    radial-gradient(820px 520px at 12% 110%, rgba(120, 96, 210, 0.14), transparent 60%),
+    radial-gradient(900px 480px at -6% 4%, rgba(143, 214, 232, 0.09), transparent 55%),
+    linear-gradient(168deg, #161d44 0%, var(--ow-night) 46%, var(--ow-night-deep) 100%);
   background-attachment: fixed;
   isolation: isolate;
+}
+
+/* gilded scrollbars — a small Genshin-grade detail that ties the chrome to the theme */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ow-gold-soft) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(217, 181, 108, 0.5), rgba(168, 133, 63, 0.4));
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(240, 210, 138, 0.7), rgba(185, 146, 74, 0.6));
+  background-clip: padding-box;
 }
 
 /* star dust: breathing pinpoints, always behind content */
@@ -124,16 +164,38 @@ body::after {
   }
 }
 
+/* route transition: an HSR-style warp — the new page streaks in from the side with a brief blur and
+   settle, the old page slips out the other way. Not a plain fade. */
 .page-enter-active {
-  animation: ow-fade-up 0.28s ease-out both;
+  animation: ow-warp-in 0.44s cubic-bezier(0.16, 0.84, 0.24, 1) both;
 }
 
 .page-leave-active {
-  transition: opacity 0.14s ease;
+  animation: ow-warp-out 0.2s ease-in both;
 }
 
-.page-leave-to {
-  opacity: 0;
+@keyframes ow-warp-in {
+  0% {
+    opacity: 0;
+    transform: translate3d(34px, 0, 0) scale(0.984);
+    filter: blur(3px);
+  }
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+
+@keyframes ow-warp-out {
+  to {
+    opacity: 0;
+    transform: translate3d(-18px, 0, 0) scale(0.992);
+    filter: blur(1.5px);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -149,36 +211,124 @@ body::after {
 h1,
 h2,
 h3 {
-  font-family: var(--ow-serif);
-  letter-spacing: 0.02em;
+  font-family: var(--ow-display);
+  font-weight: 700;
+  letter-spacing: 0.01em;
   color: var(--ow-ink);
+}
+
+/* numbers / Latin readouts pick up the DIN-class technical sans */
+.num,
+.mono {
+  font-family: var(--ow-num);
+  font-variant-numeric: tabular-nums;
 }
 
 a {
   color: var(--ow-cyan);
 }
 
+/* HSR panel: a cut-corner glass slab with gilded corner brackets. clip-path eats the outer
+   box-shadow, so depth/glow ride on filter: drop-shadow (which follows the cut shape) + an inset
+   top highlight. The two diagonal brackets are the signature HSR "[ ]" frame accent. */
 .pane {
-  background: var(--ow-panel);
+  position: relative;
+  background:
+    linear-gradient(180deg, rgba(240, 210, 138, 0.05), transparent 30%),
+    var(--ow-panel);
   border: 1px solid var(--ow-edge);
-  border-radius: 0.9rem;
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.35),
-    0 6px 20px rgba(4, 7, 22, 0.45),
-    inset 0 1px 0 rgba(240, 210, 138, 0.07);
+  border-radius: 2px;
+  clip-path: polygon(
+    var(--ow-cut) 0, 100% 0, 100% calc(100% - var(--ow-cut)),
+    calc(100% - var(--ow-cut)) 100%, 0 100%, 0 var(--ow-cut)
+  );
+  box-shadow: inset 0 1px 0 rgba(240, 210, 138, 0.12);
+  filter: drop-shadow(0 6px 18px rgba(4, 7, 22, 0.5));
   animation: ow-fade-up 0.24s ease-out both;
   transition:
-    border-color 0.15s ease,
-    box-shadow 0.2s ease,
-    transform 0.15s ease;
+    border-color 0.18s ease,
+    filter 0.2s ease;
 }
 
+.pane::before,
+.pane::after {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--ow-gold-soft);
+  pointer-events: none;
+  transition: border-color 0.18s ease;
+}
+.pane::before { top: 7px; left: 7px; border-right: 0; border-bottom: 0; }
+.pane::after { bottom: 7px; right: 7px; border-left: 0; border-top: 0; }
+
 .pane:hover {
-  border-color: rgba(240, 210, 138, 0.42);
-  box-shadow:
-    0 2px 8px rgba(0, 0, 0, 0.4),
-    0 12px 34px rgba(4, 7, 22, 0.55),
-    inset 0 1px 0 rgba(240, 210, 138, 0.07);
+  border-color: rgba(240, 210, 138, 0.5);
+  filter: drop-shadow(0 10px 30px rgba(4, 7, 22, 0.6))
+    drop-shadow(0 0 14px rgba(240, 210, 138, 0.16));
+}
+.pane:hover::before,
+.pane:hover::after {
+  border-color: var(--ow-gold-bright);
+}
+
+/* a violet variant for space-station / generation surfaces */
+.pane.violet {
+  border-color: var(--ow-edge-violet);
+}
+.pane.violet::before,
+.pane.violet::after {
+  border-color: var(--ow-violet-soft);
+}
+.pane.violet:hover {
+  border-color: var(--ow-violet-soft);
+  filter: drop-shadow(0 10px 30px rgba(4, 7, 22, 0.6))
+    drop-shadow(0 0 14px rgba(160, 138, 255, 0.2));
+}
+.pane.violet:hover::before,
+.pane.violet:hover::after {
+  border-color: var(--ow-violet);
+}
+
+/* ---- reusable HSR loading components (no JS needed; reduced-motion safe) ----
+   star-rail progress: <div class="ow-rail"><span style="width:42%"></span></div> */
+.ow-rail {
+  height: 8px;
+  border-radius: 99px;
+  background: rgba(143, 214, 232, 0.14);
+  overflow: hidden;
+}
+.ow-rail > span {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, var(--ow-violet-deep), var(--ow-gold-bright));
+  box-shadow: 0 0 10px rgba(240, 210, 138, 0.5);
+  transition: width 0.2s ease;
+}
+
+/* indeterminate "warping" rail — a light band sweeps a track of unknown length */
+.ow-rail.indeterminate > span {
+  width: 36% !important;
+  animation: ow-rail-sweep 1.15s ease-in-out infinite;
+}
+@keyframes ow-rail-sweep {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(320%); }
+}
+
+/* eight-point star spinner: <span class="ow-spinner"></span> */
+.ow-spinner {
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+  background: conic-gradient(from 0deg, transparent, var(--ow-gold-bright));
+  clip-path: polygon(50% 0, 60% 40%, 100% 50%, 60% 60%, 50% 100%, 40% 60%, 0 50%, 40% 40%);
+  animation: ow-spin 2.2s linear infinite;
+}
+@keyframes ow-spin {
+  to { transform: rotate(360deg); }
 }
 
 .section {
@@ -190,9 +340,10 @@ a {
 
 .section::before {
   content: "✦";
-  color: var(--ow-gold);
-  font-size: 0.62rem;
+  color: var(--ow-gold-bright);
+  font-size: 0.66rem;
   align-self: center;
+  text-shadow: 0 0 8px rgba(240, 210, 138, 0.55);
 }
 
 .section::after {
@@ -203,11 +354,145 @@ a {
 }
 
 .section .t {
-  font-family: var(--ow-serif);
+  font-family: var(--ow-display);
   font-weight: 700;
-  font-size: 1.02rem;
+  font-size: 1.04rem;
+  letter-spacing: 0.04em;
+  text-shadow: 0 1px 10px rgba(4, 7, 22, 0.4);
+}
+
+/* English small-caps overline, HSR-style — pair with a CJK title where a page wants a header.
+   Usage: <span class="overline">WORLD</span> */
+.overline {
+  font-family: var(--ow-overline);
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  color: var(--ow-gold-bright);
 }
 
 .muted {
   color: var(--ow-muted);
+}
+
+/* a calm amber caution line for honest signals (faithfulness flags, dilution notes, etc.) */
+.warn {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid color-mix(in srgb, #d98a5a 50%, var(--ow-line));
+  border-radius: 8px;
+  background: color-mix(in srgb, #d98a5a 11%, transparent);
+  color: #e0a878;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+/* ---- global micro-interactions (theme-consistent; reduced-motion neutralised above) ---- */
+
+/* form focus: a soft gold ring + faint glow instead of a bare border flip */
+input:focus,
+input:focus-visible,
+textarea:focus,
+textarea:focus-visible,
+select:focus {
+  box-shadow:
+    0 0 0 3px var(--ow-gold-faint),
+    0 0 14px rgba(240, 210, 138, 0.16);
+}
+
+/* every button gets a brief press feedback; primary keeps its own hover glow */
+button {
+  transition:
+    transform 0.09s ease,
+    filter 0.12s ease,
+    box-shadow 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+button:not(:disabled):active {
+  transform: translateY(1px) scale(0.985);
+}
+
+/* secondary / ghost buttons were flat on hover — give them a restrained gold lift */
+button.ghost:not(:disabled):hover,
+button.secondary:not(:disabled):hover {
+  border-color: var(--ow-gold-soft);
+  color: var(--ow-gold-bright);
+  box-shadow: 0 0 12px rgba(240, 210, 138, 0.14);
+}
+
+/* chips: a touch of life on hover */
+.chip {
+  transition:
+    transform 0.12s ease,
+    box-shadow 0.12s ease;
+}
+
+.chip:hover {
+  transform: translateY(-1px);
+}
+
+/* reusable staggered entrance for list/result reveals: add class="reveal" to the container,
+   children rise in sequence. Caps the delay so long lists don't crawl. */
+.reveal > * {
+  animation: ow-fade-up 0.42s ease both;
+}
+.reveal > *:nth-child(1) {
+  animation-delay: 0.02s;
+}
+.reveal > *:nth-child(2) {
+  animation-delay: 0.07s;
+}
+.reveal > *:nth-child(3) {
+  animation-delay: 0.12s;
+}
+.reveal > *:nth-child(4) {
+  animation-delay: 0.17s;
+}
+.reveal > *:nth-child(5) {
+  animation-delay: 0.22s;
+}
+.reveal > *:nth-child(6) {
+  animation-delay: 0.27s;
+}
+.reveal > *:nth-child(n + 7) {
+  animation-delay: 0.3s;
+}
+
+/* flash / notice messages slide in instead of popping */
+@keyframes ow-flash-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.flash,
+.notice,
+.error,
+.ok-text {
+  animation: ow-flash-in 0.26s ease-out both;
+}
+
+/* B11 · pro mode — a calmer workspace for daily high-frequency users. Drops decorative motion
+   beyond what prefers-reduced-motion covers (the aurora drift, grid haze, route warp). The
+   starfield is removed in App.vue via v-if; these tame what's left. Functional transitions stay. */
+body.pro-mode .aurora {
+  animation: none !important;
+  opacity: 0.16 !important;
+}
+body.pro-mode .grid-haze {
+  opacity: 0.22 !important;
+}
+body.pro-mode .page-enter-active,
+body.pro-mode .page-leave-active {
+  transition-duration: 0.08s !important;
+  filter: none !important;
 }

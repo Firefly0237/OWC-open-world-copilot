@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
-import { apiGet, apiPost, apiUrl, currentProject, setCurrentProject } from "../api";
+import {
+  humanizeError,
+  apiDelete,
+  apiGet,
+  apiPost,
+  apiUrl,
+  currentProject,
+  setCurrentProject,
+} from "../api";
+import PageHead from "../components/PageHead.vue";
+import FilePicker from "../components/FilePicker.vue";
 
 const workspaces = ref<{ name: string; path: string }[]>([]);
 const newName = ref("");
@@ -19,7 +29,7 @@ onMounted(async () => {
   try {
     await refresh();
   } catch (e) {
-    error.value = String(e);
+    error.value = humanizeError(e);
   }
 });
 
@@ -40,15 +50,14 @@ async function create(): Promise<void> {
     flash.value = `世界「${created.name}」已创建。`;
     await refresh();
   } catch (e) {
-    error.value = String(e);
+    error.value = humanizeError(e);
   }
 }
 
-function onFile(event: Event): void {
-  const files = (event.target as HTMLInputElement).files;
-  importFile.value = files && files.length ? files[0] : null;
-  if (importFile.value && !importName.value.trim()) {
-    importName.value = importFile.value.name.replace(/\.zip$/i, "");
+function onFile(file: File): void {
+  importFile.value = file;
+  if (!importName.value.trim()) {
+    importName.value = file.name.replace(/\.zip$/i, "");
   }
 }
 
@@ -73,7 +82,7 @@ async function importPack(): Promise<void> {
     importFile.value = null;
     await refresh();
   } catch (e) {
-    error.value = String(e);
+    error.value = humanizeError(e);
   }
 }
 
@@ -82,12 +91,31 @@ function switchTo(name: string): void {
   active.value = name;
   window.location.reload();
 }
+
+async function remove(name: string): Promise<void> {
+  // the current world can't be deleted out from under the app — guide the user to switch first
+  if (name === active.value) {
+    error.value = "不能删除当前打开的世界。先切换到别的世界，再回来删除它。";
+    return;
+  }
+  if (!window.confirm(`确定删除世界「${name}」？此操作不可撤销，世界包没备份的话内容会永久丢失。`)) {
+    return;
+  }
+  flash.value = "";
+  error.value = "";
+  try {
+    await apiDelete<{ deleted: string }>(`/workspaces/${encodeURIComponent(name)}`);
+    flash.value = `世界「${name}」已删除。`;
+    await refresh();
+  } catch (e) {
+    error.value = humanizeError(e);
+  }
+}
 </script>
 
 <template>
   <section>
-    <div class="section"><span class="t">工作区 · 我的世界</span></div>
-    <p class="muted hint">世界保存在本机；世界包（.zip）用于备份、换机与交接。</p>
+    <PageHead overline="WORLDS" title="工作区" purpose="新建、切换与管理世界；世界包用于备份与交接。" />
     <p v-if="flash" class="flash">{{ flash }}</p>
     <p v-if="error" class="error">{{ error }}</p>
 
@@ -101,7 +129,7 @@ function switchTo(name: string): void {
       </div>
       <div class="pane block">
         <div class="section"><span class="t">导入世界包</span></div>
-        <input type="file" accept=".zip" @change="onFile" />
+        <FilePicker accept=".zip" hint="选择世界包 .zip，或拖入" @select="onFile" />
         <div class="row">
           <input v-model="importName" maxlength="48" placeholder="导入为…" />
           <button class="primary" :disabled="!importFile || !importName.trim()" @click="importPack">
@@ -123,6 +151,14 @@ function switchTo(name: string): void {
         <a class="ghost link" :href="apiUrl(`/workspaces/${encodeURIComponent(w.name)}/pack`)">
           下载世界包
         </a>
+        <button
+          v-if="w.name !== active"
+          class="ghost danger"
+          title="删除世界（不可撤销）"
+          @click="remove(w.name)"
+        >
+          删除
+        </button>
       </div>
     </TransitionGroup>
   </section>
@@ -199,6 +235,15 @@ button.primary {
 button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+button.danger {
+  border-color: rgba(224, 133, 133, 0.45);
+  color: #e89a9a;
+}
+
+button.danger:hover {
+  background: rgba(224, 133, 133, 0.12);
 }
 
 .worlds {

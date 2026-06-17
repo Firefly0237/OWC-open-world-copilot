@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from "vue";
 import { apiGet, apiPost, currentProject } from "../api";
+import PageHead from "../components/PageHead.vue";
+import { notifyError } from "../toast";
 
 const CHANGE_TYPES = [
   { value: "entity_delete", label: "删除实体" },
@@ -31,7 +33,6 @@ const changes = reactive<{ change_type: string; target_ref: string }[]>([
 ]);
 const maxDepth = ref(2);
 const running = ref(false);
-const error = ref("");
 const result = ref<{ must: ImpactItem[]; suggest: ImpactItem[]; total: number } | null>(null);
 
 async function loadArchive(): Promise<void> {
@@ -49,7 +50,7 @@ onMounted(async () => {
     await loadArchive();
     if (entities.value.length) changes[0].target_ref = `entity:${entities.value[0].id}`;
   } catch (e) {
-    error.value = String(e);
+    notifyError(e);
   }
 });
 
@@ -72,7 +73,6 @@ async function analyze(): Promise<void> {
   const payload = changes.filter((c) => c.target_ref.trim());
   if (!payload.length || running.value) return;
   running.value = true;
-  error.value = "";
   result.value = null;
   try {
     const body = await apiPost<{ must_change: ImpactItem[]; suggest_check: ImpactItem[]; total: number }>(
@@ -81,7 +81,7 @@ async function analyze(): Promise<void> {
     );
     result.value = { must: body.must_change, suggest: body.suggest_check, total: body.total };
   } catch (e) {
-    error.value = String(e);
+    notifyError(e);
   } finally {
     running.value = false;
   }
@@ -90,8 +90,7 @@ async function analyze(): Promise<void> {
 
 <template>
   <section>
-    <div class="section"><span class="t">影响分析 · 改动涟漪</span></div>
-    <p class="muted hint">改动落子之前先问一句：会牵动什么？沿图谱推演必须同步改的、和建议复查的。</p>
+    <PageHead overline="IMPACT" title="影响分析" purpose="预演一处改动会牵连到哪些内容。" />
 
     <div class="pane form">
       <div v-for="(row, index) in changes" :key="index" class="change-row">
@@ -120,7 +119,6 @@ async function analyze(): Promise<void> {
       </div>
     </div>
 
-    <p v-if="error" class="error">{{ error }}</p>
 
     <div v-if="result" class="pane done">
       <div class="chips">

@@ -1,17 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, toRef, toRefs } from "vue";
 import StepperProgress from "../components/StepperProgress.vue";
-import {
-  addSessionCost,
-  apiGet,
-  apiPost,
-  costOf,
-  currentProject,
-  llmConfig,
-  llmParams,
-  streamJobEvents,
-} from "../api";
+import PageHead from "../components/PageHead.vue";
+import Modal from "../components/Modal.vue";
+import { apiGet, currentProject, llmConfig, llmParams } from "../api";
+import { getJobChannel, startJob } from "../jobs";
+import { example } from "../examples";
 
+const phIdea = example("genesisIdea");
 const UNDECIDED = "暂未想好";
 const CUSTOM = "其他…";
 
@@ -83,13 +79,34 @@ const STYLE_OPTIONS = [
   "历史架空",
 ];
 
+// The real grounded chain (premise→factions→regions→cast→quests), not decorative labels. A
+// stage whose section count is 0 simply never fires; the progress bar advances monotonically.
 const STAGES = [
   { key: "accepted", label: "受理" },
   { key: "retrieving", label: "检索" },
-  { key: "generating", label: "推演" },
-  { key: "parsing", label: "整理" },
+  { key: "premise", label: "前提" },
+  { key: "factions", label: "阵营" },
+  { key: "regions", label: "区域" },
+  { key: "cast", label: "角色" },
+  { key: "quests", label: "任务" },
+  { key: "assembling", label: "归整" },
   { key: "done", label: "候批" },
 ];
+
+const REFERENCE_MODES = ["灵感参考", "结构借鉴", "改编重构"];
+
+// evocative per-stage lines for the wait (animation copy — creative is allowed here)
+const FLAVORS: Record<string, string> = {
+  accepted: "受理创世请求…",
+  retrieving: "翻检灵感与既有设定…",
+  premise: "锚定世界的戏剧主轴…",
+  factions: "让势力在棋盘上落子…",
+  regions: "把疆域铺向地平线…",
+  cast: "为世界注入有名有姓的人…",
+  quests: "把冲突拧成可玩的线索…",
+  assembling: "归整、校对、收口…",
+  done: "世界已成形。",
+};
 
 const form = reactive({
   idea: "",
@@ -104,12 +121,21 @@ const form = reactive({
   castRows: [] as { name: string; profile: string }[],
   restrictions: "",
   notes: "",
+  // Grounding in the content brought in via 内容带入 — references (灵感库) and the world's own canon.
+  useReferences: true,
+  referenceFocus: "",
+  referenceMode: "灵感参考",
+  useProjectFacts: true,
   factions: 2,
   regions: 1,
   npcs: 4,
   quests: 2,
   terms: 3,
 });
+
+// The inspiration library + already-approved canon this world can be grounded in.
+const refCount = ref(0);
+const canonCount = ref(0);
 
 function addCastRow(): void {
   form.castRows.push({ name: "", profile: "" });
@@ -131,26 +157,45 @@ interface SeedRelation {
   kind: string;
 }
 
-const running = ref(false);
-const stageIndex = ref(-1);
-const elapsed = ref(0);
-const error = ref("");
-const lastCost = ref(0);
-const llmReady = ref(llmConfig().ready);
-const result = ref<{
+interface GenesisResult {
   summary: string;
   counts: Record<string, number>;
   characters: SeedEntity[];
   relations: SeedRelation[];
-} | null>(null);
+}
 
-let timer: number | undefined;
+// The run lives in a global channel (jobs.ts), so the warp + progress survive leaving and
+// returning to this page mid-generation.
+const job = getJobChannel<GenesisResult>("world_seed", STAGES);
+const { running, stageIndex, elapsed, result } = toRefs(job);
+const lastCost = toRef(job, "cost");
+const llmReady = ref(llmConfig().ready);
+const showWorld = ref(false);
 
 function onLlmChanged(): void {
   llmReady.value = llmConfig().ready;
 }
 
-onMounted(() => window.addEventListener("ow-llm-changed", onLlmChanged));
+onMounted(async () => {
+  window.addEventListener("ow-llm-changed", onLlmChanged);
+  // Surface what's available to ground in, so the creator can see the ingestion products feed
+  // straight into creation rather than having to know the wiring.
+  try {
+    const refs = await apiGet<{ count: number }>(`/projects/${currentProject()}/references`);
+    refCount.value = refs.count ?? 0;
+  } catch {
+    refCount.value = 0;
+  }
+  try {
+    const body = await apiGet<{ overview: { counts?: Record<string, number> } }>(
+      `/projects/${currentProject()}/overview`,
+    );
+    const c = body.overview?.counts ?? {};
+    canonCount.value = (c.entities ?? 0) + (c.quests ?? 0) + (c.terms ?? 0);
+  } catch {
+    canonCount.value = 0;
+  }
+});
 
 const COUNT_LABELS: Record<string, string> = {
   entities: "实体",
@@ -177,118 +222,81 @@ function toggleStyle(style: string): void {
   else form.styles.push(style);
 }
 
-function stopTimer(): void {
-  if (timer !== undefined) {
-    window.clearInterval(timer);
-    timer = undefined;
-  }
-}
-
 onUnmounted(() => {
-  stopTimer();
   window.removeEventListener("ow-llm-changed", onLlmChanged);
 });
 
 async function run(): Promise<void> {
   if (!canRun.value) return;
-  running.value = true;
-  stageIndex.value = 0;
-  elapsed.value = 0;
-  result.value = null;
-  error.value = "";
-  stopTimer();
-  timer = window.setInterval(() => {
-    elapsed.value += 1;
-  }, 1000);
   const styles = [...form.styles];
   if (form.styleCustom.trim()) styles.push(form.styleCustom.trim());
-  try {
-    const job = await apiPost<{ job_id: string }>(`/projects/${currentProject()}/jobs`, {
-      kind: "world_seed",
-      params: {
-        ...llmParams(),
-        brief: {
-          idea: form.idea.trim(),
-          medium: resolved("medium"),
-          world_styles: styles,
-          tone: resolved("tone"),
-          era: resolved("era"),
-          magic_level: resolved("magic_level"),
-          world_scale: resolved("world_scale"),
-          core_conflict: resolved("core_conflict"),
-          player_fantasy: form.playerFantasy.trim(),
-          key_characters: form.castRows
-            .filter((row) => row.name.trim())
-            .map((row) =>
-              row.profile.trim() ? `${row.name.trim()}：${row.profile.trim()}` : row.name.trim(),
-            ),
-          content_restrictions: form.restrictions.trim(),
-          notes: form.notes.trim(),
-          faction_count: form.factions,
-          region_count: form.regions,
-          npc_count: form.npcs,
-          quest_count: form.quests,
-          term_count: form.terms,
-        },
+  await startJob<GenesisResult>("world_seed", {
+    kind: "world_seed",
+    stages: STAGES,
+    params: {
+      ...llmParams(),
+      brief: {
+        idea: form.idea.trim(),
+        medium: resolved("medium"),
+        world_styles: styles,
+        tone: resolved("tone"),
+        era: resolved("era"),
+        magic_level: resolved("magic_level"),
+        world_scale: resolved("world_scale"),
+        core_conflict: resolved("core_conflict"),
+        player_fantasy: form.playerFantasy.trim(),
+        key_characters: form.castRows
+          .filter((row) => row.name.trim())
+          .map((row) =>
+            row.profile.trim() ? `${row.name.trim()}：${row.profile.trim()}` : row.name.trim(),
+          ),
+        content_restrictions: form.restrictions.trim(),
+        notes: form.notes.trim(),
+        use_references: form.useReferences,
+        reference_mode: form.referenceMode,
+        reference_query: form.useReferences ? form.referenceFocus.trim() : "",
+        use_project_facts: form.useProjectFacts,
+        faction_count: form.factions,
+        region_count: form.regions,
+        npc_count: form.npcs,
+        quest_count: form.quests,
+        term_count: form.terms,
       },
-    });
-    await streamJobEvents(job.job_id, (event) => {
+    },
+    onEvent: (ch, event) => {
       if (event.type === "stage") {
         const name = String(event.data.name ?? "");
         const index = STAGES.findIndex((s) => s.key === name);
-        if (index > stageIndex.value) stageIndex.value = index;
-      } else if (event.type === "failed") {
-        error.value = String(event.data.error ?? "任务失败");
+        if (index > ch.stageIndex) ch.stageIndex = index;
       }
-    });
-    const status = await apiGet<{
-      status: string;
-      result: {
+    },
+    parseResult: (raw) => {
+      const r = raw as {
         summary?: string;
         counts?: Record<string, number>;
-        bundle?: {
-          entities?: Record<string, SeedEntity>;
-          relations?: SeedRelation[];
-        };
-      } | null;
-      error: string | null;
-    }>(`/jobs/${job.job_id}`);
-    if (status.status === "done" && status.result) {
-      stageIndex.value = STAGES.length - 1;
-      const used = costOf(status.result as { cost_budget?: { used_usd?: number } });
-      lastCost.value = used;
-      addSessionCost(used);
-      const bundle = status.result.bundle ?? {};
+        bundle?: { entities?: Record<string, SeedEntity>; relations?: SeedRelation[] };
+      };
+      const bundle = r.bundle ?? {};
       const entities = Object.values(bundle.entities ?? {});
-      const names = new Map(
-        Object.entries(bundle.entities ?? {}).map(([id, e]) => [id, e.name]),
-      );
-      result.value = {
-        summary: status.result.summary ?? "",
-        counts: status.result.counts ?? {},
+      const names = new Map(Object.entries(bundle.entities ?? {}).map(([id, e]) => [id, e.name]));
+      return {
+        summary: r.summary ?? "",
+        counts: r.counts ?? {},
         characters: entities.filter((e) => e.type === "npc"),
-        relations: (bundle.relations ?? []).slice(0, 14).map((r) => ({
-          source: names.get(r.source) ?? r.source,
-          target: names.get(r.target) ?? r.target,
-          kind: r.kind,
+        relations: (bundle.relations ?? []).slice(0, 14).map((rel) => ({
+          source: names.get(rel.source) ?? rel.source,
+          target: names.get(rel.target) ?? rel.target,
+          kind: rel.kind,
         })),
       };
-    } else if (!error.value) {
-      error.value = status.error ?? "任务未完成";
-    }
-  } catch (e) {
-    error.value = String(e);
-  } finally {
-    running.value = false;
-    stopTimer();
-  }
+    },
+  });
 }
 </script>
 
 <template>
   <section>
-    <div class="section"><span class="t">创世工坊 · 一键创世</span></div>
-    <p class="muted hint">只有核心想法必填，其余想到哪选到哪。</p>
+    <PageHead overline="GENESIS" title="创世工坊" purpose="一句话长成一个世界，只有核心想法必填。" />
 
     <div class="pane form">
       <label class="field">
@@ -300,7 +308,7 @@ async function run(): Promise<void> {
           v-model="form.idea"
           rows="3"
           maxlength="4000"
-          placeholder="例如：一个靠蒸汽巨树维持生命的群岛世界，各方势力争夺树心的控制权。"
+          :placeholder="`例如：${phIdea}`"
         ></textarea>
         <span v-if="form.idea.length > 1200" class="muted small">
           篇幅很长？现成的设定文档更适合用「文稿提炼」整理入档，这里写主旨即可。
@@ -360,6 +368,34 @@ async function run(): Promise<void> {
         <button type="button" class="ghost add" @click="addCastRow">+ 添加人物</button>
       </div>
 
+      <div class="field grounding">
+        <span class="label">接地与参考 <i class="muted">用「内容带入」的产物为世界打底</i></span>
+        <label class="ground-row">
+          <input v-model="form.useReferences" type="checkbox" />
+          <span>
+            借鉴灵感库
+            <i class="muted">（已收录 {{ refCount }} 份素材；只取相关片段作灵感，不复制原文）</i>
+          </span>
+        </label>
+        <div v-if="form.useReferences" class="ground-detail">
+          <input
+            v-model="form.referenceFocus"
+            maxlength="200"
+            placeholder="想从素材里借鉴的焦点（留空＝按核心想法自动检索）"
+          />
+          <select v-model="form.referenceMode">
+            <option v-for="mode in REFERENCE_MODES" :key="mode" :value="mode">{{ mode }}</option>
+          </select>
+        </div>
+        <label class="ground-row">
+          <input v-model="form.useProjectFacts" type="checkbox" />
+          <span>
+            纳入本世界已有设定
+            <i class="muted">（与已入档的 {{ canonCount }} 条设定保持一致，适合提炼入库后再创世）</i>
+          </span>
+        </label>
+      </div>
+
       <label class="field">
         <span class="label">补充要求</span>
         <input v-model="form.notes" placeholder="可留空" />
@@ -379,9 +415,9 @@ async function run(): Promise<void> {
         {{ running ? "正在开辟…" : "开辟世界" }}
       </button>
       <p v-if="!llmReady" class="muted small">
-        生成走真实模型——先在
+        请先在
         <RouterLink to="/settings" class="golink">设置</RouterLink>
-        接入服务商与 API Key。
+        接入模型。
       </p>
     </div>
 
@@ -391,12 +427,12 @@ async function run(): Promise<void> {
       :index="stageIndex"
       :running="running"
       :elapsed="elapsed"
+      :flavors="FLAVORS"
       hint="大世界通常需要一两分钟"
     />
 
-    <p v-if="error" class="error">{{ error }}</p>
-
-    <div v-if="result" class="pane done">
+    <!-- concise result: world梗概 + scale; cast & relations open in a detail view on demand -->
+    <div v-if="result" class="pane done reveal">
       <p class="summary">{{ result.summary }}</p>
       <div class="chips">
         <span v-for="(count, key) in result.counts" :key="key" class="chip static">
@@ -404,25 +440,38 @@ async function run(): Promise<void> {
         </span>
         <span v-if="lastCost" class="chip static">本次 <b>${{ lastCost.toFixed(4) }}</b></span>
       </div>
-      <template v-if="result.characters.length">
-        <div class="section"><span class="t">人物</span></div>
-        <div class="cast">
-          <div v-for="person in result.characters" :key="person.name" class="person">
-            <b>{{ person.name }}</b>
-            <span class="muted">{{ person.description }}</span>
-          </div>
-        </div>
-      </template>
-      <template v-if="result.relations.length">
-        <div class="section"><span class="t">关系</span></div>
-        <div class="relations">
-          <span v-for="(rel, index) in result.relations" :key="index" class="rel">
-            {{ rel.source }} <i>{{ rel.kind }}</i> {{ rel.target }}
-          </span>
-        </div>
-      </template>
-      <p class="muted">草案已入审阅台，采纳后正式入档。</p>
+      <div class="done-foot">
+        <button
+          v-if="result.characters.length || result.relations.length"
+          class="card-open"
+          @click="showWorld = true"
+        >查看世界详情</button>
+        <span class="muted small">已入审阅台候批</span>
+      </div>
     </div>
+
+    <Modal :open="showWorld" overline="WORLD" :title="result?.summary ? '世界详情' : ''" @close="showWorld = false">
+      <div v-if="result" class="worldview reveal">
+        <p class="summary lead">{{ result.summary }}</p>
+        <template v-if="result.characters.length">
+          <div class="section sub"><span class="t">人物</span></div>
+          <div class="cast">
+            <div v-for="person in result.characters" :key="person.name" class="person">
+              <b>{{ person.name }}</b>
+              <span class="muted">{{ person.description }}</span>
+            </div>
+          </div>
+        </template>
+        <template v-if="result.relations.length">
+          <div class="section sub"><span class="t">关系</span></div>
+          <div class="relations">
+            <span v-for="(rel, index) in result.relations" :key="index" class="rel">
+              {{ rel.source }} <i>{{ rel.kind }}</i> {{ rel.target }}
+            </span>
+          </div>
+        </template>
+      </div>
+    </Modal>
   </section>
 </template>
 
@@ -569,6 +618,43 @@ button.add {
   font-size: 0.78rem;
 }
 
+.grounding {
+  border: 1px solid var(--ow-line);
+  border-radius: 0.6rem;
+  background: rgba(13, 18, 42, 0.4);
+  padding: 0.75rem 0.9rem;
+  gap: 0.55rem;
+}
+
+.ground-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.ground-row input[type="checkbox"] {
+  margin-top: 0.2rem;
+}
+
+.ground-row i {
+  font-size: 0.76rem;
+}
+
+.ground-detail {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0 0 0.2rem 1.5rem;
+}
+
+.ground-detail input {
+  flex: 1;
+  min-width: 12rem;
+}
+
 .scales {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -626,6 +712,36 @@ button.primary:disabled {
 .summary {
   margin: 0 0 0.5rem;
   line-height: 1.7;
+}
+.summary.lead {
+  font-size: 0.95rem;
+  line-height: 1.8;
+}
+.done-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+.card-open {
+  border: 1px solid var(--ow-gold-soft);
+  background: var(--ow-gold-faint);
+  color: var(--ow-gold-bright);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.85rem;
+  font: inherit;
+  font-size: 0.84rem;
+  cursor: pointer;
+  transition: box-shadow 0.15s ease;
+}
+.card-open:hover {
+  box-shadow: 0 0 12px rgba(240, 210, 138, 0.22);
+}
+.worldview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
 .done .chips {

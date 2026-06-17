@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { apiPost, currentProject } from "../api";
+import PageHead from "../components/PageHead.vue";
+import FilePicker from "../components/FilePicker.vue";
+import { notifyError } from "../toast";
 
 interface Change {
   change_type: string;
@@ -31,7 +34,6 @@ const CT_LABEL: Record<string, string> = {
 const file = ref<File | null>(null);
 const fileB64 = ref("");
 const busy = ref(false);
-const error = ref("");
 const flash = ref("");
 const preview = ref<IngestResult | null>(null);
 const committed = ref(false);
@@ -42,13 +44,11 @@ const counts = computed(() => {
   return c;
 });
 
-function onFile(event: Event): void {
-  const f = (event.target as HTMLInputElement).files?.[0] ?? null;
+function onFile(f: File): void {
   file.value = f;
   preview.value = null;
   committed.value = false;
   flash.value = "";
-  if (!f) return;
   const reader = new FileReader();
   reader.onload = () => {
     const result = reader.result as string;
@@ -60,7 +60,6 @@ function onFile(event: Event): void {
 async function call(dryRun: boolean): Promise<IngestResult | null> {
   if (!file.value || !fileB64.value) return null;
   busy.value = true;
-  error.value = "";
   try {
     return await apiPost<IngestResult>(`/projects/${currentProject()}/ingest`, {
       filename: file.value.name,
@@ -69,7 +68,7 @@ async function call(dryRun: boolean): Promise<IngestResult | null> {
       write_non_conflicting: !dryRun,
     });
   } catch (e) {
-    error.value = String(e);
+    notifyError(e);
     return null;
   } finally {
     busy.value = false;
@@ -96,11 +95,10 @@ async function commit(): Promise<void> {
 
 <template>
   <section>
-    <div class="section"><span class="t">表格导入 · 严格格式入库</span></div>
-    <p class="muted hint">从既有的表格/数据文件（xlsx / json / jsonl / md / luban）批量导入。先预演看清增改冲突，确认后只写非冲突项。</p>
+    <PageHead overline="IMPORT" title="表格导入" purpose="表格或数据文件批量入库，先预演再写入。" />
 
     <div class="pane form">
-      <input type="file" accept=".xlsx,.json,.jsonl,.md,.luban" @change="onFile" />
+      <FilePicker accept=".xlsx,.json,.jsonl,.md,.luban" hint="选择 xlsx / json / jsonl / md / luban，或拖入" @select="onFile" />
       <div class="actions">
         <button class="ghost" :disabled="busy || !file" @click="dryRun">
           {{ busy && !committed ? "预演中…" : "预演（不写入）" }}
@@ -117,7 +115,6 @@ async function commit(): Promise<void> {
       <p v-if="preview?.has_errors" class="muted small">预演发现错误，确认导入已锁定——请先处理下方错误。</p>
     </div>
 
-    <p v-if="error" class="error">{{ error }}</p>
     <p v-if="flash" class="flash">{{ flash }}</p>
 
     <div v-if="preview" class="pane done">

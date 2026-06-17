@@ -1,18 +1,23 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, toRef, toRefs } from "vue";
 import StepperProgress from "../components/StepperProgress.vue";
+import PageHead from "../components/PageHead.vue";
+import Modal from "../components/Modal.vue";
 import {
-  addSessionCost,
+  humanizeError,
   apiDelete,
   apiGet,
   apiPatch,
   apiPost,
-  costOf,
   currentProject,
   llmConfig,
   llmParams,
-  streamJobEvents,
 } from "../api";
+import { getJobChannel, startJob } from "../jobs";
+import { notifyError } from "../toast";
+import { example } from "../examples";
+
+const phConcept = example("characterConcept");
 
 const UNDECIDED = "暂未想好";
 const CUSTOM = "其他…";
@@ -26,6 +31,15 @@ const STAGES = [
   { key: "parsing", label: "整理" },
   { key: "done", label: "候批" },
 ];
+
+// evocative per-stage lines for the wait (animation copy)
+const FLAVORS: Record<string, string> = {
+  accepted: "受理角色请求…",
+  retrieving: "翻检相关设定…",
+  generating: "为这个人注入血肉与口吻…",
+  parsing: "整理成一张角色卡…",
+  done: "角色已成形。",
+};
 
 const PROFILE_LABELS: Record<string, string> = {
   appearance: "外貌",
@@ -66,19 +80,19 @@ const factions = ref<ArchiveEntity[]>([]);
 const locations = ref<ArchiveEntity[]>([]);
 const npcs = ref<ArchiveEntity[]>([]);
 
-const running = ref(false);
-const stageIndex = ref(-1);
-const elapsed = ref(0);
-const error = ref("");
-const lastCost = ref(0);
-const llmReady = ref(llmConfig().ready);
-const result = ref<{
+interface CharacterResult {
   name: string;
   summary: string;
   profile: Record<string, string>;
   relations: { target: string; kind: string }[];
   suggested: string[];
-} | null>(null);
+  autoReviewIncomplete: boolean;
+}
+
+const job = getJobChannel<CharacterResult>("character_profile", STAGES);
+const { running, stageIndex, elapsed, result } = toRefs(job);
+const lastCost = toRef(job, "cost");
+const llmReady = ref(llmConfig().ready);
 
 const expanded = ref<string>("");
 const editing = ref<string>("");
@@ -86,15 +100,13 @@ const editDraft = reactive<{ description: string; tags: string; profile: Record<
   { description: "", tags: "", profile: {} },
 );
 const maintainFlash = ref("");
-
-let timer: number | undefined;
+const showCard = ref(false);
 
 function onLlmChanged(): void {
   llmReady.value = llmConfig().ready;
 }
 
 onUnmounted(() => {
-  if (timer !== undefined) window.clearInterval(timer);
   window.removeEventListener("ow-llm-changed", onLlmChanged);
 });
 
@@ -121,7 +133,7 @@ onMounted(async () => {
   try {
     await loadArchive();
   } catch (e) {
-    error.value = String(e);
+    notifyError(e);
   }
 });
 
@@ -135,84 +147,60 @@ function removeRelationRow(index: number): void {
 
 async function run(): Promise<void> {
   if (!canRun.value) return;
-  running.value = true;
-  stageIndex.value = 0;
-  elapsed.value = 0;
-  result.value = null;
-  error.value = "";
-  if (timer !== undefined) window.clearInterval(timer);
-  timer = window.setInterval(() => {
-    elapsed.value += 1;
-  }, 1000);
   const role = form.role === UNDECIDED ? "" : form.role === CUSTOM ? form.roleCustom.trim() : form.role;
   const nameOf = new Map(npcs.value.map((n) => [n.id, n.name]));
-  try {
-    const job = await apiPost<{ job_id: string }>(`/projects/${currentProject()}/jobs`, {
-      kind: "character_profile",
-      params: {
-        ...llmParams(),
-        brief: {
-          name: form.name.trim(),
-          concept: form.concept.trim(),
-          age_gender: form.ageGender.trim(),
-          species: form.species.trim(),
-          role_function: role,
-          faction_id: form.factionId,
-          location_id: form.locationId,
-          personality_hints: form.personality.trim(),
-          voice_hints: form.voice.trim(),
-          relationship_hints: form.relations
-            .filter((r) => r.target && r.note.trim())
-            .map((r) => `与 ${r.target}（${nameOf.get(r.target) ?? r.target}）：${r.note.trim()}`),
-          notes: form.notes.trim(),
-        },
+  const allNames = new Map(
+    [...npcs.value, ...factions.value, ...locations.value].map((e) => [e.id, e.name]),
+  );
+  const fallbackName = form.name.trim();
+  await startJob<CharacterResult>("character_profile", {
+    kind: "character_profile",
+    stages: STAGES,
+    params: {
+      ...llmParams(),
+      brief: {
+        name: form.name.trim(),
+        concept: form.concept.trim(),
+        age_gender: form.ageGender.trim(),
+        species: form.species.trim(),
+        role_function: role,
+        faction_id: form.factionId,
+        location_id: form.locationId,
+        personality_hints: form.personality.trim(),
+        voice_hints: form.voice.trim(),
+        relationship_hints: form.relations
+          .filter((r) => r.target && r.note.trim())
+          .map((r) => `与 ${r.target}（${nameOf.get(r.target) ?? r.target}）：${r.note.trim()}`),
+        notes: form.notes.trim(),
       },
-    });
-    await streamJobEvents(job.job_id, (event) => {
+    },
+    onEvent: (ch, event) => {
       if (event.type === "stage") {
         const index = STAGES.findIndex((s) => s.key === String(event.data.name ?? ""));
-        if (index > stageIndex.value) stageIndex.value = index;
-      } else if (event.type === "failed") {
-        error.value = String(event.data.error ?? "任务失败");
+        if (index > ch.stageIndex) ch.stageIndex = index;
       }
-    });
-    const status = await apiGet<{
-      status: string;
-      result: {
+    },
+    parseResult: (raw) => {
+      const r = raw as {
         entity?: { name: string; description: string };
         profile?: Record<string, string>;
         relations?: { target: string; kind: string }[];
         suggested_relations?: string[];
-      } | null;
-      error: string | null;
-    }>(`/jobs/${job.job_id}`);
-    if (status.status === "done" && status.result) {
-      stageIndex.value = STAGES.length - 1;
-      const used = costOf(status.result as { cost_budget?: { used_usd?: number } });
-      lastCost.value = used;
-      addSessionCost(used);
-      const allNames = new Map(
-        [...npcs.value, ...factions.value, ...locations.value].map((e) => [e.id, e.name]),
-      );
-      result.value = {
-        name: status.result.entity?.name ?? form.name,
-        summary: status.result.entity?.description ?? "",
-        profile: status.result.profile ?? {},
-        relations: (status.result.relations ?? []).map((r) => ({
-          target: allNames.get(r.target) ?? r.target,
-          kind: r.kind,
-        })),
-        suggested: status.result.suggested_relations ?? [],
+        auto_review_incomplete?: boolean;
       };
-    } else if (!error.value) {
-      error.value = status.error ?? "任务未完成";
-    }
-  } catch (e) {
-    error.value = String(e);
-  } finally {
-    running.value = false;
-    if (timer !== undefined) window.clearInterval(timer);
-  }
+      return {
+        name: r.entity?.name ?? fallbackName,
+        summary: r.entity?.description ?? "",
+        profile: r.profile ?? {},
+        relations: (r.relations ?? []).map((rel) => ({
+          target: allNames.get(rel.target) ?? rel.target,
+          kind: rel.kind,
+        })),
+        suggested: r.suggested_relations ?? [],
+        autoReviewIncomplete: r.auto_review_incomplete ?? false,
+      };
+    },
+  });
 }
 
 function startEdit(npc: ArchiveEntity): void {
@@ -237,7 +225,7 @@ async function saveEdit(npc: ArchiveEntity): Promise<void> {
     maintainFlash.value = `已更新 ${npc.name}。`;
     await loadArchive();
   } catch (e) {
-    maintainFlash.value = String(e);
+    maintainFlash.value = humanizeError(e);
   }
 }
 
@@ -249,15 +237,14 @@ async function removeNpc(npc: ArchiveEntity): Promise<void> {
     maintainFlash.value = `已删除 ${npc.name}。`;
     await loadArchive();
   } catch (e) {
-    maintainFlash.value = String(e);
+    maintainFlash.value = humanizeError(e);
   }
 }
 </script>
 
 <template>
   <section>
-    <div class="section"><span class="t">人物工坊 · 角色卡</span></div>
-    <p class="muted hint">名字和一句话概念必填，其余想到哪选到哪。生成的角色会进审阅台候批。</p>
+    <PageHead overline="CHARACTERS" title="人物工坊" purpose="生成可维护的角色卡，名字与概念必填。" />
 
     <div class="pane form">
       <div class="grid">
@@ -286,7 +273,7 @@ async function removeNpc(npc: ArchiveEntity): Promise<void> {
           v-model="form.concept"
           rows="2"
           maxlength="2000"
-          placeholder="例如：走私船上长大、如今执法的年轻巡查官，正在查一桩牵连养父的旧案。"
+          :placeholder="`例如：${phConcept}`"
         ></textarea>
       </label>
       <div class="grid">
@@ -344,9 +331,9 @@ async function removeNpc(npc: ArchiveEntity): Promise<void> {
         {{ running ? "正在落笔…" : "生成角色卡" }}
       </button>
       <p v-if="!llmReady" class="muted small">
-        生成走真实模型——先在
+        请先在
         <RouterLink to="/settings" class="golink">设置</RouterLink>
-        接入服务商与 API Key。
+        接入模型。
       </p>
     </div>
 
@@ -356,30 +343,45 @@ async function removeNpc(npc: ArchiveEntity): Promise<void> {
       :index="stageIndex"
       :running="running"
       :elapsed="elapsed"
+      :flavors="FLAVORS"
     />
 
-    <p v-if="error" class="error">{{ error }}</p>
-
-    <div v-if="result" class="pane done">
+    <!-- concise result card: name + one-line summary + key facets; full sheet opens on demand -->
+    <div v-if="result" class="pane done reveal">
       <h3 class="cast-name">
         {{ result.name }}
         <span v-if="lastCost" class="cost">本次 ${{ lastCost.toFixed(4) }}</span>
       </h3>
       <p class="summary">{{ result.summary }}</p>
-      <div v-for="(text, key) in result.profile" :key="key" class="profile-row">
-        <span class="profile-label">{{ PROFILE_LABELS[key] ?? key }}</span>
-        <span>{{ text }}</span>
+      <div class="done-foot">
+        <button class="card-open" @click="showCard = true">查看完整角色卡</button>
+        <span class="muted small">{{ Object.keys(result.profile).length }} 项设定 · {{ result.relations.length }} 条关系 · 已入审阅台候批</span>
       </div>
-      <div v-if="result.relations.length" class="chips">
-        <span v-for="(rel, index) in result.relations" :key="index" class="chip static">
-          {{ result.name }} <i>{{ rel.kind }}</i> {{ rel.target }}
-        </span>
-      </div>
-      <p v-if="result.suggested.length" class="muted small">
-        模型还提到了档案外的关联（未入图，仅供参考）：{{ result.suggested.join("；") }}
+      <p v-if="result.autoReviewIncomplete" class="warn">
+        自评环节没能给出可信结论，这份角色卡未经自动校验，请在审阅时多看一眼。
       </p>
-      <p class="muted">已入审阅台，采纳后正式入档。</p>
     </div>
+
+    <Modal :open="showCard" overline="CHARACTER" :title="result?.name ?? ''" @close="showCard = false">
+      <div v-if="result" class="cardview reveal">
+        <p class="summary lead">{{ result.summary }}</p>
+        <div v-for="(text, key) in result.profile" :key="key" class="profile-row">
+          <span class="profile-label">{{ PROFILE_LABELS[key] ?? key }}</span>
+          <span>{{ text }}</span>
+        </div>
+        <template v-if="result.relations.length">
+          <div class="section sub"><span class="t">关系</span></div>
+          <div class="chips">
+            <span v-for="(rel, index) in result.relations" :key="index" class="chip static">
+              {{ result.name }} <i>{{ rel.kind }}</i> {{ rel.target }}
+            </span>
+          </div>
+        </template>
+        <p v-if="result.suggested.length" class="muted small">
+          模型还提到了档案外的关联（未入图，仅供参考）：{{ result.suggested.join("；") }}
+        </p>
+      </div>
+    </Modal>
 
     <div class="section maintain-head"><span class="t">已有角色</span></div>
     <p v-if="maintainFlash" class="flash">{{ maintainFlash }}</p>
@@ -570,6 +572,36 @@ button.primary:disabled {
 
 .summary {
   margin: 0 0 0.6rem;
+}
+.summary.lead {
+  font-size: 0.95rem;
+  line-height: 1.75;
+}
+
+.done-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+.card-open {
+  border: 1px solid var(--ow-gold-soft);
+  background: var(--ow-gold-faint);
+  color: var(--ow-gold-bright);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.85rem;
+  font: inherit;
+  font-size: 0.84rem;
+  cursor: pointer;
+  transition: box-shadow 0.15s ease;
+}
+.card-open:hover {
+  box-shadow: 0 0 12px rgba(240, 210, 138, 0.22);
+}
+.cardview {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
 }
 
 .profile-row {

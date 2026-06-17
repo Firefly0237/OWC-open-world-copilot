@@ -1,23 +1,26 @@
 <script setup lang="ts">
-import { onUnmounted, ref } from "vue";
+import { ref, toRef, toRefs } from "vue";
 import StepperProgress from "../components/StepperProgress.vue";
-import {
-  addSessionCost,
-  apiGet,
-  apiPost,
-  costOf,
-  currentProject,
-  llmConfig,
-  llmParams,
-  streamJobEvents,
-} from "../api";
+import PageHead from "../components/PageHead.vue";
+import { llmConfig, llmParams } from "../api";
+import { getJobChannel, startJob } from "../jobs";
+import { example } from "../examples";
+
+const phTheme = example("sweepTheme");
 
 const STAGES = [
   { key: "accepted", label: "受理" },
   { key: "scan", label: "词面扫描" },
   { key: "judge", label: "语义判定" },
-  { key: "done", label: "工作单" },
+  { key: "done", label: "清单" },
 ];
+
+const FLAVORS: Record<string, string> = {
+  accepted: "受理清查请求…",
+  scan: "逐字扫过全世界…",
+  judge: "按语义逐条判定…",
+  done: "清单已就绪。",
+};
 
 interface Finding {
   ref: string;
@@ -31,6 +34,8 @@ interface Finding {
 interface SweepResult {
   scanned_total: number;
   llm_used: boolean;
+  semantic_used: boolean;
+  semantic_flagged: number;
   judged_count: number;
   judge_skipped: number;
   hits: Finding[];
@@ -41,71 +46,34 @@ interface SweepResult {
 const theme = ref("");
 const terms = ref("");
 const useJudge = ref(llmConfig().ready);
-const running = ref(false);
-const stageIndex = ref(-1);
-const elapsed = ref(0);
-const judgeNote = ref("");
-const error = ref("");
-const result = ref<SweepResult | null>(null);
-const lastCost = ref(0);
 
-let timer: number | undefined;
-onUnmounted(() => {
-  if (timer !== undefined) window.clearInterval(timer);
-});
+const job = getJobChannel<SweepResult>("theme_sweep", STAGES);
+const { running, stageIndex, elapsed, result } = toRefs(job);
+const judgeNote = toRef(job, "hint");
+const lastCost = toRef(job, "cost");
 
 async function run(): Promise<void> {
   if (!theme.value.trim() || running.value) return;
-  running.value = true;
-  stageIndex.value = 0;
-  elapsed.value = 0;
-  judgeNote.value = "";
-  error.value = "";
-  result.value = null;
-  if (timer !== undefined) window.clearInterval(timer);
-  timer = window.setInterval(() => {
-    elapsed.value += 1;
-  }, 1000);
-  try {
-    const job = await apiPost<{ job_id: string }>(`/projects/${currentProject()}/jobs`, {
-      kind: "theme_sweep",
-      params: {
-        theme: theme.value.trim(),
-        extra_terms: terms.value
-          .split(/[,，]/)
-          .map((t) => t.trim())
-          .filter(Boolean),
-        use_llm: useJudge.value,
-        ...(useJudge.value ? llmParams() : {}),
-      },
-    });
-    stageIndex.value = 1;
-    await streamJobEvents(job.job_id, (event) => {
+  await startJob<SweepResult>("theme_sweep", {
+    kind: "theme_sweep",
+    stages: STAGES,
+    params: {
+      theme: theme.value.trim(),
+      extra_terms: terms.value
+        .split(/[,，]/)
+        .map((t) => t.trim())
+        .filter(Boolean),
+      use_llm: useJudge.value,
+      ...(useJudge.value ? llmParams() : {}),
+    },
+    onEvent: (ch, event) => {
       if (event.type === "judge") {
-        stageIndex.value = 2;
-        judgeNote.value = `已判定 ${event.data.done}/${event.data.total}`;
-      } else if (event.type === "failed") {
-        error.value = String(event.data.error ?? "任务失败");
+        ch.stageIndex = 2;
+        ch.hint = `已判定 ${event.data.done}/${event.data.total}`;
       }
-    });
-    const status = await apiGet<{ status: string; result: SweepResult | null; error: string | null }>(
-      `/jobs/${job.job_id}`,
-    );
-    if (status.status === "done" && status.result) {
-      stageIndex.value = STAGES.length - 1;
-      result.value = status.result;
-      const used = costOf(status.result as { cost_budget?: { used_usd?: number } });
-      lastCost.value = used;
-      addSessionCost(used);
-    } else if (!error.value) {
-      error.value = status.error ?? "任务未完成";
-    }
-  } catch (e) {
-    error.value = String(e);
-  } finally {
-    running.value = false;
-    if (timer !== undefined) window.clearInterval(timer);
-  }
+    },
+    parseResult: (raw) => raw as unknown as SweepResult,
+  });
 }
 
 function downloadWorkOrder(): void {
@@ -121,14 +89,11 @@ function downloadWorkOrder(): void {
 
 <template>
   <section>
-    <div class="section"><span class="t">专项清查</span></div>
-    <p class="muted hint">
-      限期消除某类主题？全库地毯式排查：词面命中、模型逐项判定（带原文证据）、关系扩散，产出可勾选的工作单。
-    </p>
+    <PageHead overline="SWEEP" title="专项清查" purpose="按主题地毯式排查，生成可勾选的清单。" />
     <div class="pane form">
       <label class="field">
         <span class="label">要清查的主题或元素</span>
-        <input v-model="theme" maxlength="200" placeholder="例如：赌博相关元素 / 某个被弃用的角色" />
+        <input v-model="theme" maxlength="200" :placeholder="`例如：${phTheme}`" />
       </label>
       <label class="field">
         <span class="label">关联词（可选，逗号分隔）</span>
@@ -153,21 +118,24 @@ function downloadWorkOrder(): void {
       :running="running"
       :elapsed="elapsed"
       :hint="judgeNote"
+      :flavors="FLAVORS"
     />
-    <p v-if="error" class="error">{{ error }}</p>
 
     <div v-if="result" class="pane done">
       <div class="chips">
         <span class="chip">扫描 <b>{{ result.scanned_total }}</b></span>
         <span class="chip red">直接命中 <b>{{ result.hits.length }}</b></span>
         <span class="chip amber">关联待查 <b>{{ result.review_suggested.length }}</b></span>
+        <span v-if="result.semantic_used" class="chip gold">
+          语义近似 <b>{{ result.semantic_flagged }} 项</b>
+        </span>
         <span class="chip gold">
           语义判定 <b>{{ result.llm_used ? `${result.judged_count} 项` : "未启用" }}</b>
         </span>
         <span v-if="lastCost" class="chip">本次 <b>${{ lastCost.toFixed(4) }}</b></span>
       </div>
       <p v-if="result.judge_skipped" class="muted small">
-        有 {{ result.judge_skipped }} 个对象超出单次判定上限，工作单中已注明。
+        有 {{ result.judge_skipped }} 个对象超出单次判定上限，清单中已注明。
       </p>
       <p v-if="!result.hits.length && !result.review_suggested.length" class="ok-text">
         全库扫描完毕，未发现相关内容。
@@ -185,7 +153,7 @@ function downloadWorkOrder(): void {
           <span class="muted evidence">{{ finding.evidence }}</span>
         </div>
       </TransitionGroup>
-      <button class="ghost" @click="downloadWorkOrder">导出工作单 (.md)</button>
+      <button class="ghost" @click="downloadWorkOrder">导出清单 (.md)</button>
     </div>
   </section>
 </template>

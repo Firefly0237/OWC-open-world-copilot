@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from "vue";
-import { apiGet, apiPost, llmConfig, setLlmConfig } from "../api";
+import { humanizeError, apiGet, apiPost, llmConfig, setLlmConfig } from "../api";
+import PageHead from "../components/PageHead.vue";
 
 /** Vendor presets verified 2026-06 (same table as the legacy UI); the model dropdown
  * always offers a custom escape hatch. */
@@ -85,7 +86,7 @@ async function probe(): Promise<void> {
       : (body.message ?? "连接失败");
   } catch (e) {
     probeOk.value = false;
-    probeResult.value = String(e);
+    probeResult.value = humanizeError(e);
   } finally {
     busy.value = false;
   }
@@ -102,15 +103,22 @@ async function save(): Promise<void> {
     });
     setLlmConfig(body.configured, currentModel());
     saveFlash.value = body.configured
-      ? `已接入：${currentModel()}。创世、人物、问答、清查现在都走真实模型。`
+      ? `已接入：${currentModel()}。现在可用于创世、人物、问答与清查。`
       : "尚未配置 Key。";
     window.dispatchEvent(new CustomEvent("ow-llm-changed"));
     await refreshStatus();
   } catch (e) {
-    saveFlash.value = String(e);
+    saveFlash.value = humanizeError(e);
   } finally {
     busy.value = false;
   }
+}
+
+// B11 · pro mode: a calmer, lower-motion workspace for daily high-frequency use
+const proMode = ref(localStorage.getItem("owcopilot_pro_mode") === "1");
+function togglePro(): void {
+  localStorage.setItem("owcopilot_pro_mode", proMode.value ? "1" : "0");
+  window.dispatchEvent(new CustomEvent("ow-pro-changed"));
 }
 
 onMounted(refreshStatus);
@@ -118,13 +126,13 @@ onMounted(refreshStatus);
 
 <template>
   <section>
-    <div class="section"><span class="t">设置 · 模型接入</span></div>
-    <p class="muted hint">
-      Key 只进入本机服务进程，调用直连厂商。已接入：
-      <b :class="status?.configured ? 'ok' : 'off'">
-        {{ status?.configured ? "是" : "否" }}
-      </b>
-    </p>
+    <PageHead overline="SETTINGS" title="设置 · 模型" purpose="接入你自己的模型，Key 只留在本机。">
+      <template #aside>
+        <span class="conn" :class="status?.configured ? 'ok' : 'off'">
+          {{ status?.configured ? "已接入" : "未接入" }}
+        </span>
+      </template>
+    </PageHead>
     <div class="pane form">
       <div class="grid">
         <label class="field">
@@ -162,10 +170,46 @@ onMounted(refreshStatus);
       <p v-if="saveFlash" class="flash">{{ saveFlash }}</p>
       <p class="muted small">模型列表以厂商文档为准；选「自定义输入…」可填任意模型名。</p>
     </div>
+
+    <div class="pane form pref">
+      <div class="section"><span class="t">界面偏好</span></div>
+      <label class="toggle">
+        <input v-model="proMode" type="checkbox" @change="togglePro" />
+        <span>
+          <b>专业模式</b>
+          <i class="muted">关闭星盘/极光/跃迁等装饰动效，换一个安静、低干扰的工作界面（适合长时间高频使用）。</i>
+        </span>
+      </label>
+    </div>
   </section>
 </template>
 
 <style scoped>
+.pref {
+  margin-top: 0.8rem;
+}
+.toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  cursor: pointer;
+}
+.toggle input {
+  margin-top: 0.2rem;
+  width: 1.05rem;
+  height: 1.05rem;
+  accent-color: var(--ow-gold-bright);
+}
+.toggle span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.toggle i {
+  font-size: 0.8rem;
+  font-style: normal;
+}
+
 .hint {
   font-size: 0.85rem;
 }
@@ -176,6 +220,23 @@ onMounted(refreshStatus);
 
 .hint .off {
   color: #e6c07e;
+}
+
+/* connection chip in the page header */
+.conn {
+  font-size: 0.74rem;
+  letter-spacing: 0.06em;
+  border-radius: 999px;
+  padding: 0.16rem 0.66rem;
+  border: 1px solid var(--ow-line);
+}
+.conn.ok {
+  color: #8ed4ac;
+  border-color: rgba(142, 212, 172, 0.5);
+}
+.conn.off {
+  color: #e6c07e;
+  border-color: rgba(224, 180, 106, 0.45);
 }
 
 .form {

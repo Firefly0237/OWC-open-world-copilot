@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { apiGet, apiPost, currentProject } from "../api";
+import PageHead from "../components/PageHead.vue";
+import FilePicker from "../components/FilePicker.vue";
+import { notifyError } from "../toast";
 
 interface Source {
   id?: string;
   title: string;
   source_type?: string;
   original_filename?: string;
+  language?: string;
   char_count?: number;
   chunk_count?: number;
   [k: string]: unknown;
@@ -19,7 +23,6 @@ interface Hit {
 }
 
 const sources = ref<Source[]>([]);
-const error = ref("");
 const flash = ref("");
 
 const newTitle = ref("");
@@ -39,13 +42,11 @@ onMounted(async () => {
   try {
     await refresh();
   } catch (e) {
-    error.value = String(e);
+    notifyError(e);
   }
 });
 
-function onFile(event: Event): void {
-  const file = (event.target as HTMLInputElement).files?.[0];
-  if (!file) return;
+function onFile(file: File): void {
   if (!newTitle.value.trim()) newTitle.value = file.name.replace(/\.[^.]+$/, "");
   const reader = new FileReader();
   reader.onload = () => {
@@ -58,7 +59,6 @@ async function add(): Promise<void> {
   if (!newTitle.value.trim() || !newText.value.trim() || adding.value) return;
   adding.value = true;
   flash.value = "";
-  error.value = "";
   try {
     await apiPost(`/projects/${currentProject()}/references`, {
       title: newTitle.value.trim(),
@@ -70,7 +70,7 @@ async function add(): Promise<void> {
     newText.value = "";
     await refresh();
   } catch (e) {
-    error.value = String(e);
+    notifyError(e);
   } finally {
     adding.value = false;
   }
@@ -79,7 +79,6 @@ async function add(): Promise<void> {
 async function search(): Promise<void> {
   if (!query.value.trim() || searching.value) return;
   searching.value = true;
-  error.value = "";
   hits.value = [];
   try {
     const body = await apiPost<{ hits: Hit[] }>(`/projects/${currentProject()}/references:search`, {
@@ -87,7 +86,7 @@ async function search(): Promise<void> {
     });
     hits.value = body.hits;
   } catch (e) {
-    error.value = String(e);
+    notifyError(e);
   } finally {
     searching.value = false;
   }
@@ -96,14 +95,13 @@ async function search(): Promise<void> {
 
 <template>
   <section>
-    <div class="section"><span class="t">灵感库 · 参考资料</span></div>
-    <p class="muted hint">放你想借鉴的素材：风格样本、参考设定、灵感笔记。它们只作灵感检索，不会被当成你世界的设定事实。</p>
+    <PageHead overline="REFERENCES" title="灵感库" purpose="收录参考素材，仅用于创世检索，不入正式设定。" />
 
     <div class="grid">
       <div class="pane block">
         <div class="section"><span class="t">收录素材</span></div>
         <input v-model="newTitle" maxlength="200" placeholder="标题" />
-        <input type="file" accept=".txt,.md,.json" @change="onFile" />
+        <FilePicker accept=".txt,.md,.json" hint="选择 .txt / .md / .json，或拖入" @select="onFile" />
         <textarea v-model="newText" rows="5" placeholder="粘贴文本，或选一个 .txt/.md/.json 文件自动读入"></textarea>
         <button class="primary" :disabled="adding || !newTitle.trim() || !newText.trim()" @click="add">
           {{ adding ? "收录中…" : "收录" }}
@@ -130,14 +128,12 @@ async function search(): Promise<void> {
       </div>
     </div>
 
-    <p v-if="error" class="error">{{ error }}</p>
-
     <div class="section"><span class="t">全部素材</span></div>
     <p v-if="!sources.length" class="muted">还没有素材——上面收录第一份。</p>
     <TransitionGroup name="list" tag="div" class="sources">
       <div v-for="(s, i) in sources" :key="s.id ?? i" class="pane src">
         <b>{{ s.title }}</b>
-        <span class="muted meta">{{ s.source_type ?? "素材" }}<template v-if="s.char_count"> · {{ s.char_count }} 字</template><template v-if="s.chunk_count"> · {{ s.chunk_count }} 块</template></span>
+        <span class="muted meta">{{ s.source_type ?? "素材" }}<template v-if="s.language"> · {{ s.language }}</template><template v-if="s.char_count"> · {{ s.char_count.toLocaleString() }} 字</template><template v-if="s.chunk_count"> · {{ s.chunk_count }} 块可检索</template></span>
       </div>
     </TransitionGroup>
   </section>
