@@ -159,7 +159,7 @@ def test_generate_can_return_trace_when_requested():
 
     assert r.status_code == 200
     body = r.json()
-    assert body["trace"]["plan"] == ["retrieve_lore", "generate_quest", "land_to_engine"]
+    assert body["trace"]["plan"] == ["retrieve_lore", "generate_quest"]
     assert any("VERIFY" in line for line in body["trace"]["log"])
 
 

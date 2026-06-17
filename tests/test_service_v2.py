@@ -19,6 +19,17 @@ from owcopilot.content.store import ContentStore  # noqa: E402
 from owcopilot.service.api import create_app  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _isolate_managed_home(tmp_path, monkeypatch):
+    """Zero-config 'demo' worlds materialize under the managed-worlds home; pin it to a temp dir so
+    these tests never read or pollute the developer's real ~/.owcopilot (round-20 isolation lesson).
+    """
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("OWCOPILOT_PROJECTS_JSON", raising=False)
+    monkeypatch.delenv("OWCOPILOT_API_KEY", raising=False)
+
+
 def _content_bundle() -> dict:
     return {
         "entities": {

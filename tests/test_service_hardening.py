@@ -38,6 +38,38 @@ def client(tmp_path, monkeypatch) -> TestClient:
     return TestClient(create_app())
 
 
+def test_every_protected_route_requires_auth(monkeypatch) -> None:
+    # Guard for the single global auth gate: every non-public API route must reject an
+    # unauthenticated request. If a new endpoint ever lands outside the gate, this fails — which is
+    # what lets us trust one dependency instead of a per-endpoint preamble. The gate runs before
+    # body validation, so even POSTs with no body return 401 (not 422), keeping this check simple.
+    import re
+
+    from fastapi.routing import APIRoute
+
+    monkeypatch.setenv("OWCOPILOT_API_KEY", "secret-guard")
+    monkeypatch.setenv("OWCOPILOT_RATE_LIMIT_PER_MIN", "100000")  # don't trip the limiter mid-sweep
+    app = create_app()
+    guard_client = TestClient(app)
+    public = {"/", "/health", "/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"}
+
+    checked = 0
+    for route in app.routes:
+        if not isinstance(route, APIRoute) or route.path in public:
+            continue
+        # /platform/* is a separate auth domain (bearer JWT OR key, enforced inside the handler via
+        # resolve_principal and covered by the platform test suite), deliberately exempt from the
+        # global api-key gate this guard protects.
+        if route.path.startswith("/platform/"):
+            continue
+        path = re.sub(r"\{[^}]+\}", "x", route.path)  # dummy value for any {path_param}
+        for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
+            resp = guard_client.request(method, path)  # deliberately no X-API-Key
+            assert resp.status_code == 401, f"{method} {route.path} -> {resp.status_code}, want 401"
+            checked += 1
+    assert checked >= 80  # the whole API surface was exercised, not a couple of routes
+
+
 def test_real_mode_on_loopback_needs_provider_not_service_key(client: TestClient) -> None:
     """Localhost owns the machine and the key: real mode is allowed without
     OWCOPILOT_API_KEY, but still needs a provider — so it's a 503 setup prompt, not a 403."""

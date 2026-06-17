@@ -23,9 +23,19 @@ from typing import Any
 from ..content.models import ContentBundle
 from ..content.store import ContentStore
 
-# Runtime state is rebuildable from files and stays out of world packs.
-_PACK_EXCLUDE_DIRS = {".owcopilot", ".git"}
+# Runtime state and local-only history are rebuildable / machine-local and stay out of world packs.
+_PACK_EXCLUDE_DIRS = {".owcopilot", ".git", ".snapshots"}
 _NAME_MAX_LEN = 48
+# Windows reserves these device names: a directory called CON/NUL/COM1 fails or behaves
+# pathologically (this app runs on win32), so a world can never be named one.
+_RESERVED_WIN_NAMES = (
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+# A world is JSON/text and realistically a few MB; cap decompressed pack size so a zip bomb
+# (tiny compressed, gigabytes inflated) can't exhaust memory/disk before any content check.
+_MAX_PACK_UNCOMPRESSED = 500 * 1024 * 1024
 
 
 def _default_path() -> Path:
@@ -43,6 +53,9 @@ def sanitize_world_name(name: str) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned)[:_NAME_MAX_LEN].strip()
     if not cleaned:
         raise ValueError("世界名称不能为空（或全是非法字符）。")
+    # Windows reserves device names regardless of extension (CON, CON.txt, ...), so check the stem.
+    if cleaned.split(".")[0].upper() in _RESERVED_WIN_NAMES:
+        raise ValueError(f"「{cleaned}」是系统保留名称，请换一个。")
     return cleaned
 
 
@@ -109,6 +122,11 @@ def import_world_zip(data: bytes, name: str, *, base: str | Path | None = None) 
     member_names = [m.filename for m in pack.infolist() if not m.is_dir()]
     if not member_names:
         raise ValueError("世界包是空的。")
+    # Reject a decompression bomb BEFORE writing anything: a world pack is small text, so a pack
+    # that inflates to hundreds of MB is corrupt or hostile.
+    total_uncompressed = sum(m.file_size for m in pack.infolist() if not m.is_dir())
+    if total_uncompressed > _MAX_PACK_UNCOMPRESSED:
+        raise ValueError("世界包解压后体积异常巨大，已拒绝导入（疑似损坏或恶意压缩包）。")
     # Traversal scan happens on the RAW names, before any top-folder stripping —
     # otherwise "../evil" reads as a common top folder and the slip sails through.
     for raw_name in member_names:
@@ -142,7 +160,24 @@ def import_world_zip(data: bytes, name: str, *, base: str | Path | None = None) 
     return target
 
 
+def delete_managed_world(name: str, *, base: str | Path | None = None) -> None:
+    """Delete a managed world's directory (and its rebuildable runtime/snapshots with it).
+
+    Destructive and irreversible, so it is fenced hard: the resolved target must be a DIRECT child
+    of ``worlds_home`` — belt-and-suspenders over name sanitization, so no crafted name can ever
+    point ``rmtree`` outside the managed-worlds folder."""
+    home = worlds_home(base).resolve()
+    target = (worlds_home(base) / sanitize_world_name(name)).resolve()
+    if target.parent != home:
+        raise ValueError("非法的世界名称，已拒绝删除。")
+    if not target.exists() or not target.is_dir():
+        raise ValueError(f"世界「{target.name}」不存在。")
+    _remove_tree(target)
+
+
 def _bundle_has_content(bundle: ContentBundle) -> bool:
+    # every content collection counts — a pack of only localized strings or only event refs is still
+    # a real world (the old check omitted localized_texts + quest_event_refs and rejected them).
     return bool(
         bundle.entities
         or bundle.quests
@@ -153,6 +188,8 @@ def _bundle_has_content(bundle: ContentBundle) -> bool:
         or bundle.terms
         or bundle.relations
         or bundle.style_guides
+        or bundle.localized_texts
+        or bundle.quest_event_refs
     )
 
 

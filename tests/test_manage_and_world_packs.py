@@ -15,6 +15,7 @@ from owcopilot.app.actions import (
 )
 from owcopilot.app.workspaces import (
     create_managed_world,
+    delete_managed_world,
     export_world_zip,
     import_world_zip,
     list_managed_worlds,
@@ -62,6 +63,51 @@ def test_sanitize_world_name_strips_path_hostile_chars() -> None:
         sanitize_world_name("///")
 
 
+def test_world_name_cannot_escape_worlds_home(tmp_path) -> None:
+    # a name is also a directory name — a traversal attempt must collapse to a plain name that
+    # lands INSIDE worlds_home, never beside or above it.
+    base = tmp_path / "worlds"
+    for hostile in ("../evil", "..\\evil", "../../etc/passwd", "a/../b"):
+        safe = sanitize_world_name(hostile)
+        assert "/" not in safe and "\\" not in safe
+        assert not safe.startswith("..")
+    created = create_managed_world("../../etc/passwd", base=base)
+    assert created.resolve().parent == base.resolve()  # stayed directly under worlds_home
+
+
+def test_delete_managed_world_removes_only_its_own_dir(tmp_path) -> None:
+    base = tmp_path / "worlds"
+    keep = create_managed_world("留下的", base=base)
+    create_managed_world("删掉的", base=base)
+    delete_managed_world("删掉的", base=base)
+    names = {w["name"] for w in list_managed_worlds(base=base)}
+    assert names == {"留下的"}  # only the target is gone
+    assert keep.exists()  # siblings untouched
+    # a sentinel outside worlds_home must never be reachable, and a missing world is a clean error
+    (tmp_path / "outside.txt").write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError, match="不存在"):
+        delete_managed_world("不存在的世界", base=base)
+    assert (tmp_path / "outside.txt").exists()
+
+
+def test_managed_worlds_are_isolated(tmp_path) -> None:
+    base = tmp_path / "worlds"
+    a = create_managed_world("世界甲", base=base)
+    b = create_managed_world("世界乙", base=base)
+    ContentStore(a).save(
+        ContentBundle(entities={"npc_a": Entity(id="npc_a", name="甲人", type=EntityType.NPC)})
+    )
+    ContentStore(b).save(
+        ContentBundle(entities={"npc_b": Entity(id="npc_b", name="乙人", type=EntityType.NPC)})
+    )
+    # each world sees only its own content; editing one never bleeds into the other
+    assert set(ContentStore(a).load().entities) == {"npc_a"}
+    assert set(ContentStore(b).load().entities) == {"npc_b"}
+    # and a pack of A restores A's content alone, with no trace of B
+    restored = import_world_zip(export_world_zip(a), "世界甲副本", base=base)
+    assert set(ContentStore(restored).load().entities) == {"npc_a"}
+
+
 # ------------------------------------------------------------------ world packs
 def test_world_pack_round_trip(world_root, tmp_path) -> None:
     pack = export_world_zip(world_root)
@@ -72,13 +118,35 @@ def test_world_pack_round_trip(world_root, tmp_path) -> None:
     assert len(bundle.relations) == 1
 
 
-def test_world_pack_excludes_runtime_dir(world_root) -> None:
-    runtime = world_root / ".owcopilot"
-    runtime.mkdir()
-    (runtime / "runtime.sqlite").write_bytes(b"not-portable")
-    pack = export_world_zip(world_root)
-    names = zipfile.ZipFile(io.BytesIO(pack)).namelist()
-    assert not any(name.startswith(".owcopilot") for name in names)
+def test_world_pack_excludes_internal_dirs(world_root) -> None:
+    # the pack is a portable handoff: runtime db, change-history snapshots and the git dir are all
+    # internal/rebuildable and must never ride along (they bloat the pack and leak local state).
+    for sub, payload in ((".owcopilot", "runtime.sqlite"), (".snapshots", "20260101.json")):
+        (world_root / sub).mkdir()
+        (world_root / sub / payload).write_bytes(b"not-portable")
+    (world_root / ".git").mkdir()
+    (world_root / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+
+    names = zipfile.ZipFile(io.BytesIO(export_world_zip(world_root))).namelist()
+    assert not any(name.startswith((".owcopilot", ".snapshots", ".git")) for name in names)
+    assert any(name.startswith("world/") for name in names)  # real content still packed
+
+
+def test_localization_only_pack_is_accepted(tmp_path) -> None:
+    # regression: a pack whose only content is localized strings (or event refs) used to be read as
+    # "empty" and rolled back, because _bundle_has_content omitted those collections.
+    from owcopilot.content.models import LocalizedText
+
+    root = tmp_path / "loc_world"
+    ContentStore(root).save(
+        ContentBundle(
+            localized_texts={
+                "t1": LocalizedText(id="t1", text_key="ui.start", locale="zh-CN", text="开始")
+            }
+        )
+    )
+    restored = import_world_zip(export_world_zip(root), "纯本地化", base=tmp_path / "worlds")
+    assert set(ContentStore(restored).load().localized_texts) == {"t1"}
 
 
 def test_world_pack_import_strips_single_top_folder(world_root, tmp_path) -> None:
@@ -112,6 +180,24 @@ def test_world_pack_rejects_non_world_zip(tmp_path) -> None:
         import_world_zip(buffer.getvalue(), "junk", base=tmp_path / "worlds")
     # failed import must roll back the half-made directory
     assert [w["name"] for w in list_managed_worlds(base=tmp_path / "worlds")] == []
+
+
+@pytest.mark.parametrize("name", ["CON", "NUL", "com1", "LPT9", "con.txt", "nul.json"])
+def test_reserved_windows_device_names_rejected(name: str) -> None:
+    # a world dir named CON/NUL fails or behaves pathologically on Windows (this app runs on win32)
+    with pytest.raises(ValueError, match="系统保留名称"):
+        sanitize_world_name(name)
+
+
+def test_world_pack_rejects_decompression_bomb(tmp_path) -> None:
+    # a pack that inflates past the cap must be rejected BEFORE anything is written to disk
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as pack:
+        pack.writestr("world/entities/e1.json", b"{}")
+        pack.writestr("world/bomb.bin", b"\x00" * (600 * 1024 * 1024))
+    with pytest.raises(ValueError, match="体积异常巨大"):
+        import_world_zip(buffer.getvalue(), "bomb", base=tmp_path / "worlds")
+    assert not (tmp_path / "worlds" / "bomb").exists()  # nothing written
 
 
 # ------------------------------------------------------------------ manage actions

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -86,7 +87,9 @@ class SQLiteStore:
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 decided_by TEXT,
-                decided_at TEXT
+                decided_at TEXT,
+                critic_verdict TEXT,
+                critic_score REAL
             );
 
             CREATE INDEX IF NOT EXISTS idx_patches_status ON patches(status);
@@ -100,6 +103,24 @@ class SQLiteStore:
                 object_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 body TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS content_vectors (
+                ref TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                text_hash TEXT NOT NULL,
+                dim INTEGER NOT NULL,
+                vector BLOB NOT NULL,
+                PRIMARY KEY (ref, model_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS reference_vectors (
+                ref TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                text_hash TEXT NOT NULL,
+                dim INTEGER NOT NULL,
+                vector BLOB NOT NULL,
+                PRIMARY KEY (ref, model_id)
             );
 
             CREATE TABLE IF NOT EXISTS graph_edges (
@@ -162,6 +183,16 @@ class SQLiteStore:
                 title,
                 body
             );
+
+            CREATE TABLE IF NOT EXISTS community_reports (
+                id TEXT PRIMARY KEY,             -- community id (c0…) or "_global"
+                level TEXT NOT NULL,             -- community | global
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                member_refs_json TEXT NOT NULL,  -- provenance: the canon ids this report covers
+                fingerprint TEXT NOT NULL,       -- cache key (members + their content hash)
+                created_at TEXT NOT NULL
+            );
             """
         )
         # Older runtime DBs predate the rollback column; content files are the source of truth,
@@ -169,6 +200,10 @@ class SQLiteStore:
         self._ensure_column("patches", "rollback_ops_json", "TEXT")
         self._ensure_column("patches", "rolled_back_by", "TEXT")
         self._ensure_column("patches", "rolled_back_at", "TEXT")
+        # The critic's final verdict/score, recorded at draft time so reviewer calibration can pair
+        # it with the human decision later. Older runtime DBs upgrade in place.
+        self._ensure_column("review_items", "critic_verdict", "TEXT")
+        self._ensure_column("review_items", "critic_score", "REAL")
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, column_type: str) -> None:
@@ -346,8 +381,8 @@ class SQLiteStore:
             """
             INSERT OR REPLACE INTO review_items (
                 id, item_type, object_ref, payload_json, issue_refs_json, status,
-                decided_by, decided_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                decided_by, decided_at, critic_verdict, critic_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item["id"],
@@ -358,6 +393,8 @@ class SQLiteStore:
                 item.get("status") or "pending_review",
                 item.get("decided_by"),
                 item.get("decided_at"),
+                item.get("critic_verdict"),
+                item.get("critic_score"),
             ),
         )
         self.conn.commit()
@@ -390,17 +427,21 @@ class SQLiteStore:
         status: str,
         decided_by: str | None = None,
         decided_at: str | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if self.get_review_item(item_id) is None:
             raise KeyError(item_id)
+        # payload is updated by feedback-driven revision, which replaces the draft in place and
+        # keeps the item pending so the reviewer sees the improved version.
         self.conn.execute(
             """
             UPDATE review_items SET status = ?,
                 decided_by = COALESCE(?, decided_by),
-                decided_at = COALESCE(?, decided_at)
+                decided_at = COALESCE(?, decided_at),
+                payload_json = COALESCE(?, payload_json)
             WHERE id = ?
             """,
-            (status, decided_by, decided_at, item_id),
+            (status, decided_by, decided_at, None if payload is None else _json(payload), item_id),
         )
         self.conn.commit()
         updated = self.get_review_item(item_id)
@@ -422,6 +463,149 @@ class SQLiteStore:
             "INSERT INTO content_fts (ref, object_type, title, body) VALUES (?, ?, ?, ?)",
             [(ref, object_type, title, body) for ref, object_type, _object_id, title, body in rows],
         )
+        self.conn.commit()
+
+    def get_vectors(
+        self, model_id: str, *, table: str = "content_vectors"
+    ) -> dict[str, tuple[str, int, bytes]]:
+        """Persisted embeddings for ``model_id`` as ``{ref: (text_hash, dim, vector_blob)}``.
+
+        Shared by the content-graph and inspiration-reference vector retrievers (``table``). The
+        text_hash lets a retriever embed only rows whose text (or the model) changed, so
+        re-opening a project never re-runs the embedder over unchanged rows."""
+        table = _vectors_table(table)
+        rows = self.conn.execute(
+            f"SELECT ref, text_hash, dim, vector FROM {table} WHERE model_id = ?",  # noqa: S608
+            (model_id,),
+        ).fetchall()
+        return {
+            str(row["ref"]): (str(row["text_hash"]), int(row["dim"]), bytes(row["vector"]))
+            for row in rows
+        }
+
+    def upsert_vectors(
+        self,
+        model_id: str,
+        rows: list[tuple[str, str, int, bytes]],
+        *,
+        table: str = "content_vectors",
+    ) -> None:
+        """Insert/replace ``(ref, text_hash, dim, vector_blob)`` rows for ``model_id``."""
+        if not rows:
+            return
+        table = _vectors_table(table)
+        self.conn.executemany(
+            f"""
+            INSERT INTO {table} (ref, model_id, text_hash, dim, vector)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(ref, model_id) DO UPDATE SET
+                text_hash = excluded.text_hash, dim = excluded.dim, vector = excluded.vector
+            """,  # noqa: S608
+            [(ref, model_id, text_hash, dim, blob) for ref, text_hash, dim, blob in rows],
+        )
+        self.conn.commit()
+
+    def prune_vectors(
+        self, model_id: str, keep_refs: set[str], *, table: str = "content_vectors"
+    ) -> None:
+        """Drop cached vectors for refs no longer present, keeping the table in step."""
+        table = _vectors_table(table)
+        stale = [
+            str(row["ref"])
+            for row in self.conn.execute(
+                f"SELECT ref FROM {table} WHERE model_id = ?",
+                (model_id,),  # noqa: S608
+            ).fetchall()
+            if str(row["ref"]) not in keep_refs
+        ]
+        if stale:
+            self.conn.executemany(
+                f"DELETE FROM {table} WHERE model_id = ? AND ref = ?",  # noqa: S608
+                [(model_id, ref) for ref in stale],
+            )
+            self.conn.commit()
+
+    def relation_rows_for_entities(self, entity_ids: set[str]) -> list[sqlite3.Row]:
+        """Relation index rows whose source or target is one of ``entity_ids``.
+
+        Lets retrieval complete the relations of entities it already found, so a
+        relationship/structure question retrieves the relevant relations even when its phrasing
+        never matched the relation text directly -- the difference between answering and a
+        false refusal."""
+        if not entity_ids:
+            return []
+        rows = self.conn.execute(
+            "SELECT ref, object_type, title, body FROM content_index WHERE object_type = 'relation'"
+        ).fetchall()
+        matched: list[sqlite3.Row] = []
+        for row in rows:
+            tokens = str(row["title"]).split()  # "source kind... target": ids are slug tokens
+            if tokens and (tokens[0] in entity_ids or tokens[-1] in entity_ids):
+                matched.append(row)
+        return matched
+
+    def reference_chunks_by_refs(self, refs: list[str]) -> dict[str, sqlite3.Row]:
+        """Fetch full reference-chunk rows (with source title) for the given refs.
+
+        Lets the hybrid reference retriever rank by ref, then materialise display rows with
+        correct source metadata regardless of which leg (BM25 or vector) surfaced each ref."""
+        if not refs:
+            return {}
+        placeholders = ",".join("?" for _ in refs)
+        rows = self.conn.execute(
+            f"""
+            SELECT c.ref, c.source_id, s.title AS source_title, c.title, c.body,
+                   c.chunk_index, c.metadata_json
+            FROM reference_chunks AS c
+            LEFT JOIN reference_sources AS s ON s.id = c.source_id
+            WHERE c.ref IN ({placeholders})
+            """,  # noqa: S608
+            refs,
+        ).fetchall()
+        return {str(row["ref"]): row for row in rows}
+
+    # --- GraphRAG community reports (the macro-overview index) -----------------------------------
+
+    def save_community_report(self, report: dict[str, Any]) -> None:
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO community_reports (
+                id, level, title, summary, member_refs_json, fingerprint, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(report["id"]),
+                str(report["level"]),
+                str(report["title"]),
+                str(report["summary"]),
+                _json(list(report.get("member_refs", []))),
+                str(report["fingerprint"]),
+                _now_iso(),
+            ),
+        )
+        self.conn.commit()
+
+    def get_community_report(self, report_id: str, fingerprint: str) -> dict[str, Any] | None:
+        """Return the cached report only when its fingerprint still matches — a changed community
+        (members or their text) yields a new fingerprint, so the stale row is ignored and the
+        caller regenerates just that one."""
+        row = self.conn.execute(
+            "SELECT * FROM community_reports WHERE id = ? AND fingerprint = ?",
+            (report_id, fingerprint),
+        ).fetchone()
+        return _community_report_from_row(row) if row else None
+
+    def list_community_reports(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM community_reports ORDER BY (level = 'global') DESC, id"
+        ).fetchall()
+        return [_community_report_from_row(row) for row in rows]
+
+    def prune_community_reports(self, keep_ids: list[str]) -> None:
+        """Drop reports for communities that no longer exist (e.g. after entities were removed)."""
+        existing = {str(row["id"]) for row in self.conn.execute("SELECT id FROM community_reports")}
+        for stale in sorted(existing - set(keep_ids)):
+            self.conn.execute("DELETE FROM community_reports WHERE id = ?", (stale,))
         self.conn.commit()
 
     def replace_graph_edges(self, graph: ContentGraph) -> None:
@@ -676,6 +860,8 @@ def _review_item_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "decided_by": row["decided_by"],
         "decided_at": row["decided_at"],
+        "critic_verdict": row["critic_verdict"],
+        "critic_score": row["critic_score"],
     }
 
 
@@ -853,6 +1039,16 @@ def _content_rows(bundle: ContentBundle) -> list[tuple[str, str, str, str, str]]
     return rows
 
 
+_VECTOR_TABLES = {"content_vectors", "reference_vectors"}
+
+
+def _vectors_table(table: str) -> str:
+    """Whitelist the vectors table name before it is interpolated into SQL."""
+    if table not in _VECTOR_TABLES:
+        raise ValueError(f"unknown vectors table: {table!r}")
+    return table
+
+
 def _reference_hit_from_row(row: sqlite3.Row, *, score: float) -> dict[str, Any]:
     return {
         "ref": str(row["ref"]),
@@ -865,6 +1061,21 @@ def _reference_hit_from_row(row: sqlite3.Row, *, score: float) -> dict[str, Any]
         "metadata": json.loads(str(row["metadata_json"])),
         "score": score,
     }
+
+
+def _community_report_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "level": str(row["level"]),
+        "title": str(row["title"]),
+        "summary": str(row["summary"]),
+        "member_refs": json.loads(str(row["member_refs_json"])),
+        "fingerprint": str(row["fingerprint"]),
+    }
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def _json(value: Any) -> str:

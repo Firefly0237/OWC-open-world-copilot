@@ -38,11 +38,13 @@ def test_run_project_export_action_writes_target_engine_bundle(tmp_path) -> None
     output_root = tmp_path / "exports"
     _write_project(content_root)
 
-    result = run_project_export_action(content_root, output_dir=output_root, target_engine="unity")
+    result = run_project_export_action(
+        content_root, output_dir=output_root, target_engine="generic"
+    )
 
-    export_dir = output_root / "unity"
+    export_dir = output_root / "generic"
     assert result["output_dir"] == str(export_dir)
-    assert result["manifest"]["target_engine"] == "unity"
+    assert result["manifest"]["target_engine"] == "generic"
     assert (export_dir / "content_bundle.json").exists()
     assert (export_dir / "manifest.json").exists()
     assert result["cost_budget"]["used_usd"] == 0.0

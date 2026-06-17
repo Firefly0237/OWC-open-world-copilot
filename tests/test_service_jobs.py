@@ -61,6 +61,20 @@ def test_extraction_job_runs_async_with_chunk_progress(client: TestClient) -> No
     assert event_types[-1] == "done"
 
 
+def test_build_overview_job_indexes_community_reports(client: TestClient) -> None:
+    created = client.post(
+        "/projects/demo/jobs",
+        json={"kind": "build_overview", "params": {"llm_mode": "offline"}},
+    )
+    assert created.status_code == 202, created.text
+    body = _wait_done(client, created.json()["job_id"])
+    assert body["status"] == "done", body
+    result = body["result"]
+    assert result["community_count"] >= 1
+    # a global synthesis report is always produced on top of the per-community ones
+    assert any(report["level"] == "global" for report in result["reports"])
+
+
 def test_job_events_sse_replays_and_terminates(client: TestClient) -> None:
     created = client.post(
         "/projects/demo/jobs",

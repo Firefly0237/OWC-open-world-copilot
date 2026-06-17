@@ -105,6 +105,18 @@ def test_workspace_import_rejects_bad_base64(client: TestClient) -> None:
     assert response.status_code == 400
 
 
+def test_workspace_delete_removes_world(client: TestClient) -> None:
+    client.post("/workspaces", json={"name": "待删世界"})
+    assert "待删世界" in {w["name"] for w in client.get("/workspaces").json()["workspaces"]}
+
+    deleted = client.delete("/workspaces/待删世界")
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["deleted"] == "待删世界"
+    assert "待删世界" not in {w["name"] for w in client.get("/workspaces").json()["workspaces"]}
+
+    assert client.delete("/workspaces/从来没有过").status_code == 404  # missing world
+
+
 def test_review_decide_over_rest_is_final(client: TestClient) -> None:
     barks = client.post(
         "/projects/demo/assist/barks:batch",
@@ -130,6 +142,30 @@ def test_review_decide_over_rest_is_final(client: TestClient) -> None:
     missing = client.post(
         "/projects/demo/review_items/nope:decide",
         json={"decision": "rejected", "operator": "lead"},
+    )
+    assert missing.status_code == 404
+
+
+def test_review_revise_over_rest_regenerates_in_place(client: TestClient) -> None:
+    drafted = client.post(
+        "/projects/demo/contents/quests:draft",
+        json={"brief": "让 Mara 护送商队穿过山道", "llm_mode": "offline"},
+    )
+    assert drafted.status_code == 200, drafted.text
+    item_id = drafted.json()["review_item_id"]
+
+    revised = client.post(
+        f"/projects/demo/review_items/{item_id}:revise",
+        json={"feedback": "把目标写得更具体，加入失败后果", "operator": "lead"},
+    )
+    assert revised.status_code == 200, revised.text
+    body = revised.json()
+    assert body["item"]["status"] == "pending_review"  # revised, not auto-landed
+    assert body["revised_payload"]["metadata"].get("revised_from_feedback") is True
+
+    missing = client.post(
+        "/projects/demo/review_items/nope:revise",
+        json={"feedback": "x", "operator": "lead"},
     )
     assert missing.status_code == 404
 
@@ -183,6 +219,23 @@ def test_lorebook_download_renders_current_archive(client: TestClient) -> None:
     assert docx.content[:2] == b"PK"  # OOXML is a zip container
 
     assert client.get("/projects/demo/lorebook", params={"fmt": "pdf"}).status_code == 422
+
+
+def test_readiness_endpoint_scores_content(client: TestClient) -> None:
+    res = client.get("/projects/demo/readiness")
+    assert res.status_code == 200, res.text
+    report = res.json()["readiness"]
+    assert report["standard_version"] == "r1"
+    # the two fixture NPCs have no character sheets, so neither is production-ready
+    chars = [it for it in report["items"] if it["kind"] == "character"]
+    assert chars and all(it["ready"] is False for it in chars)
+
+    incomplete = client.get(
+        "/projects/demo/readiness", params={"only_incomplete": True, "kind": "character"}
+    )
+    assert incomplete.status_code == 200
+    items = incomplete.json()["readiness"]["items"]
+    assert items and all(it["kind"] == "character" and not it["ready"] for it in items)
 
 
 def test_entity_update_and_object_delete_endpoints(client: TestClient) -> None:

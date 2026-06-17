@@ -1,7 +1,7 @@
-"""Optional app/UI helpers.
+"""UI-agnostic workbench helpers.
 
-Only view-models and actions are exported — importing this package never pulls in Streamlit.
-The dashboard (`dashboard.py`) is launched explicitly via `streamlit run`.
+Only view-models and actions are exported. The FastAPI service (`service/api.py`) and the CLI
+reuse these, so the whole workbench behaviour is unit-testable in core CI without any UI framework.
 """
 
 from .actions import (

@@ -81,14 +81,14 @@ def test_build_context_pack_preview_returns_refs(tmp_path) -> None:
 def test_build_export_summary_reports_manifest_state(tmp_path) -> None:
     output_root = tmp_path / "exports"
 
-    missing = build_export_summary(output_dir=output_root, target_engine="unity")
+    missing = build_export_summary(output_dir=output_root, target_engine="generic")
     assert missing["manifest_exists"] is False
 
-    export_content_bundle(_bundle(), output_root / "unity", target_engine="unity")
-    summary = build_export_summary(output_dir=output_root, target_engine="unity")
+    export_content_bundle(_bundle(), output_root / "generic", target_engine="generic")
+    summary = build_export_summary(output_dir=output_root, target_engine="generic")
 
     assert summary["manifest_exists"] is True
-    assert summary["manifest"]["target_engine"] == "unity"
+    assert summary["manifest"]["target_engine"] == "generic"
     assert summary["cost_budget"]["used_usd"] == 0.0
 
 
