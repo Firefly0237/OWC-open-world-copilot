@@ -360,17 +360,17 @@ def test_cli_export_writes_engine_scoped_bundle(tmp_path, capsys) -> None:
                 "--output-dir",
                 str(output_root),
                 "--target-engine",
-                "unity",
+                "generic",
             ]
         )
         == 0
     )
     body = _read_json(capsys)
-    export_dir = output_root / "unity"
+    export_dir = output_root / "generic"
     assert body["output_dir"] == str(export_dir)
     assert (export_dir / "content_bundle.json").exists()
     assert (export_dir / "manifest.json").exists()
-    assert body["manifest"]["target_engine"] == "unity"
+    assert body["manifest"]["target_engine"] == "generic"
     assert body["cost_budget"]["used_usd"] == 0.0
 
 

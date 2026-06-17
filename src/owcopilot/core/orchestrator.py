@@ -26,7 +26,6 @@ def build_graph(
     generator,  # core.protocols.Generator
     validators: Sequence[Callable[[dict], list[ValidationIssue]]],
     repair_strategy,  # consistency.repair.RepairStrategy
-    adapter=None,  # core.protocols.EngineAdapter | None
 ):
     def plan_node(state: TaskState) -> dict:
         intent = state["intent"]
@@ -36,17 +35,15 @@ def build_graph(
             system="You are a planner for game content tasks.",
             user=f"Decompose into steps: {intent}",
         )
-        plan = ["retrieve_lore", "generate_quest", "land_to_engine"]
+        plan = ["retrieve_lore", "generate_quest"]
         return {"phase": Phase.PLAN, "plan": plan, "log": [f"PLAN: produced {len(plan)} steps"]}
 
     def execute_node(state: TaskState) -> dict:
         artifact = generator.generate(state["intent"])  # routed to 'generate' (frontier) inside
-        if adapter is not None:
-            adapter.apply(artifact)
         return {
             "phase": Phase.EXECUTE,
             "artifact": artifact,
-            "log": ["EXECUTE: generated artifact + landed to engine (mock)"],
+            "log": ["EXECUTE: generated artifact"],
         }
 
     def verify_node(state: TaskState) -> dict:

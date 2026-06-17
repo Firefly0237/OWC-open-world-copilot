@@ -91,7 +91,6 @@ def _build_app(wb: WorldBible, config: BenchmarkConfig, intents: list[BenchmarkI
         router_mode=config.router,
         cache=_build_cache(config),
         prefix_mode=config.prefix_mode,
-        land=True,
     )
     return app, telemetry, generator
 

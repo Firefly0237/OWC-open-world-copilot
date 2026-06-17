@@ -77,6 +77,19 @@ def decide_review_item(
         project.content_store.save(bundle)
         project.reload()
         written_ref = f"quest:{quest.id}"
+    elif item.item_type is ReviewItemType.QUEST_LOGIC_DRAFT:
+        # B7: apply ONLY the drafted logic layer to an existing quest (everything else untouched).
+        from ..content.models import QuestLogic
+
+        quest_id = str(item.payload.get("quest_id") or "")
+        bundle = project.content_store.load()
+        if quest_id not in bundle.quests:
+            raise ValueError(f"任务「{quest_id}」已不存在，无法应用逻辑草稿；请驳回此项。")
+        logic = QuestLogic.model_validate(item.payload.get("logic") or {})
+        bundle.quests[quest_id] = bundle.quests[quest_id].model_copy(update={"logic": logic})
+        project.content_store.save(bundle)
+        project.reload()
+        written_ref = f"quest:{quest_id}"
     elif item.item_type in {ReviewItemType.WORLD_SEED, ReviewItemType.IMPORT_DRAFT}:
         seed_bundle = ContentBundle.model_validate(item.payload.get("bundle") or {})
         conflicts = _world_seed_conflicts(project.bundle, seed_bundle)

@@ -53,9 +53,12 @@ def test_acceptance_evaluation_passes_all_gates(tmp_path: Path) -> None:
     assert report.passed, f"failed checks: {failed}"
     assert report.metrics["detection_rate"] >= 0.85
     assert report.metrics["retrieval_hit_rate"] >= 0.90
+    # The tight-budget gate only clears when the rerank stage lifts the answer to the top.
+    assert report.metrics["retrieval_tight_hit_rate"] >= 0.95
     by_name = {check.name: check for check in report.checks}
     assert by_name["clean_world_zero_false_positives"].passed
     assert by_name["impact_recall_100"].passed
+    assert by_name["retrieval_tight_hit_rate_gate"].passed
     assert by_name["qa_grounded_or_refuse"].passed
 
 

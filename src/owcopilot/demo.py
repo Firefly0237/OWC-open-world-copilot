@@ -9,25 +9,15 @@ run_grounded_demo() : P1 — in-code demo World Bible + retrieval-grounded,
 
 from __future__ import annotations
 
-from .adapters.unity import UnityAdapter
-from .adapters.unity.bridge import FakeUnityBridge
-from .adapters.unreal import UnrealAdapter, fields_to_quest
-from .adapters.unreal.bridge import FakeUnrealBridge, make_unreal_bridge_from_env
 from .assembly import PrefixMode, RouterMode, build_grounded_pipeline, build_validator_suite
-from .consistency.repair import RepairStrategy
-from .consistency.validators import ReferenceValidator
-from .core.orchestrator import build_graph
-from .generation.quest import MockQuestGenerator
 from .llm.cache import CacheBackend, NoOpCache
 from .llm.gateway import (
-    LLMGateway,
     LLMProvider,
     MockProvider,
     OpenAICompatProvider,
     ScriptedFakeProvider,
     StructuredFakeProvider,
 )
-from .llm.router import StaticRouter
 from .llm.telemetry import TelemetryCollector
 from .util import load_dotenv, use_utf8_stdout
 from .worldbible.models import Entity, EntityType, Relation, WorldBible
@@ -177,44 +167,11 @@ def demo_worldbible() -> WorldBible:
     return wb
 
 
-def build_demo_app(wb: WorldBible):
-    telemetry = TelemetryCollector()
-    gateway = LLMGateway(
-        providers={"cheap": MockProvider(), "frontier": MockProvider()},
-        router=StaticRouter(),
-        telemetry=telemetry,
-    )
-    app = build_graph(
-        gateway=gateway,
-        generator=MockQuestGenerator(gateway),
-        validators=[ReferenceValidator(wb)],
-        repair_strategy=RepairStrategy(wb),
-        adapter=UnrealAdapter(commit=True),
-    )
-    return app, telemetry
-
-
-def run_demo() -> dict:
-    use_utf8_stdout()
-    wb = seed_worldbible()
-    app, telemetry = build_demo_app(wb)
-    final = app.invoke(
-        {
-            "intent": "Add a quest about a missing supply caravan near the northern road.",
-            "max_repair_attempts": 2,
-            "log": [],
-        }
-    )
-    _print_run("P0  PLAN-EXECUTE-VERIFY (mock generator, shows self-repair)", final, telemetry)
-    return {"final": final, "telemetry": telemetry.summary()}
-
-
 def build_grounded_app(
     wb: WorldBible,
     *,
     frontier: LLMProvider | None = None,
     use_llm_repair: bool = False,
-    land: bool = True,
     cheap: LLMProvider | None = None,
     router_mode: RouterMode = "static",
     cache: CacheBackend | None = None,
@@ -226,13 +183,11 @@ def build_grounded_app(
 
       - `cheap` / `frontier`: tier providers. Defaults reproduce the offline demo; pass
                               `OpenAICompatProvider(...)` to go live.
-      - `use_llm_repair` : `True` swaps the deterministic RepairStrategy for the LLM-backed one
+      - `use_llm_repair` : `True` swaps the deterministic repair for the LLM-backed one
                             (with the deterministic fallback) — what a real deployment wants.
       - `router_mode`    : `"static"` or `"cascade"` for cheap-first generation.
       - `cache`          : cache backend to hang off the gateway (`NoOpCache` by default).
       - `prefix_mode`    : prompt structure for generation (`"retrieval"` or `"stable"`).
-      - `land`           : `True` (default) wires the UnrealAdapter into EXECUTE as in the demo;
-                            a web service passes `land=False` (engine landing is the local step).
     """
     cheap_provider = cheap if cheap is not None else MockProvider()
     frontier_provider = frontier if frontier is not None else StructuredFakeProvider()
@@ -244,7 +199,6 @@ def build_grounded_app(
         router_mode=router_mode,
         cache=cache or NoOpCache(),
         prefix_mode=prefix_mode,
-        land=land,
     )
     return app, telemetry
 
@@ -320,7 +274,6 @@ def build_milestone_app(wb: WorldBible, *, use_real_model: bool = False):
         use_llm_repair=True,
         router_mode="static",
         prefix_mode="retrieval",
-        land=True,
     )
     return app, telemetry
 
@@ -347,110 +300,6 @@ def run_milestone_demo(*, use_real_model: bool = False) -> dict:
     print(f"Repairs applied: {n_repairs} ({detail}).")
     return {"final": final, "telemetry": telemetry.summary()}
 
-
-# --------------------------------------------------------------------------- P3 (engine landing)
-def build_ue_app(wb: WorldBible, *, bridge=None, use_real_model: bool = False):
-    """Milestone wiring (4 validators + grounded gen + LLM repair) plus a real `UnrealAdapter`.
-
-    Landing happens in `run_ue_demo` AFTER verify is clean, so the engine only ever receives a
-    lore-consistent quest — the adapter is deliberately NOT wired into the execute node here
-    (which would land the pre-repair draft). Returns (app, telemetry, adapter).
-
-    Offline: inject a `FakeUnrealBridge`. Real: inject a `RemoteControlBridge` (see run_ue_demo).
-    """
-    if use_real_model:
-        load_dotenv()
-        frontier: LLMProvider = OpenAICompatProvider(model="deepseek-v4-pro")
-    else:
-        frontier = ScriptedFakeProvider(
-            generate=_MILESTONE_BAD_QUEST, repair=_MILESTONE_FIXED_QUEST
-        )
-    adapter = UnrealAdapter(bridge if bridge is not None else FakeUnrealBridge(), commit=True)
-    app, telemetry, _generator = build_grounded_pipeline(
-        wb,
-        cheap_provider=MockProvider(),
-        frontier_provider=frontier,
-        use_llm_repair=True,
-        router_mode="static",
-        prefix_mode="retrieval",
-        land=False,
-        adapter=None,
-    )
-    return app, telemetry, adapter
-
-
-def run_ue_demo(*, use_real_bridge: bool = False, use_real_model: bool = False) -> dict:
-    """intent -> grounded gen -> caught -> LLM repair -> clean -> LAND into UE5 -> snapshot.
-
-    Offline (default): FakeUnrealBridge, $0. Real: `--ue` injects a RemoteControlBridge that writes
-    to an open UE5 editor's DataTable and reads the row back (see docs/P3_results.md).
-    """
-    use_utf8_stdout()
-    wb = demo_worldbible()
-    bridge = make_unreal_bridge_from_env() if use_real_bridge else FakeUnrealBridge()
-    app, telemetry, adapter = build_ue_app(wb, bridge=bridge, use_real_model=use_real_model)
-
-    final = app.invoke({"intent": MILESTONE_INTENT, "max_repair_attempts": 2, "log": []})
-    artifact = final["artifact"]
-    adapter.apply(artifact)  # land ONLY the verified, consistent quest
-    snap = adapter.snapshot()  # read it back from the engine
-
-    landed_quest = fields_to_quest(snap["row"]) if snap.get("row") else {}
-    landing_issues = [i for v in all_validators(wb) for i in v(landed_quest)]
-
-    mode = "RemoteControlBridge (real UE5)" if use_real_bridge else "FakeUnrealBridge (offline $0)"
-    bar = "=" * 64
-    print(bar)
-    print("P3  intent -> gen -> repair -> LAND to UE5 DataTable -> snapshot")
-    print(bar)
-    print(f"World Bible: {len(wb.entities)} entities  |  bridge: {mode}")
-    for line in final.get("log", []):
-        print("  •", line)
-    print(f"\nRepairs applied: {final.get('repair_attempts', 0)}  ->  landed quest:")
-    for k, v in artifact.items():
-        print(f"  {k:<14}: {v}")
-    print(f"\nLanded into DataTable '{snap['table']}' as row '{snap['row_name']}':")
-    print(f"  {snap['row']}")
-    print(f"\nsnapshot() read-back matches generated quest: {landed_quest == artifact}")
-    print(
-        f"Engine-layer VERIFY (landed row re-validated): "
-        f"{'CONSISTENT' if not landing_issues else f'{len(landing_issues)} issue(s)'}"
-    )
-    return {
-        "final": final,
-        "snapshot": snap,
-        "landing_issues": landing_issues,
-        "telemetry": telemetry.summary(),
-        "bridge": bridge,
-    }
-
-
-def run_two_engine_demo() -> dict:
-    """One core, two engines: land the SAME consistent quest via UnrealAdapter AND UnityAdapter."""
-    use_utf8_stdout()
-    wb = demo_worldbible()
-    app, _telemetry, _adapter = build_ue_app(wb)
-    quest = app.invoke({"intent": MILESTONE_INTENT, "max_repair_attempts": 2, "log": []})[
-        "artifact"
-    ]
-
-    unreal = UnrealAdapter(FakeUnrealBridge(), commit=True)
-    unity = UnityAdapter(FakeUnityBridge(), commit=True)
-    unreal.apply(quest)
-    unity.apply(quest)
-    ue_snap, unity_snap = unreal.snapshot(), unity.snapshot()
-
-    bar = "=" * 64
-    print(bar)
-    print("P3  one core -> two engines (same Quest, two adapters)")
-    print(bar)
-    print(f"Quest: {quest['title']}  ({quest['giver_npc']} -> {quest['location']})\n")
-    print(
-        f"[Unreal]  DataTable '{ue_snap['table']}' row '{ue_snap['row_name']}':\n  {ue_snap['row']}"
-    )
-    print(f"\n[Unity ]  ScriptableObject '{unity_snap['asset']}':\n  {unity_snap['data']}")
-    print("\nSame core, zero orchestrator/generation/validation changes -> two engines.")
-    return {"quest": quest, "unreal": ue_snap, "unity": unity_snap}
 
 
 if __name__ == "__main__":

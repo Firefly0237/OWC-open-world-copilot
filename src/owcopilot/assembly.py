@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from .adapters.unreal import UnrealAdapter
 from .consistency.repair import LLMRepairStrategy, RepairStrategy
 from .consistency.validators import (
     FactionConflictValidator,
@@ -53,8 +52,6 @@ def build_grounded_pipeline(
     router_mode: RouterMode = "static",
     cache: CacheBackend | None = None,
     prefix_mode: PrefixMode = "retrieval",
-    land: bool = True,
-    adapter=None,
     llm_max_retries: int = 0,
     llm_retry_backoff_seconds: float = 0.0,
 ) -> tuple[Any, TelemetryCollector, Any]:
@@ -90,14 +87,10 @@ def build_grounded_pipeline(
         if use_llm_repair
         else RepairStrategy(wb)
     )
-    chosen_adapter = (
-        adapter if adapter is not None else (UnrealAdapter(commit=True) if land else None)
-    )
     graph = build_graph(
         gateway=gateway,
         generator=generator,
         validators=validators,
         repair_strategy=repair_strategy,
-        adapter=chosen_adapter,
     )
     return graph, telemetry, generator

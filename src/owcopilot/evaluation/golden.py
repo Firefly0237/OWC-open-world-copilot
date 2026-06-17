@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from ..content.models import ContentBundle, Entity, EntityType, Quest, Relation
 from ..content.store import ContentStore
 from ..exporters import EngineTarget, export_content_bundle
-from ..llm.cache import NoOpCache
+from ..llm.cache import HashingEmbedder, NoOpCache
 from ..llm.gateway import LLMGateway
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
@@ -75,7 +75,9 @@ def run_golden_evaluation(workspace: str | Path) -> GoldenEvaluationReport:
     export_root = root / "exports"
     write_golden_world(content_root)
 
-    project = ProjectContext.open(content_root, sqlite_path=root / "runtime.sqlite")
+    project = ProjectContext.open(
+        content_root, sqlite_path=root / "runtime.sqlite", embedder=HashingEmbedder()
+    )
     try:
         audit = run_full_audit(project)
         pack = project.context_builder.build("Aldric caravan", budget_tokens=200)

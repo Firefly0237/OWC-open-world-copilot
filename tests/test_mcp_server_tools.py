@@ -70,14 +70,14 @@ def test_mcp_export_project_writes_engine_scoped_bundle(tmp_path) -> None:
     result = export_project(
         content_root=str(content_root),
         output_dir=str(output_root),
-        target_engine="unreal",
+        target_engine="generic",
     )
 
-    export_dir = output_root / "unreal"
+    export_dir = output_root / "generic"
     assert result["output_dir"] == str(export_dir)
     assert (export_dir / "content_bundle.json").exists()
     assert (export_dir / "manifest.json").exists()
-    assert result["manifest"]["target_engine"] == "unreal"
+    assert result["manifest"]["target_engine"] == "generic"
     assert result["cost_budget"]["used_usd"] == 0.0
 
 

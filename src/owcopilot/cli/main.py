@@ -26,7 +26,7 @@ from ..evaluation import run_acceptance_evaluation, run_golden_evaluation
 from ..exporters import EngineTarget, export_content_bundle
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
 from ..llm.cache import NoOpCache
-from ..llm.gateway import LLMGateway, OpenAICompatProvider
+from ..llm.gateway import LLMGateway, OpenAICompatProvider, require_offline_llm_allowed
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
 from ..pipeline.audit import run_full_audit
@@ -39,8 +39,10 @@ from ..pipeline.patches import (
 )
 from ..pipeline.project import ProjectContext
 from ..pipeline.review import decide_review_item
-from ..qa.offline import OfflineQAProvider
+from ..qa.community_index import CommunityIndexService
+from ..qa.offline import OfflineCommunityReportProvider, OfflineQAProvider
 from ..qa.service import LoreQAService
+from ..readiness import assess_readiness
 from ..telemetry import deterministic_step, llm_step, summarize_workflow
 from ..util import load_dotenv
 
@@ -102,6 +104,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit.set_defaults(handler=_cmd_audit)
 
+    readiness = subparsers.add_parser(
+        "readiness",
+        help="Score content against the production-ready standard (completeness, not correctness).",
+    )
+    _add_project_args(readiness)
+    readiness.add_argument(
+        "--kind",
+        choices=["quest", "character", "region", "dialogue_tree"],
+        help="Only assess one content kind.",
+    )
+    readiness.add_argument(
+        "--only-incomplete",
+        action="store_true",
+        help="List only items that are not yet production-ready.",
+    )
+    readiness.set_defaults(handler=_cmd_readiness)
+
     issues = subparsers.add_parser("issues", help="List persisted audit issues.")
     _add_project_args(issues)
     issues.add_argument("--severity")
@@ -121,6 +140,14 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--budget-tokens", type=int, default=800)
     _add_llm_args(ask)
     ask.set_defaults(handler=_cmd_ask)
+
+    overview = subparsers.add_parser(
+        "build-overview",
+        help="Build/refresh the GraphRAG macro-overview index (community + global reports).",
+    )
+    _add_project_args(overview)
+    _add_llm_args(overview)
+    overview.set_defaults(handler=_cmd_build_overview)
 
     impact = subparsers.add_parser(
         "impact", help="Preview the blast radius of a planned change (pure graph, no LLM)."
@@ -179,16 +206,32 @@ def build_parser() -> argparse.ArgumentParser:
     _add_llm_args(draft)
     draft.set_defaults(handler=_cmd_draft)
 
-    ui = subparsers.add_parser(
-        "ui", help="Launch the Workbench UI in the browser (wraps `streamlit run`)."
+    expand = subparsers.add_parser(
+        "expand",
+        help=(
+            "Grow more canon-grounded content (locations / NPCs / side quests) on an EXISTING "
+            "world at one focus, into the review queue."
+        ),
     )
-    ui.add_argument("--port", type=int, default=8501)
-    ui.add_argument(
-        "--print-cmd",
-        action="store_true",
-        help="Print the launch command as JSON instead of running it (CI/debug).",
+    _add_project_args(expand)
+    expand.add_argument(
+        "--focus",
+        required=True,
+        help="Focus to deepen: region:<id> / faction:<id> / quest:<id> (or a bare existing id).",
     )
-    ui.set_defaults(handler=_cmd_ui)
+    expand.add_argument("--angle", default="", help="What tension to deepen (optional).")
+    expand.add_argument("--pois", type=int, default=3, help="New locations to add.")
+    expand.add_argument("--npcs", type=int, default=4, help="New secondary NPCs to add.")
+    expand.add_argument("--quests", type=int, default=3, help="New side quests to add.")
+    expand.add_argument("--budget-tokens", type=int, default=1800)
+    expand.add_argument(
+        "--refine-rounds",
+        type=int,
+        default=1,
+        help="Quests-stage critique→refine rounds (0 disables the loop).",
+    )
+    _add_llm_args(expand)
+    expand.set_defaults(handler=_cmd_expand)
 
     extract = subparsers.add_parser(
         "extract",
@@ -201,7 +244,6 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--input", required=True, help="Path to the manuscript file.")
     extract.add_argument("--title", help="Source title; defaults to the file stem.")
     extract.add_argument("--source-kind", default="文稿")
-    extract.add_argument("--max-chunks", type=int, default=12)
     extract.add_argument(
         "--fill-gaps",
         action="store_true",
@@ -251,8 +293,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--target-engine",
         choices=[target.value for target in EngineTarget],
         default=EngineTarget.GENERIC.value,
+        help=(
+            "ink & twine are verified against real compilers (inkjs/extwee); renpy is "
+            "syntax-validated; yarn is beta (syntax-validated against Yarn Spinner docs, "
+            "not yet engine-compiled)."
+        ),
     )
     export.set_defaults(handler=_cmd_export)
+
+    recognize = subparsers.add_parser(
+        "recognize",
+        help=(
+            "Read a foreign game-project file (spreadsheet / articy / ink / Yarn / UE / Unity) and "
+            "recognize its entities + relations into an editable plan; --apply stages into review."
+        ),
+    )
+    _add_project_args(recognize)
+    recognize.add_argument(
+        "--source-format", required=True,
+        choices=["table", "articy", "ink", "yarn", "ue", "unity"],
+        help=(
+            "table: .csv/.xlsx/.json rows with unknown columns. articy/ue/unity: a JSON export. "
+            "ink/yarn: a narrative script. ue: UE DataTable JSON. unity: ScriptableObject JSON."
+        ),
+    )
+    recognize.add_argument("--input", required=True, help="Path to the file to recognize.")
+    recognize.add_argument(
+        "--mapping",
+        help="Path to a ColumnMapping JSON to override the inferred table mapping (table only).",
+    )
+    recognize.add_argument(
+        "--apply",
+        action="store_true",
+        help="Stage new/changed entities+relations into review (otherwise just print the plan).",
+    )
+    recognize.add_argument("--operator", default="import", help="Operator recorded on apply.")
+    recognize.set_defaults(handler=_cmd_recognize)
 
     eval_golden = subparsers.add_parser("eval-golden", help="Run the offline Golden World eval.")
     eval_golden.add_argument("--workspace", required=True)
@@ -293,7 +369,11 @@ def _add_llm_args(parser: argparse.ArgumentParser) -> None:
         "--llm-mode",
         choices=["offline", "real"],
         default=os.getenv("OWCOPILOT_LLM_MODE", "offline"),
-        help="Use the deterministic offline provider or a real OpenAI-compatible provider.",
+        help=(
+            "real: a configured OpenAI-compatible provider (the product path). offline: the "
+            "deterministic doubles — a test/CI dry-run only, gated behind "
+            "OWCOPILOT_ALLOW_OFFLINE_LLM so it is never a shipped product mode."
+        ),
     )
     parser.add_argument(
         "--llm-model",
@@ -316,6 +396,7 @@ def _llm_gateway(
         load_dotenv()  # pick up OPENAI_BASE_URL / OPENAI_API_KEY from .env; shell env wins
         provider: Any = OpenAICompatProvider(model=args.llm_model)
     else:
+        require_offline_llm_allowed()  # `--llm-mode offline` is a test/CI dry-run, not a product
         provider = offline_provider
     gateway = LLMGateway(
         providers={"cheap": provider},
@@ -435,6 +516,20 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         return 1 if args.fail_on_error and result.open_errors else 0
 
 
+def _cmd_readiness(args: argparse.Namespace) -> int:
+    with _project(args) as project:
+        report = assess_readiness(project.bundle)
+        payload = report.model_dump(mode="json")
+        items = payload["items"]
+        if args.kind:
+            items = [it for it in items if it["kind"] == args.kind]
+        if args.only_incomplete:
+            items = [it for it in items if not it["ready"]]
+        payload["items"] = items
+        payload["cost_budget"] = _deterministic_cost_budget("readiness")
+        return _emit(payload, args)
+
+
 def _cmd_issues(args: argparse.Namespace) -> int:
     with _project(args) as project:
         issues = project.sqlite_store.list_issues(
@@ -474,7 +569,8 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         )
         service = LoreQAService(
             gateway=gateway,
-            context_builder=project.context_builder,
+            # also recall the GraphRAG macro-overview reports (a no-op until `build-overview` runs)
+            context_builder=project.qa_context_builder(),
             bundle=project.bundle,
         )
         answer = service.ask(args.query, budget_tokens=args.budget_tokens)
@@ -488,6 +584,31 @@ def _cmd_ask(args: argparse.Namespace) -> int:
                 "answer": answer.model_dump(mode="json"),
                 "llm_mode": args.llm_mode,
                 "llm_model": args.llm_model if args.llm_mode == "real" else "offline",
+                "telemetry": telemetry_summary,
+                "cost_budget": cost_budget.model_dump(mode="json"),
+            },
+            args,
+        )
+
+
+def _cmd_build_overview(args: argparse.Namespace) -> int:
+    with _project(args) as project:
+        gateway, telemetry = _llm_gateway(
+            args, task="community_report", offline_provider=OfflineCommunityReportProvider()
+        )
+        result = CommunityIndexService(
+            gateway=gateway, store=project.sqlite_store, bundle=project.bundle
+        ).build()
+        telemetry_summary = telemetry.summary()
+        cost_budget = summarize_workflow(
+            [llm_step("build_overview", telemetry_summary)], budget_usd=args.max_cost_usd
+        ).budget
+        return _emit(
+            {
+                "community_count": result.community_count,
+                "regenerated": result.regenerated,
+                "reports": [r.model_dump(mode="json") for r in result.reports],
+                "llm_mode": args.llm_mode,
                 "telemetry": telemetry_summary,
                 "cost_budget": cost_budget.model_dump(mode="json"),
             },
@@ -512,6 +633,23 @@ def _cmd_export(args: argparse.Namespace) -> int:
             },
             args,
         )
+
+
+def _cmd_recognize(args: argparse.Namespace) -> int:
+    from ..app.actions import recognize_import_action
+
+    mapping = json.loads(Path(args.mapping).read_text(encoding="utf-8")) if args.mapping else None
+    result = recognize_import_action(
+        args.content_root,
+        source_format=args.source_format,
+        input_path=args.input,
+        field_mapping=mapping,
+        apply=args.apply,
+        operator=args.operator,
+        sqlite_path=args.sqlite_path,
+    )
+    _emit(result, args)
+    return 0
 
 
 def _cmd_eval_golden(args: argparse.Namespace) -> int:
@@ -653,41 +791,8 @@ def _cmd_rollback(args: argparse.Namespace) -> int:
         )
 
 
-def _cmd_ui(args: argparse.Namespace) -> int:
-    """Zero-config launcher: `owcopilot ui` opens the Workbench without remembering paths."""
-    import importlib.util
-    import subprocess
-
-    spec = importlib.util.find_spec("owcopilot.app.dashboard")
-    if spec is None or not spec.origin:
-        print(json.dumps({"error": "dashboard module not found; install owcopilot[app]"}))
-        return 2
-    try:
-        importlib.util.find_spec("streamlit")
-    except ModuleNotFoundError:
-        spec_streamlit = None
-    else:
-        spec_streamlit = importlib.util.find_spec("streamlit")
-    if spec_streamlit is None:
-        print(json.dumps({"error": "streamlit is not installed; pip install owcopilot[app]"}))
-        return 2
-    cmd = [
-        sys.executable,
-        "-m",
-        "streamlit",
-        "run",
-        spec.origin,
-        "--server.port",
-        str(args.port),
-    ]
-    if args.print_cmd:
-        print(json.dumps({"command": cmd}, ensure_ascii=False))
-        return 0
-    return subprocess.call(cmd)
-
-
 def _cmd_extract(args: argparse.Namespace) -> int:
-    # Reuses the Streamlit-free app actions so CLI/UI behave identically.
+    # Reuses the shared app actions so CLI and the web UI behave identically.
     from ..app.actions import (
         fill_extraction_gaps_action,
         run_extraction_action,
@@ -704,7 +809,6 @@ def _cmd_extract(args: argparse.Namespace) -> int:
         text=text,
         source_kind=args.source_kind,
         sqlite_path=args.sqlite_path,
-        max_chunks=args.max_chunks,
         llm_mode=args.llm_mode,
         llm_model=args.llm_model,
     )
@@ -776,6 +880,45 @@ def _cmd_draft(args: argparse.Namespace) -> int:
             },
             args,
         )
+
+
+def _cmd_expand(args: argparse.Namespace) -> int:
+    # Reuses the shared app action so CLI, REST and the web UI behave identically.
+    from ..app.actions import run_world_expand_action
+
+    result = run_world_expand_action(
+        args.content_root,
+        brief={
+            "focus_ref": args.focus,
+            "angle": args.angle,
+            "poi_count": args.pois,
+            "npc_count": args.npcs,
+            "quest_count": args.quests,
+        },
+        sqlite_path=args.sqlite_path,
+        budget_tokens=args.budget_tokens,
+        llm_mode=args.llm_mode,
+        llm_model=args.llm_model,
+        refine_rounds=args.refine_rounds,
+    )
+    return _emit(
+        {
+            "id": result["id"],
+            "focus_ref": result["focus_ref"],
+            "focus_label": result["focus_label"],
+            "angle": result["angle"],
+            "counts": result["counts"],
+            "grounding": result["grounding"],
+            "refine_trail": result["refine_trail"],
+            "issues": result["issues"],
+            "review_item_id": result["review_item_id"],
+            "review_status": "pending_review",
+            "llm_mode": args.llm_mode,
+            "telemetry": result["telemetry"],
+            "cost_budget": result["cost_budget"],
+        },
+        args,
+    )
 
 
 def _cmd_barks(args: argparse.Namespace) -> int:

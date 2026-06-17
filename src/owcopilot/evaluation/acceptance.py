@@ -32,7 +32,7 @@ from ..content.models import (
 )
 from ..content.store import ContentStore
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
-from ..llm.cache import NoOpCache
+from ..llm.cache import HashingEmbedder, NoOpCache
 from ..llm.gateway import LLMGateway
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
@@ -43,6 +43,11 @@ from ..qa.service import LoreQAService
 
 DETECTION_RATE_GATE = 0.85
 RETRIEVAL_HIT_RATE_GATE = 0.90
+# A tight context window (~10% of the QA default) only contains the answer if the most
+# on-topic document is reranked to the very top, so this gate guards the precision stage:
+# plain RRF fusion scores ~0.80 here, the rerank stage ~1.00.
+RETRIEVAL_TIGHT_BUDGET = 80
+RETRIEVAL_TIGHT_HIT_RATE_GATE = 0.95
 
 _REGIONS: list[tuple[str, str, int, int]] = [
     ("雾脊山道", "Mistridge Pass", 1, 5),
@@ -457,6 +462,21 @@ def retrieval_benchmark_queries() -> list[tuple[str, str]]:
     return queries
 
 
+def _retrieval_hit_rate(
+    project: ProjectContext, queries: list[tuple[str, str]], *, budget_tokens: int
+) -> tuple[float, list[str]]:
+    """Fraction of labelled queries whose expected ref survives into the context pack."""
+    hits = 0
+    misses: list[str] = []
+    for query, expected_ref in queries:
+        pack = project.context_builder.build(query, budget_tokens=budget_tokens)
+        if expected_ref in pack.refs:
+            hits += 1
+        else:
+            misses.append(f"{query} -> {expected_ref}")
+    return hits / len(queries), misses
+
+
 def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
     root = Path(workspace)
     clean_root = root / "acceptance_world"
@@ -478,7 +498,12 @@ def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
     }
 
     # 1. clean world must audit to zero open issues (false-positive gate)
-    clean_project = ProjectContext.open(clean_root, sqlite_path=root / "clean.sqlite")
+    # Pin the deterministic embedder: this is a reproducible regression gate, not a place to
+    # load a 2GB semantic model that would vary by environment. The semantic path is covered
+    # by its own dedicated test.
+    clean_project = ProjectContext.open(
+        clean_root, sqlite_path=root / "clean.sqlite", embedder=HashingEmbedder()
+    )
     try:
         clean_audit = run_full_audit(clean_project, persist=False)
         open_clean = [issue for issue in clean_audit.issues if issue.status.value == "open"]
@@ -525,23 +550,33 @@ def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
             )
         )
 
-        # 3. retrieval benchmark: 30 bilingual labelled queries
+        # 3. retrieval benchmark: 30 bilingual labelled queries, scored at a generous budget
+        #    (recall) and at a tight budget (precision -- did the rerank stage put the answer
+        #    on top so it survives a small context window?).
         queries = retrieval_benchmark_queries()
-        hits = 0
-        misses: list[str] = []
-        for query, expected_ref in queries:
-            pack = clean_project.context_builder.build(query, budget_tokens=700)
-            if expected_ref in pack.refs:
-                hits += 1
-            else:
-                misses.append(f"{query} -> {expected_ref}")
-        hit_rate = hits / len(queries)
+        hit_rate, misses = _retrieval_hit_rate(clean_project, queries, budget_tokens=700)
         metrics["retrieval_hit_rate"] = round(hit_rate, 4)
         checks.append(
             AcceptanceCheck(
                 name="retrieval_hit_rate_gate",
                 passed=hit_rate >= RETRIEVAL_HIT_RATE_GATE,
                 details={"hit_rate": hit_rate, "gate": RETRIEVAL_HIT_RATE_GATE, "misses": misses},
+            )
+        )
+        tight_rate, tight_misses = _retrieval_hit_rate(
+            clean_project, queries, budget_tokens=RETRIEVAL_TIGHT_BUDGET
+        )
+        metrics["retrieval_tight_hit_rate"] = round(tight_rate, 4)
+        checks.append(
+            AcceptanceCheck(
+                name="retrieval_tight_hit_rate_gate",
+                passed=tight_rate >= RETRIEVAL_TIGHT_HIT_RATE_GATE,
+                details={
+                    "hit_rate": tight_rate,
+                    "budget_tokens": RETRIEVAL_TIGHT_BUDGET,
+                    "gate": RETRIEVAL_TIGHT_HIT_RATE_GATE,
+                    "misses": tight_misses,
+                },
             )
         )
 
@@ -583,7 +618,9 @@ def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
         clean_project.close()
 
     # 5. seeded-error detection on the corrupted world
-    corrupted_project = ProjectContext.open(corrupted_root, sqlite_path=root / "corrupted.sqlite")
+    corrupted_project = ProjectContext.open(
+        corrupted_root, sqlite_path=root / "corrupted.sqlite", embedder=HashingEmbedder()
+    )
     try:
         corrupted_audit = run_full_audit(corrupted_project, persist=False)
     finally:

@@ -23,6 +23,9 @@ class StepTelemetry(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     total_cost_usd: float = 0.0
+    # This step's cost is a ballpark (a tier it used isn't priced via env). Deterministic ($0) steps
+    # are always exact. Propagated up so the workflow flag reflects the tiers actually used.
+    cost_is_estimate: bool = False
 
 
 class CostBudgetSummary(BaseModel):
@@ -30,6 +33,9 @@ class CostBudgetSummary(BaseModel):
     used_usd: float = 0.0
     remaining_usd: float | None = None
     over_budget: bool = False
+    # True when an LLM ran but no real prices are configured — the figure is a ballpark estimate
+    # from illustrative tier prices, not actual vendor billing. Deterministic ($0) steps are exact.
+    cost_is_estimate: bool = False
 
 
 class WorkflowTelemetry(BaseModel):
@@ -50,6 +56,7 @@ def llm_step(name: str, telemetry: TelemetryCollector | Mapping[str, Any]) -> St
         input_tokens=int(summary.get("input_tokens", 0)),
         output_tokens=int(summary.get("output_tokens", 0)),
         total_cost_usd=float(summary.get("total_cost_usd", 0.0)),
+        cost_is_estimate=bool(summary.get("cost_is_estimate", False)),
     )
 
 
@@ -67,5 +74,8 @@ def summarize_workflow(
             used_usd=used,
             remaining_usd=remaining,
             over_budget=(budget_usd is not None and used > budget_usd),
+            # A ballpark if any step priced a real call from illustrative defaults (a tier it used
+            # isn't configured); deterministic steps are always exact, so they never set this.
+            cost_is_estimate=any(step.cost_is_estimate for step in steps),
         ),
     )

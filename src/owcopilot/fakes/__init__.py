@@ -1,10 +1,9 @@
 """Offline test doubles, collected in one place.
 
-These are the deterministic, $0 stand-ins that let the whole pipeline — generation, the
-verify→repair loop, engine landing — run offline in tests, demos and the benchmark without any
-API key or running editor. They are kept *out* of the production modules (`llm/gateway.py`,
-`adapters/*/bridge.py`) so those files contain only real implementations; each production module
-re-exports the relevant double from here for backward compatibility.
+These are the deterministic, $0 stand-ins that let the whole pipeline — generation and the
+verify→repair loop — run offline in tests, demos and the benchmark without any API key. They are
+kept *out* of the production modules (`llm/gateway.py`) so those files contain only real
+implementations; each production module re-exports the relevant double from here for compatibility.
 
 Note: `HashingEmbedder` is **not** a test double — it is the real, dependency-free default embedder
 for `SemanticCache` and therefore stays in `llm/cache.py`. `BenchmarkProvider` stays in
@@ -14,15 +13,11 @@ for `SemanticCache` and therefore stays in `llm/cache.py`. `BenchmarkProvider` s
     - MockProvider          — echoes the prompt; used by P0 and the cheap planner tier.
     - StructuredFakeProvider — returns a fixed, World-Bible-grounded Quest as JSON.
     - ScriptedFakeProvider   — returns different quests for generation vs repair (keys on a marker).
-  Bridges (implement the structural engine `*Bridge` protocols):
-    - FakeUnrealBridge — in-memory UE5 DataTable stand-in.
-    - FakeUnityBridge  — in-memory Unity asset stand-in.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
 
 
 # --------------------------------------------------------------------------- LLM providers
@@ -89,54 +84,8 @@ class ScriptedFakeProvider:
         return text, in_tok, out_tok
 
 
-# --------------------------------------------------------------------------- engine bridges
-class FakeUnrealBridge:
-    """Offline, in-memory stand-in for a running UE5 editor.
-
-    Stores rows in a dict and records every upsert (so tests can assert *what* and *how many
-    times* the adapter landed). `read_datatable_row` returns a copy so callers can't mutate the
-    store. This is what keeps the entire P3 translation + milestone loop testable at $0.
-    """
-
-    def __init__(self) -> None:
-        self.rows: dict[tuple[str, str], dict[str, Any]] = {}
-        self.upserts: list[tuple[str, str, dict[str, Any]]] = []  # full call log for assertions
-
-    def upsert_datatable_row(self, table: str, row_name: str, fields: dict[str, Any]) -> None:
-        self.rows[(table, row_name)] = dict(fields)
-        self.upserts.append((table, row_name, dict(fields)))
-
-    def read_datatable_row(self, table: str, row_name: str) -> dict[str, Any] | None:
-        row = self.rows.get((table, row_name))
-        return dict(row) if row is not None else None
-
-    def health(self) -> bool:
-        return True
-
-
-class FakeUnityBridge:
-    """Offline, in-memory stand-in for a Unity project."""
-
-    def __init__(self) -> None:
-        self.assets: dict[str, dict[str, Any]] = {}
-        self.writes: list[tuple[str, dict[str, Any]]] = []
-
-    def write_asset(self, name: str, data: dict[str, Any]) -> None:
-        self.assets[name] = dict(data)
-        self.writes.append((name, dict(data)))
-
-    def read_asset(self, name: str) -> dict[str, Any] | None:
-        data = self.assets.get(name)
-        return dict(data) if data is not None else None
-
-    def health(self) -> bool:
-        return True
-
-
 __all__ = [
     "MockProvider",
     "StructuredFakeProvider",
     "ScriptedFakeProvider",
-    "FakeUnrealBridge",
-    "FakeUnityBridge",
 ]
