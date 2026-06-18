@@ -22,3 +22,6 @@ dist/
 *.sqlite
 # experiment data packs stay local (rebuildable from F:/wuyin)
 /*.zip
+# personal project notes/docs stay local only
+/CHANGELOG.md
+/project_docs/

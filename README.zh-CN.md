@@ -138,13 +138,6 @@ npm --prefix frontend install && npm --prefix frontend run build   # 仅首次
   调用（非本机客户端 fail-closed）。
 - **MCP 服务**——面向 agent 生态的只读工具（写动作刻意不暴露）。
 
-## 文档
-
-- [设计报告](project_docs/设计报告.md)——总体架构、关键设计决策与里程碑
-- [面试准备手册](project_docs/面试准备手册.md)——大厂 AI Agent 岗 490 题，标准答案 + 项目锚点
-- [Agent 学习手册](project_docs/Agent学习手册.md)——以本项目为教材的 Agent 工程入门
-- [CHANGELOG](CHANGELOG.md)
-
 ## 许可证
 
 [MIT](LICENSE)

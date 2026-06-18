@@ -159,13 +159,6 @@ LLM gateway. Offline deterministic doubles make the entire test suite run at **$
 - **MCP server** — read-only tools for the agent ecosystem (write actions are deliberately not
   exposed).
 
-## Documentation
-
-- [Design report](project_docs/设计报告.md) — architecture, key design decisions, and milestones (zh)
-- [Interview prep handbook](project_docs/面试准备手册.md) — 490 big-tech AI-agent interview Q&A mapped to this project (zh)
-- [Agent learning handbook](project_docs/Agent学习手册.md) — agent engineering taught through this codebase (zh)
-- [CHANGELOG](CHANGELOG.md)
-
 ## License
 
 [MIT](LICENSE)
