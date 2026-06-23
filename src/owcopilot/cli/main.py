@@ -217,7 +217,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_project_args(repair_plan)
     repair_plan.add_argument("--max-iterations", type=int, default=200)
-    repair_plan.add_argument("--max-depth", type=int, default=8)
+    repair_plan.add_argument(
+        "--max-depth", type=int, default=None, help="Plan-length cap (default: scales with errors)."
+    )
     repair_plan.add_argument("--seed", type=int, default=0, help="RNG seed (reproducible search).")
     repair_plan.set_defaults(handler=_cmd_repair_plan)
 
@@ -398,6 +400,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write the JSON result to this file as well as stdout.",
     )
     eval_acceptance.set_defaults(handler=_cmd_eval_acceptance)
+
+    eval_repair = subparsers.add_parser(
+        "eval-repair",
+        help=(
+            "Benchmark the MCTS repair planner vs a greedy baseline over the same move space "
+            "(independent-fix worlds + a controlled interacting world). Offline, $0."
+        ),
+    )
+    eval_repair.add_argument(
+        "--output", help="Write the JSON result to this file as well as stdout."
+    )
+    eval_repair.set_defaults(handler=_cmd_eval_repair)
 
     return parser
 
@@ -756,6 +770,20 @@ def _cmd_eval_golden(args: argparse.Namespace) -> int:
     report = run_golden_evaluation(args.workspace)
     _emit(report.model_dump(mode="json"), args)
     return 0 if report.passed else 1
+
+
+def _cmd_eval_repair(args: argparse.Namespace) -> int:
+    from ..evaluation.repair_bench import run_repair_benchmark
+
+    rows = run_repair_benchmark()
+    return _emit(
+        {
+            "comparisons": [row.model_dump(mode="json") for row in rows],
+            "invariant_mcts_never_worse": all(row.mcts_at_least_greedy for row in rows),
+            "cost_budget": _deterministic_cost_budget("eval_repair"),
+        },
+        args,
+    )
 
 
 def _cmd_eval_acceptance(args: argparse.Namespace) -> int:

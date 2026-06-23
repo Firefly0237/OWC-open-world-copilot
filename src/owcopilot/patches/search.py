@@ -80,21 +80,23 @@ def plan_repairs(
     audit_runner: AuditRunner,
     *,
     max_iterations: int = 200,
-    max_depth: int = 8,
+    max_depth: int | None = None,
     seed: int = 0,
     exploration: float = _EXPLORATION,
     candidate_provider: CandidateProvider = deterministic_candidates,
 ) -> RepairPlan:
     """Search for the patch sequence that resolves the most open audit errors.
 
-    Returns the best plan found. ``candidate_provider`` defaults to the deterministic fixers (so the
+    Returns the best plan found. ``max_depth`` defaults to scale with the open-error count (you can
+    never resolve N errors in fewer than N moves, so a fixed cap would make the search underperform
+    greedy on a large world). ``candidate_provider`` defaults to the deterministic fixers (so the
     whole search is $0 and reproducible); pass a model-backed provider to widen the move set.
     """
     return _RepairSearch(
         bundle,
         audit_runner,
         max_iterations=max(0, max_iterations),
-        max_depth=max(1, max_depth),
+        max_depth=max_depth,
         exploration=exploration,
         seed=seed,
         candidate_provider=candidate_provider,
@@ -108,20 +110,22 @@ class _RepairSearch:
         audit_runner: AuditRunner,
         *,
         max_iterations: int,
-        max_depth: int,
+        max_depth: int | None,
         exploration: float,
         seed: int,
         candidate_provider: CandidateProvider,
     ) -> None:
         self.runner = audit_runner
         self.max_iterations = max_iterations
-        self.max_depth = max_depth
         self.c = exploration
         self.rng = Random(seed)
         self.candidate_provider = candidate_provider
         self._error_cache: dict[str, list[Issue]] = {}
         self._move_cache: dict[str, list[tuple[RepairMove, ContentBundle, int]]] = {}
         root_errors = self._open_errors(bundle)
+        # Depth must be at least the error count, else the search can't resolve them all and would
+        # underperform greedy; an explicit override still wins (clamped to >= 1).
+        self.max_depth = max(1, max_depth) if max_depth is not None else max(8, len(root_errors))
         self.root = _Node(bundle=bundle, open_errors=len(root_errors), depth=0)
         # Best terminal state found so far: (open_errors, plan_length, moves) — minimise errors,
         # then prefer the shorter plan. Start from "do nothing".
@@ -215,30 +219,15 @@ class _RepairSearch:
     def _applicable_moves(
         self, bundle: ContentBundle
     ) -> list[tuple[RepairMove, ContentBundle, int]]:
-        """Every shadow-valid, non-worsening one-step fix from this state (deduped by result)."""
+        """Cached wrapper over the shared move generator (computed once per distinct state)."""
         key = content_hash(bundle)
         cached = self._move_cache.get(key)
-        if cached is not None:
-            return cached
-        current_errors = len(self._open_errors(bundle))
-        moves: list[tuple[RepairMove, ContentBundle, int]] = []
-        seen_states: set[str] = set()
-        for issue in sorted(self._open_errors(bundle), key=issue_fingerprint):
-            for candidate in self.candidate_provider(issue, bundle):
-                try:
-                    child = apply_patch_shadow(bundle, candidate.ops)
-                except Exception:
-                    continue
-                child_hash = content_hash(child)
-                if child_hash in seen_states:
-                    continue
-                child_errors = len(self._open_errors(child))
-                if child_errors > current_errors:  # never make things worse
-                    continue
-                seen_states.add(child_hash)
-                moves.append((_move_for(issue, candidate), child, child_errors))
-        self._move_cache[key] = moves
-        return moves
+        if cached is None:
+            cached = applicable_repair_moves(
+                bundle, self.runner, candidate_provider=self.candidate_provider
+            )
+            self._move_cache[key] = cached
+        return cached
 
     # --- plan extraction ---------------------------------------------------------------------
     def _record(self, errors: int, moves: list[RepairMove]) -> None:
@@ -254,6 +243,37 @@ class _RepairSearch:
             current = current.parent
         moves.reverse()
         return moves
+
+
+def applicable_repair_moves(
+    bundle: ContentBundle,
+    audit_runner: AuditRunner,
+    *,
+    candidate_provider: CandidateProvider = deterministic_candidates,
+) -> list[tuple[RepairMove, ContentBundle, int]]:
+    """Every shadow-valid, non-worsening one-step fix from ``bundle`` — each as (move, resulting
+    bundle, resulting open-error count), deduped by resulting state. This is the single move
+    generator behind both the MCTS planner and the greedy baseline, so they search the same space.
+    """
+    current = audit_runner.run(AuditContext.from_bundle(bundle)).open_errors
+    current_errors = len(current)
+    moves: list[tuple[RepairMove, ContentBundle, int]] = []
+    seen: set[str] = set()
+    for issue in sorted(current, key=issue_fingerprint):
+        for candidate in candidate_provider(issue, bundle):
+            try:
+                child = apply_patch_shadow(bundle, candidate.ops)
+            except Exception:
+                continue
+            child_hash = content_hash(child)
+            if child_hash in seen:
+                continue
+            child_errors = len(audit_runner.run(AuditContext.from_bundle(child)).open_errors)
+            if child_errors > current_errors:  # never make things worse
+                continue
+            seen.add(child_hash)
+            moves.append((_move_for(issue, candidate), child, child_errors))
+    return moves
 
 
 def _move_for(issue: Issue, candidate: PatchCandidate) -> RepairMove:
