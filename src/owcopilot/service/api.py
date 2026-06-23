@@ -153,9 +153,9 @@ from ..llm.cache import build_cache_backend
 from ..llm.gateway import (
     OFFLINE_LLM_FORBIDDEN_MESSAGE,
     LLMGateway,
-    OpenAICompatProvider,
     offline_llm_allowed,
 )
+from ..llm.resilience import build_real_provider
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector, prices_are_configured
 from ..pipeline.audit import run_full_audit
@@ -1384,7 +1384,7 @@ def create_app() -> FastAPI:
         telemetry = TelemetryCollector()
         if req.llm_mode == "real":
             _require_real_allowed(request)
-            ask_provider: Any = OpenAICompatProvider(model=req.llm_model, timeout=60.0)
+            ask_provider: Any = build_real_provider(model=req.llm_model, timeout=60.0)
         else:
             _require_offline_allowed()
             ask_provider = OfflineQAProvider()
@@ -1451,7 +1451,7 @@ def create_app() -> FastAPI:
         if req.llm_mode == "real":
             _require_real_allowed(request)
             model: str = req.llm_model or os.getenv("OWCOPILOT_CHEAP_MODEL") or "deepseek-v4-flash"
-            provider: Any = OpenAICompatProvider(model=model)
+            provider: Any = build_real_provider(model=model)
         elif offline_provider is None:
             return None, telemetry
         else:

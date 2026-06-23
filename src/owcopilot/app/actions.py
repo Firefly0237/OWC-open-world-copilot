@@ -57,6 +57,7 @@ from ..extraction import (
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
 from ..llm.cache import CacheBackend, NoOpCache, build_cache_backend
 from ..llm.gateway import LLMGateway, OpenAICompatProvider, require_offline_llm_allowed
+from ..llm.resilience import build_real_provider
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
 from ..pipeline.audit import run_full_audit
@@ -966,7 +967,7 @@ def _gateway(
     real = llm_mode == "real"
     if real:
         load_dotenv()  # pick up provider keys from .env; shell env wins
-        provider: Any = OpenAICompatProvider(
+        provider: Any = build_real_provider(
             model=llm_model,
             timeout=_task_timeout_sec(task),
             max_output_tokens=_TASK_MAX_OUTPUT_TOKENS.get(task),

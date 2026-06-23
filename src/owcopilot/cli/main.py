@@ -26,7 +26,8 @@ from ..evaluation import run_acceptance_evaluation, run_golden_evaluation
 from ..exporters import EngineTarget, export_content_bundle
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
 from ..llm.cache import NoOpCache
-from ..llm.gateway import LLMGateway, OpenAICompatProvider, require_offline_llm_allowed
+from ..llm.gateway import LLMGateway, require_offline_llm_allowed
+from ..llm.resilience import build_real_provider
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
 from ..pipeline.audit import run_full_audit
@@ -442,7 +443,7 @@ def _llm_gateway(
         load_dotenv()  # pick up OPENAI_BASE_URL / OPENAI_API_KEY from .env; shell env wins
         # The ReAct agent needs free-form Thought/Action text, so its caller disables JSON mode —
         # otherwise the provider would force a single json_object and break the ReAct format.
-        provider: Any = OpenAICompatProvider(model=args.llm_model, json_mode=real_json_mode)
+        provider: Any = build_real_provider(model=args.llm_model, json_mode=real_json_mode)
     else:
         require_offline_llm_allowed()  # `--llm-mode offline` is a test/CI dry-run, not a product
         provider = offline_provider
