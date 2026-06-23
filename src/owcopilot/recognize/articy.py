@@ -125,7 +125,10 @@ def recognize_articy(data: Any, *, source_file: str = "") -> ImportPlan:
         if src in entity_ids and tgt in entity_ids:
             relations.append(
                 ProposedRelation(
-                    source=src, target=tgt, kind="leads_to", evidence="articy Connection",
+                    source=src,
+                    target=tgt,
+                    kind="leads_to",
+                    evidence="articy Connection",
                     source_ref=SourceRef(file=source_file, locator=f"articy:{src}->{tgt}"),
                 )
             )
@@ -133,7 +136,10 @@ def recognize_articy(data: Any, *, source_file: str = "") -> ImportPlan:
         if speaker in entity_ids and fragment in entity_ids:
             relations.append(
                 ProposedRelation(
-                    source=speaker, target=fragment, kind="speaks_in", evidence="articy Speaker",
+                    source=speaker,
+                    target=fragment,
+                    kind="speaks_in",
+                    evidence="articy Speaker",
                     source_ref=SourceRef(file=source_file, locator=f"articy:{speaker}@{fragment}"),
                 )
             )

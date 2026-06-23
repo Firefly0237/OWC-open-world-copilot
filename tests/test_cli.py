@@ -243,6 +243,22 @@ def test_cli_audit_persists_and_issues_lists_filters(tmp_path, capsys) -> None:
     assert issues_body["cost_budget"]["used_usd"] == 0.0
 
 
+def test_cli_quality_harness_reports_repair_loop_state(tmp_path, capsys) -> None:
+    content_root = tmp_path / "content"
+    ContentStore(content_root).save(
+        ContentBundle(quests={"q1": Quest(id="q1", title="Q1", giver_npc="npc_missing")})
+    )
+
+    assert main(["quality-harness", "--content-root", str(content_root)]) == 0
+    body = _read_json(capsys)
+
+    assert body["phase"] == "repair"
+    assert body["export_ready"] is False
+    assert body["top_issues"]
+    assert body["next_tool_calls"][0]["tool"] == "list_issues"
+    assert body["cost_budget"]["used_usd"] == 0.0
+
+
 def test_cli_audit_fail_on_error_output_and_baseline(tmp_path, capsys) -> None:
     content_root = tmp_path / "content"
     output_path = tmp_path / "reports" / "audit.json"

@@ -1,4 +1,4 @@
-"""FastAPI service: the v2 content-workbench API plus the legacy quest endpoints.
+"""FastAPI service: the v2 content-workbench API.
 
 The v2 surface is resource-oriented per registered project (`OWCOPILOT_PROJECTS_JSON` maps
 project ids to content roots; request bodies never carry filesystem paths):
@@ -16,12 +16,8 @@ project ids to content roots; request bodies never carry filesystem paths):
 
 Every model call goes through the single `LLMGateway` chokepoint backed by the app-lifetime
 cache, so cost control and telemetry stay uniform. Offline by default ($0, no keys; deterministic
-providers) for CI and the docker smoke test. Real mode is fail-closed twice over: the legacy
-global `OWCOPILOT_LLM_MODE=real` requires full provider + API-key config at startup, and the
-per-request `llm_mode=real` on v2 endpoints refuses unless `OWCOPILOT_API_KEY` gates the service.
-
-The legacy `POST /quests:generate` / `:batch_generate` endpoints (intent + World Bible -> a
-validated, repaired Quest) are kept for compatibility with earlier demos and the docker smoke.
+providers) for CI and the docker smoke test. Real mode is gated per request: `llm_mode=real`
+refuses unless `OWCOPILOT_API_KEY` gates the service.
 """
 
 from __future__ import annotations
@@ -45,7 +41,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ..app.actions import (
@@ -129,7 +125,6 @@ from ..app.workspaces import (
     sanitize_world_name,
     worlds_home,
 )
-from ..assembly import PrefixMode, RouterMode, build_grounded_pipeline
 from ..assist.barks import BarkBatchService
 from ..assist.critic import BarkCritic, DialogueCritic, FlavorCritic, QuestCritic
 from ..assist.dialogue_trees import DialogueTreeService, OfflineDialogueTreeProvider
@@ -143,7 +138,6 @@ from ..audit.default_rules import build_default_rule_registry
 from ..audit.runner import AuditRunner
 from ..content.hash import content_hash
 from ..content.models import ContentBundle
-from ..evaluation.quality import evaluate_quest_quality
 from ..exporters import EngineTarget, export_content_bundle
 from ..exporters.lorebook import write_lorebook
 from ..extraction import (
@@ -159,14 +153,13 @@ from ..llm.cache import build_cache_backend
 from ..llm.gateway import (
     OFFLINE_LLM_FORBIDDEN_MESSAGE,
     LLMGateway,
-    LLMGatewayError,
     OpenAICompatProvider,
-    StructuredFakeProvider,
     offline_llm_allowed,
 )
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector, prices_are_configured
 from ..pipeline.audit import run_full_audit
+from ..pipeline.export_gate import assert_export_ready
 from ..pipeline.patches import (
     apply_patch_workflow,
     find_issue,
@@ -198,14 +191,6 @@ from ..storage import SQLiteStore
 from ..telemetry import deterministic_step, llm_step, summarize_workflow
 from ..trust.security import PathSecurityError, resolve_under_root
 from ..util import load_dotenv
-from ..worldbible.ingest import parse_worldbible_md
-from ..worldbible.models import WorldBible, world_bible_hash
-from ..worldbible.security import (
-    WorldBibleLimits,
-    WorldBibleSecurityError,
-    validate_world_bible_model,
-    validate_world_bible_text,
-)
 from .jobs import JobManager
 
 __version__ = "0.2.0"
@@ -223,26 +208,8 @@ def _llm_mode() -> str:
     return os.getenv("OWCOPILOT_LLM_MODE", "offline").strip().lower()
 
 
-def _router_mode() -> RouterMode:
-    mode = os.getenv("OWCOPILOT_ROUTER_MODE", "cascade").strip().lower()
-    if mode == "static":
-        return "static"
-    if mode == "cascade":
-        return "cascade"
-    raise RuntimeError(f"unsupported OWCOPILOT_ROUTER_MODE {mode!r}")
-
-
 def _cache_mode() -> str:
     return os.getenv("OWCOPILOT_CACHE_MODE", "exact+semantic").strip().lower()
-
-
-def _prefix_mode() -> PrefixMode:
-    mode = os.getenv("OWCOPILOT_PREFIX_MODE", "retrieval").strip().lower()
-    if mode == "retrieval":
-        return "retrieval"
-    if mode == "stable":
-        return "stable"
-    raise RuntimeError(f"unsupported OWCOPILOT_PREFIX_MODE {mode!r}")
 
 
 def _semantic_threshold() -> float:
@@ -253,64 +220,11 @@ def _redis_url() -> str:
     return os.getenv("OWCOPILOT_REDIS_URL", "redis://127.0.0.1:6379/0")
 
 
-def _cheap_model() -> str:
-    return os.getenv("OWCOPILOT_CHEAP_MODEL", "deepseek-v4-flash")
-
-
-def _frontier_model() -> str:
-    return os.getenv("OWCOPILOT_FRONTIER_MODEL", "deepseek-v4-pro")
-
-
-def _llm_max_retries() -> int:
-    return int(os.getenv("OWCOPILOT_LLM_MAX_RETRIES", "2"))
-
-
-def _llm_retry_backoff_seconds() -> float:
-    return float(os.getenv("OWCOPILOT_LLM_RETRY_BACKOFF_SEC", "0.25"))
-
-
 def _rate_limit_backend() -> str:
     backend = os.getenv("OWCOPILOT_RATE_LIMIT_BACKEND", "memory").strip().lower()
     if backend not in {"memory", "redis"}:
         raise RuntimeError(f"unsupported OWCOPILOT_RATE_LIMIT_BACKEND {backend!r}")
     return backend
-
-
-def _world_bible_limits() -> WorldBibleLimits:
-    return WorldBibleLimits(
-        max_chars=int(os.getenv("OWCOPILOT_MAX_WORLDBIBLE_CHARS", "200000")),
-        max_entities=int(os.getenv("OWCOPILOT_MAX_WORLDBIBLE_ENTITIES", "500")),
-        max_relations=int(os.getenv("OWCOPILOT_MAX_WORLDBIBLE_RELATIONS", "2000")),
-        max_field_chars=int(os.getenv("OWCOPILOT_MAX_WORLDBIBLE_FIELD_CHARS", "2000")),
-    )
-
-
-def _require_real_mode_config() -> None:
-    """Fail closed before the service can spend money with unsafe real-mode settings."""
-    load_dotenv()
-    required = ("OPENAI_BASE_URL", "OPENAI_API_KEY", "OWCOPILOT_API_KEY")
-    missing = [name for name in required if not os.getenv(name)]
-    if missing:
-        raise RuntimeError(
-            "OWCOPILOT_LLM_MODE=real requires these environment variables: " + ", ".join(missing)
-        )
-
-
-def _build_providers():
-    """Provider pair for the service.
-
-    Offline: structured fake on both tiers so static *and* cascade generation return parseable Quest
-    JSON. Real: cheap/strong OpenAI-compatible providers for the service's deployable surface.
-    """
-    if _llm_mode() != "real":
-        fake = StructuredFakeProvider()
-        return fake, fake
-
-    _require_real_mode_config()
-    return (
-        OpenAICompatProvider(model=_cheap_model()),
-        OpenAICompatProvider(model=_frontier_model()),
-    )
 
 
 def _build_cache():
@@ -323,65 +237,6 @@ def _build_cache():
 
 
 # --------------------------------------------------------------------------- request / response
-class GenerateOptions(BaseModel):
-    max_repair_attempts: int = Field(default=2, ge=0, le=5)
-    include_trace: bool = False
-
-
-class GenerateRequest(BaseModel):
-    intent: str = Field(min_length=1, max_length=4000)
-    world_bible_md: str | None = Field(default=None, max_length=200_000)
-    world_bible_id: str | None = Field(
-        default=None,
-        description="Reserved for a future project registry; inline `world_bible_md` is required.",
-    )
-    options: GenerateOptions = Field(default_factory=GenerateOptions)
-
-
-class BatchGenerateRequest(BaseModel):
-    intents: list[str] = Field(min_length=1, max_length=50)
-    world_bible_md: str | None = Field(default=None, max_length=200_000)
-    world_bible_id: str | None = Field(
-        default=None,
-        description="Reserved for a future project registry; inline `world_bible_md` is required.",
-    )
-    options: GenerateOptions = Field(default_factory=GenerateOptions)
-
-    @field_validator("intents")
-    @classmethod
-    def _validate_intents(cls, value: list[str]) -> list[str]:
-        if any(not item.strip() for item in value):
-            raise ValueError("all intents must be non-empty")
-        if any(len(item) > 4000 for item in value):
-            raise ValueError("each intent must be <= 4000 characters")
-        return value
-
-
-class GenerateResponse(BaseModel):
-    request_id: str
-    quest: dict[str, Any]
-    issues: list[dict[str, Any]]
-    consistent: bool
-    repaired: bool
-    repair_attempts: int
-    review_status: str = "pending_review"
-    quality: dict[str, Any]
-    telemetry: dict[str, Any]
-    llm_mode: str
-    world_bible_hash: str
-    input_warnings: list[str] = Field(default_factory=list)
-    trace: dict[str, Any] | None = None
-
-
-class BatchGenerateResponse(BaseModel):
-    request_id: str
-    items: list[GenerateResponse]
-    telemetry: dict[str, Any]
-    llm_mode: str
-    world_bible_hash: str
-    input_warnings: list[str] = Field(default_factory=list)
-
-
 class ProjectContentRequest(BaseModel):
     content: ContentBundle | None = None
 
@@ -1011,39 +866,6 @@ class ObjectDeleteResponse(BaseModel):
     cost_budget: dict[str, Any]
 
 
-def _resolve_world_bible(
-    req: GenerateRequest | BatchGenerateRequest,
-) -> tuple[WorldBible, list[str]]:
-    """Resolve the caller-provided World Bible.
-
-    The service intentionally has no bundled sample world. Real usage should pass the current
-    project's World Bible explicitly (today as markdown; a project registry can fill
-    `world_bible_id` later).
-    """
-    limits = _world_bible_limits()
-    warnings: list[str] = []
-    if req.world_bible_md:
-        try:
-            warnings = validate_world_bible_text(req.world_bible_md, limits)
-            wb = parse_worldbible_md(req.world_bible_md)
-            validate_world_bible_model(wb, limits)
-            return wb, warnings
-        except WorldBibleSecurityError as e:
-            raise HTTPException(status_code=413, detail=str(e)) from e
-    if req.world_bible_id:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"world_bible_id {req.world_bible_id!r} is not configured; send "
-                "`world_bible_md` inline."
-            ),
-        )
-    raise HTTPException(
-        status_code=400,
-        detail="world_bible_md is required; this service does not bundle a sample World Bible.",
-    )
-
-
 # --------------------------------------------------------------------------- access control
 def _require_api_key(x_api_key: str | None) -> None:
     """Opt-in API-key gate. If `OWCOPILOT_API_KEY` is set it is enforced; if unset the API is open
@@ -1153,49 +975,6 @@ def _require_client(
     # api-key check first so an unauthenticated caller 401s without consuming rate-limit budget.
     _require_api_key(x_api_key)
     request.app.state.limiter.check(_client_key(x_api_key, request))
-
-
-def _trace_for(final: dict[str, Any]) -> dict[str, Any]:
-    phase = final.get("phase")
-    return {
-        "phase": getattr(phase, "value", phase),
-        "plan": final.get("plan", []),
-        "log": final.get("log", []),
-        "repair_attempts": final.get("repair_attempts", 0),
-        "max_repair_attempts": final.get("max_repair_attempts"),
-    }
-
-
-def _response_from_final(
-    *,
-    request_id: str,
-    final: dict[str, Any],
-    telemetry: TelemetryCollector,
-    llm_mode: str,
-    wb_hash: str,
-    input_warnings: list[str],
-    include_trace: bool,
-) -> GenerateResponse:
-    issues_obj = final.get("issues", [])
-    issues = [i.model_dump() for i in issues_obj]
-    errors = [i for i in issues if i.get("severity") == "error"]
-    artifact = final.get("artifact") or {}
-    quality = evaluate_quest_quality(artifact, issues_obj).model_dump()
-    return GenerateResponse(
-        request_id=request_id,
-        quest=artifact,
-        issues=issues,
-        consistent=not errors,
-        repaired=final.get("repair_attempts", 0) > 0,
-        repair_attempts=final.get("repair_attempts", 0),
-        review_status="pending_review",
-        quality=quality,
-        telemetry=telemetry.summary(),
-        llm_mode=llm_mode,
-        world_bible_hash=wb_hash,
-        input_warnings=input_warnings,
-        trace=_trace_for(final) if include_trace else None,
-    )
 
 
 def _context_builder_for_bundle(bundle: ContentBundle) -> tuple[SQLiteStore, ContextPackBuilder]:
@@ -1378,10 +1157,7 @@ def _deterministic_cost_budget(step_name: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- app factory
 def create_app() -> FastAPI:
     llm_mode = _llm_mode()
-    router_mode = _router_mode()
-    prefix_mode = _prefix_mode()
     service_cache = _build_cache()
-    cheap_provider, frontier_provider = _build_providers()
 
     app = FastAPI(
         title="owcopilot",
@@ -1446,138 +1222,6 @@ def create_app() -> FastAPI:
     @app.get("/health")
     def health() -> dict[str, Any]:
         return {"status": "ok", "version": __version__, "llm_mode": llm_mode}
-
-    @app.post("/quests:generate", response_model=GenerateResponse)
-    def generate_quest(
-        req: GenerateRequest,
-        request: Request,
-        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-    ) -> GenerateResponse:
-        request_id = str(uuid.uuid4())
-        if llm_mode != "real":
-            _require_offline_allowed()
-
-        wb, input_warnings = _resolve_world_bible(req)
-        wb_hash = world_bible_hash(wb)
-        graph, telemetry, _generator = build_grounded_pipeline(
-            wb,
-            cheap_provider=cheap_provider,
-            frontier_provider=frontier_provider,
-            use_llm_repair=(llm_mode == "real"),
-            router_mode=router_mode,
-            cache=service_cache,
-            prefix_mode=prefix_mode,
-            llm_max_retries=_llm_max_retries(),
-            llm_retry_backoff_seconds=_llm_retry_backoff_seconds(),
-        )
-        try:
-            final = graph.invoke(
-                {
-                    "intent": req.intent,
-                    "max_repair_attempts": req.options.max_repair_attempts,
-                    "log": [],
-                }
-            )
-        except LLMGatewayError as e:
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "request_id": request_id,
-                    "message": "generation failed",
-                    "category": e.category,
-                    "task": e.task,
-                    "tier": e.tier,
-                    "attempts": e.attempts,
-                },
-            ) from e
-        except Exception as e:  # e.g. real model returns no parseable JSON even after a retry
-            raise HTTPException(
-                status_code=502,
-                detail={"request_id": request_id, "message": f"generation failed: {e}"},
-            ) from e
-
-        return _response_from_final(
-            request_id=request_id,
-            final=final,
-            telemetry=telemetry,
-            llm_mode=llm_mode,
-            wb_hash=wb_hash,
-            input_warnings=input_warnings,
-            include_trace=req.options.include_trace,
-        )
-
-    @app.post("/quests:batch_generate", response_model=BatchGenerateResponse)
-    def batch_generate_quests(
-        req: BatchGenerateRequest,
-        request: Request,
-        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-    ) -> BatchGenerateResponse:
-        request_id = str(uuid.uuid4())
-        if llm_mode != "real":
-            _require_offline_allowed()
-
-        wb, input_warnings = _resolve_world_bible(req)
-        wb_hash = world_bible_hash(wb)
-        graph, telemetry, _generator = build_grounded_pipeline(
-            wb,
-            cheap_provider=cheap_provider,
-            frontier_provider=frontier_provider,
-            use_llm_repair=(llm_mode == "real"),
-            router_mode=router_mode,
-            cache=service_cache,
-            prefix_mode=prefix_mode,
-            llm_max_retries=_llm_max_retries(),
-            llm_retry_backoff_seconds=_llm_retry_backoff_seconds(),
-        )
-        items: list[GenerateResponse] = []
-        try:
-            for intent in req.intents:
-                start = len(telemetry.records)
-                final = graph.invoke(
-                    {
-                        "intent": intent,
-                        "max_repair_attempts": req.options.max_repair_attempts,
-                        "log": [],
-                    }
-                )
-                item_telemetry = TelemetryCollector(records=list(telemetry.records[start:]))
-                items.append(
-                    _response_from_final(
-                        request_id=request_id,
-                        final=final,
-                        telemetry=item_telemetry,
-                        llm_mode=llm_mode,
-                        wb_hash=wb_hash,
-                        input_warnings=input_warnings,
-                        include_trace=req.options.include_trace,
-                    )
-                )
-        except LLMGatewayError as e:
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "request_id": request_id,
-                    "message": "batch generation failed",
-                    "category": e.category,
-                    "task": e.task,
-                    "tier": e.tier,
-                    "attempts": e.attempts,
-                },
-            ) from e
-        except Exception as e:
-            raise HTTPException(
-                status_code=502,
-                detail={"request_id": request_id, "message": f"batch generation failed: {e}"},
-            ) from e
-
-        return BatchGenerateResponse(
-            request_id=request_id,
-            items=items,
-            telemetry=telemetry.summary(),
-            llm_mode=llm_mode,
-            world_bible_hash=wb_hash,
-            input_warnings=input_warnings,
-        )
 
     @app.post("/projects/{project}/audits", response_model=ProjectAuditResponse)
     def create_project_audit(
@@ -3522,6 +3166,10 @@ def create_app() -> FastAPI:
                 output_dir = resolve_under_root(export_root, engine.value)
             except PathSecurityError as e:  # pragma: no cover - engine.value is enum-safe
                 raise HTTPException(status_code=400, detail=str(e)) from e
+            try:
+                assert_export_ready(project_context)
+            except ValueError as e:
+                raise HTTPException(status_code=409, detail=str(e)) from e
             manifest = export_content_bundle(
                 project_context.bundle, output_dir, target_engine=engine
             )

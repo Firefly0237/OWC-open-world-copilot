@@ -8,6 +8,7 @@ from .tools import (
     impact_of,
     list_issues,
     propose_fix,
+    quality_harness,
 )
 from .transport import MCPTransportUnavailable, create_mcp_server
 
@@ -21,4 +22,5 @@ __all__ = [
     "impact_of",
     "list_issues",
     "propose_fix",
+    "quality_harness",
 ]

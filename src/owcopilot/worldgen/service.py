@@ -16,6 +16,7 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+from ..assist.industry import WORLD_RUBRIC_SOURCES, industry_source_block
 from ..content.lang import detect_language, language_directive
 from ..content.models import (
     POI,
@@ -41,6 +42,7 @@ from ..util import unique_id
 from . import stages
 from .critic import QuestRefineOutcome, WorldQuestCritic, run_quest_refine_loop
 from .models import ReferenceReportItem, WorldRefineRound, WorldSeedBrief, WorldSeedDraft
+from .tot import PremiseEvaluator, score_premise, tree_of_thoughts
 
 
 class WorldSeedService:
@@ -53,6 +55,8 @@ class WorldSeedService:
         reference_context_builder: ReferenceContextBuilder,
         critic: WorldQuestCritic | None = None,
         max_refine_rounds: int = 0,
+        premise_candidates: int = 1,
+        premise_evaluator: PremiseEvaluator | None = None,
     ) -> None:
         self.gateway = gateway
         self.bundle = bundle
@@ -62,6 +66,14 @@ class WorldSeedService:
         # staged generation (deterministic audit + human review still downstream either way).
         self.critic = critic
         self.max_refine_rounds = max_refine_rounds if critic is not None else 0
+        # Tree-of-Thoughts on the premise stage is opt-in: with >1 candidate the service explores
+        # several dramatic spines and keeps the best-scoring one before committing the chain to it.
+        # 1 (default) is the original single-shot premise — no behaviour change.
+        self.premise_candidates = max(1, premise_candidates)
+        # The ToT value function. None = the deterministic ``score_premise`` ($0). Pass an
+        # ``LLMPremiseEvaluator`` to discriminate among already-complete spines a strong model
+        # produces (the deterministic score saturates there — see worldgen/tot.py).
+        self.premise_evaluator = premise_evaluator or score_premise
 
     def generate(
         self,
@@ -102,7 +114,7 @@ class WorldSeedService:
         # --- stage 1: premise + dramatic spine (the North Star every later stage grounds in) ---
         emit(stages.PREMISE)
         premise_system = prefix + _premise_suffix(brief)
-        premise = self._stage(stages.PREMISE, premise_system, base_user)
+        premise = self._select_premise(premise_system, base_user)
         if not _has_spine(premise):
             # The spine is the whole point of this stage — a premise with no central conflict makes
             # the downstream chain drift. Don't silently fall back to a summary-only world: ask once
@@ -237,6 +249,32 @@ class WorldSeedService:
             project_pack=empty,
         )
         return bundle, stage
+
+    def _select_premise(self, premise_system: str, base_user: str) -> dict[str, Any]:
+        """Generate the premise. With ``premise_candidates == 1`` this is the original single shot;
+        with more, it is a Tree-of-Thoughts search: propose N candidate spines (each nudged toward a
+        distinct angle), score each with ``self.premise_evaluator`` (deterministic by default, an
+        ``LLMPremiseEvaluator`` when one is wired), and keep the best."""
+        if self.premise_candidates <= 1:
+            return self._stage(stages.PREMISE, premise_system, base_user)
+
+        def expand(_root: dict[str, Any]) -> list[dict[str, Any]]:
+            return [
+                self._stage(
+                    stages.PREMISE, premise_system + _premise_variant_hint(index), base_user
+                )
+                for index in range(self.premise_candidates)
+            ]
+
+        empty_root: dict[str, Any] = {}
+        result = tree_of_thoughts(
+            root=empty_root,
+            expand=expand,
+            evaluate=self.premise_evaluator,
+            steps=1,
+            beam_width=1,
+        )
+        return result.best
 
     def _stage(self, stage: str, system: str, user: str) -> dict[str, Any]:
         """One grounded stage call. Returns the parsed JSON slice the stage emitted.
@@ -401,6 +439,8 @@ _ROLE = (
     "lore facts, and avoid long verbatim reuse unless the brief asks for quotation. If project "
     "facts are provided, preserve them as higher-priority facts. Each reference_report item must "
     "include source_ref, source_title, used_for, transformation, excluded."
+    + "\n"
+    + industry_source_block(*WORLD_RUBRIC_SOURCES)
 )
 
 
@@ -544,6 +584,17 @@ _SPINE_REQUIRED_RETRY = (
     "central_conflict (2-3 sentences naming the opposing forces and what is at stake) and "
     "faction_axes (the opposing pressures the factions will embody). Return the full JSON again."
 )
+
+
+def _premise_variant_hint(index: int) -> str:
+    """Nudge each Tree-of-Thoughts premise candidate toward a DISTINCT take, so the search explores
+    genuinely different spines rather than re-sampling one. The marker is inert for the offline
+    double (it returns its canned premise) and reads as a diversification instruction to a real
+    model; it also lets a test provider tell the candidates apart."""
+    return (
+        f"\n\n[PREMISE_VARIANT {index}] 这是第 {index + 1} 个独立构思方案：刻意选择一个与其它"
+        "候选不同的核心冲突切入角度，给出同样完整、具体的戏剧主轴。"
+    )
 
 
 def _has_spine(premise: dict[str, Any]) -> bool:

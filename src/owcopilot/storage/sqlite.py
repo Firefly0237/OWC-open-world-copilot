@@ -245,7 +245,16 @@ class SQLiteStore:
         )
 
     def save_issue(self, issue: Issue) -> Issue:
-        issue_id = issue.id or content_hash(issue.model_dump(mode="json", exclude_none=True))
+        # Prefer the deterministic issue fingerprint as the row id. A fresh audit_run_id changes
+        # every run; using it in the id would make the same still-open issue look new forever and
+        # would break the audit -> suggest -> apply loop's stable handles.
+        issue_id = (
+            issue.id
+            or issue.fingerprint
+            or content_hash(
+                issue.model_dump(mode="json", exclude_none=True, exclude={"audit_run_id"})
+            )
+        )
         saved = issue.model_copy(update={"id": issue_id})
         self.conn.execute(
             """
@@ -269,6 +278,23 @@ class SQLiteStore:
         )
         self.conn.commit()
         return saved
+
+    def mark_resolved_issues(self, active_fingerprints: set[str]) -> None:
+        """Mark previously-open issues as fixed when the latest audit no longer reports them."""
+        if active_fingerprints:
+            placeholders = ",".join("?" for _ in active_fingerprints)
+            self.conn.execute(
+                f"""
+                UPDATE issues
+                SET status = 'fixed'
+                WHERE status = 'open'
+                  AND (fingerprint IS NULL OR fingerprint NOT IN ({placeholders}))
+                """,  # noqa: S608 - placeholders are generated, values are bound below
+                sorted(active_fingerprints),
+            )
+        else:
+            self.conn.execute("UPDATE issues SET status = 'fixed' WHERE status = 'open'")
+        self.conn.commit()
 
     def list_issues(
         self,

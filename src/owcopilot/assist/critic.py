@@ -23,6 +23,14 @@ from pydantic import BaseModel, Field
 from ..content.models import Quest
 from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json_object
+from .industry import (
+    BARK_RUBRIC_SOURCES,
+    CHARACTER_RUBRIC_SOURCES,
+    DIALOGUE_RUBRIC_SOURCES,
+    FLAVOR_RUBRIC_SOURCES,
+    QUEST_RUBRIC_SOURCES,
+    industry_source_block,
+)
 
 # Sentinel the offline test double keys on to return a critique instead of a draft. Real providers
 # ignore it; it just has to be a stable, unmistakable phrase in the system prompt.
@@ -130,6 +138,8 @@ def _critic_system_prompt() -> str:
         '{"verdict": "pass" | "revise", "score": 0.0-1.0, "summary": "...", '
         '"dimensions": [{"dimension": "intent|grounding|completeness|craft", '
         '"severity": "blocker|minor|ok", "issue": "...", "fix": "..."}]}\n'
+        + industry_source_block(*QUEST_RUBRIC_SOURCES)
+        + "\n"
         "- intent: does the quest actually deliver what the brief asked for?\n"
         "- grounding: does it use ONLY the provided world facts (entity ids), inventing nothing?\n"
         "- completeness: objective, stages, rewards, giver, location all present and meaningful?\n"
@@ -244,6 +254,8 @@ class CharacterCritic:
                 "- completeness: are appearance / personality / backstory / motivation / abilities "
                 "/ weakness / voice each present and substantive (not filler)?\n"
                 "- voice: is the speaking style distinctive and consistent with the character?\n"
+                + industry_source_block(*CHARACTER_RUBRIC_SOURCES)
+                + "\n"
                 + _VERDICT_SHAPE
             ),
             user=_character_user_message(
@@ -303,6 +315,8 @@ class DialogueCritic:
                 "cosmetic re-phrasings of the same outcome)?\n"
                 "- coherence: does the conversation advance the brief and read naturally?\n"
                 "- grounding: are all speakers among the provided ids, inventing none?\n"
+                + industry_source_block(*DIALOGUE_RUBRIC_SOURCES)
+                + "\n"
                 + _VERDICT_SHAPE
             ),
             user=_dialogue_user_message(
@@ -379,6 +393,8 @@ class BarkCritic:
                 "- topic: does each variant actually address the requested topic?\n"
                 "- variety: are the variants meaningfully different, not trivial rewordings?\n"
                 "- craft: punchy and natural, within length, no filler or meta narration?\n"
+                + industry_source_block(*BARK_RUBRIC_SOURCES)
+                + "\n"
                 + _VERDICT_SHAPE
             ),
             user="\n".join(parts),
@@ -417,7 +433,10 @@ class FlavorCritic:
                 "- function: is each description clear about what it does / how it is earned?\n"
                 "- flavor: is the flavor line atmospheric and in the world's voice, not generic?\n"
                 "- style: does it respect the style guide?\n"
-                "- craft: concise, within budget, no filler or meta narration?\n" + _VERDICT_SHAPE
+                "- craft: concise, within budget, no filler or meta narration?\n"
+                + industry_source_block(*FLAVOR_RUBRIC_SOURCES)
+                + "\n"
+                + _VERDICT_SHAPE
             ),
             user="\n".join(parts),
         )

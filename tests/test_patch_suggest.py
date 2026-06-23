@@ -7,7 +7,15 @@ import json
 from owcopilot.audit.context import AuditContext
 from owcopilot.audit.default_rules import build_default_rule_registry
 from owcopilot.audit.runner import AuditRunner
-from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest, Relation, Term
+from owcopilot.content.models import (
+    ContentBundle,
+    Entity,
+    EntityType,
+    Quest,
+    QuestStage,
+    Relation,
+    Term,
+)
 from owcopilot.llm.cache import NoOpCache
 from owcopilot.llm.gateway import LLMGateway
 from owcopilot.llm.router import StaticRouter
@@ -83,6 +91,84 @@ def test_deterministic_fixer_unknown_entity_ref() -> None:
     op = candidates[0].ops[0]
     assert op.op.value == "remove"
     assert op.path == "/quests/quest_patrol/giver_npc"
+
+
+def test_deterministic_fixer_stage_required_entity() -> None:
+    bundle = _bundle()
+    bundle.quests["quest_patrol"].giver_npc = "npc_mara"
+    bundle.quests["quest_patrol"].stages = [
+        QuestStage(
+            id="s1",
+            summary="Check the border.",
+            required_entities=["npc_mara", "npc_ghost"],
+        )
+    ]
+    issue = _issue_for(bundle, "UNKNOWN_ENTITY_REF")
+    candidates = deterministic_candidates(issue, bundle)
+
+    assert candidates
+    op = candidates[0].ops[0]
+    assert op.op.value == "replace"
+    assert op.path == "/quests/quest_patrol/stages/0/required_entities"
+    assert op.value == ["npc_mara"]
+
+
+def test_deterministic_fixer_missing_prerequisite() -> None:
+    bundle = ContentBundle(
+        quests={
+            "quest_next": Quest(
+                id="quest_next",
+                title="Next",
+                objective="Continue the plot.",
+                prerequisites=["quest_missing"],
+                localization_keys=["quest.quest_next.objective"],
+            )
+        }
+    )
+    issue = _issue_for(bundle, "PREREQ_MISSING")
+    result = PatchSuggestService(bundle=bundle, audit_runner=_runner()).suggest(issue)
+
+    assert result.candidates
+    op = result.candidates[0].candidate.ops[0]
+    assert op.path == "/quests/quest_next/prerequisites"
+    assert op.value == []
+
+
+def test_deterministic_fixer_missing_dialogue_ref() -> None:
+    bundle = ContentBundle(
+        quests={
+            "quest_next": Quest(
+                id="quest_next",
+                title="Next",
+                objective="Continue the plot.",
+                dialogue_refs=["dlg_missing"],
+                localization_keys=["quest.quest_next.objective"],
+            )
+        }
+    )
+    issue = _issue_for(bundle, "MISSING_DIALOGUE_REF")
+    result = PatchSuggestService(bundle=bundle, audit_runner=_runner()).suggest(issue)
+
+    assert result.candidates
+    op = result.candidates[0].candidate.ops[0]
+    assert op.path == "/quests/quest_next/dialogue_refs"
+    assert op.value == []
+
+
+def test_deterministic_fixer_missing_relation_endpoint() -> None:
+    bundle = ContentBundle(
+        entities={
+            "npc_mara": Entity(id="npc_mara", name="Mara", type=EntityType.NPC),
+        },
+        relations=[Relation(source="npc_mara", target="npc_ghost", kind="knows")],
+    )
+    issue = _issue_for(bundle, "MISSING_RELATION_ENDPOINT")
+    result = PatchSuggestService(bundle=bundle, audit_runner=_runner()).suggest(issue)
+
+    assert result.candidates
+    op = result.candidates[0].candidate.ops[0]
+    assert op.op.value == "remove"
+    assert op.path == "/relations/0"
 
 
 def test_suggest_offline_resolves_target_issue() -> None:

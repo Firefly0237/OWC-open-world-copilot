@@ -29,18 +29,31 @@ def _bundle() -> ContentBundle:
 
 
 def test_verify_qa_answer_accepts_pack_citation_and_known_entity() -> None:
+    answer = QAAnswer(
+        answer="Aldric is a caravan master.",
+        citations=[Citation(ref="entity:npc_aldric")],
+        mentioned_entities=["Aldric"],
+    )
     result = verify_qa_answer(
-        QAAnswer(
-            answer="Aldric is a caravan master.",
-            citations=[Citation(ref="entity:npc_aldric")],
-            mentioned_entities=["Aldric"],
-        ),
+        answer,
         pack=_pack(),
         bundle=_bundle(),
     )
 
     assert result.valid
     assert result.errors == []
+    assert answer.citations[0].text == "Aldric"
+
+
+def test_verify_qa_answer_rejects_non_refusal_without_citations() -> None:
+    result = verify_qa_answer(
+        QAAnswer(answer="Aldric is a caravan master."),
+        pack=_pack(),
+        bundle=_bundle(),
+    )
+
+    assert not result.valid
+    assert "non-refusal answer must cite" in result.errors[0]
 
 
 def test_verify_qa_answer_rejects_citation_outside_pack() -> None:

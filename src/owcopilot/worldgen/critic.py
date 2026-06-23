@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..assist.critic import CritiqueResult, critique_with_retry
+from ..assist.industry import QUEST_RUBRIC_SOURCES, industry_source_block
+from ..assist.refine import summarize_reflection, with_reflection_memory
 from ..llm.gateway import LLMGateway
 from . import stages
 from .models import WorldRefineRound
@@ -94,6 +96,8 @@ def _critic_system_prompt() -> str:
         '{"verdict": "pass" | "revise", "score": 0.0-1.0, "summary": "...", '
         '"dimensions": [{"dimension": "intent|grounding|completeness|craft", '
         '"severity": "blocker|minor|ok", "issue": "...", "fix": "..."}]}\n'
+        + industry_source_block(*QUEST_RUBRIC_SOURCES)
+        + "\n"
         "- intent: do the quests deliver the brief's premise and central conflict?\n"
         "- grounding: do giver_npc / location / stages reference ONLY the cast and places listed "
         "below, by the ids given, inventing nothing?\n"
@@ -153,6 +157,7 @@ def run_quest_refine_loop(
     human scrutiny. ``regenerate(prior_quests, fixes)`` (returns quests, relations, reference_rows)
     is the stage-specific re-call the caller supplies."""
     trail: list[WorldRefineRound] = []
+    reflections: list[str] = []  # accumulated Reflexion memory across rounds
     auto_review_incomplete = False
     for round_index in range(max_rounds):
         gaps = quest_grounding_gaps(quests, npc_refs=npc_refs, place_refs=place_refs)
@@ -161,6 +166,7 @@ def run_quest_refine_loop(
         )
         auto_review_incomplete = not critique.parse_ok
         fixes = merge_quest_fixes(critique.actionable_fixes(), gaps)
+        reflection = summarize_reflection(round_index, critique, gaps)
         trail.append(
             WorldRefineRound(
                 round=round_index,
@@ -170,6 +176,7 @@ def run_quest_refine_loop(
                 fixes=fixes,
                 summary=critique.summary,
                 auto_review_ok=critique.parse_ok,
+                reflection=reflection,
             )
         )
         if critique.parse_ok and critique.verdict == "pass" and not gaps:
@@ -177,7 +184,11 @@ def run_quest_refine_loop(
         if not fixes:
             break
         emit("refining")
-        quests, relations, reference_rows = regenerate(quests, fixes)
+        # Feed the whole reflection history forward (Reflexion), not just this round's fixes.
+        reflections.append(reflection)
+        quests, relations, reference_rows = regenerate(
+            quests, with_reflection_memory(fixes, reflections)
+        )
     return QuestRefineOutcome(quests, relations, reference_rows, trail, auto_review_incomplete)
 
 

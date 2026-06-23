@@ -17,6 +17,7 @@ from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json
 from ..util import unique_id
 from .critic import FLAVOR_CRITIQUE_MARKER, CritiqueResult, FlavorCritic
+from .industry import FLAVOR_RUBRIC_SOURCES, industry_source_block
 from .lint import AssistLintIssue, lint_text
 from .offline import _offline_quality_critique
 from .refine import run_refine_loop
@@ -34,6 +35,8 @@ _SYSTEM_PROMPT = (
     "description is functional (what it does / how it is earned); flavor is a short "
     "atmospheric line in the world's voice. One entry per requested name, same order. "
     "Respect the style guide and the character budget."
+    + "\n"
+    + industry_source_block(*FLAVOR_RUBRIC_SOURCES)
 )
 
 

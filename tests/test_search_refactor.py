@@ -79,6 +79,13 @@ def test_plan_rename_finds_all_references_without_mutating() -> None:
     assert "npc_mara" in bundle.entities  # dry-run mutated nothing
 
 
+def test_plan_rename_accepts_public_typed_entity_ref() -> None:
+    plan = plan_rename(_bundle(), ref="entity:npc_mara", new_id="npc_mira")
+
+    assert plan.target == "entity:npc_mara"
+    assert ("quest:q_relief", "giver_npc") in {(e.owner_ref, e.field) for e in plan.edits}
+
+
 def test_plan_rename_reports_id_conflict() -> None:
     plan = plan_rename(_bundle(), ref="npc_mara", new_id="loc_keep")
     assert plan.conflicts and "已存在" in plan.conflicts[0]

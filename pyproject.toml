@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Tingxuan Su" }]
 keywords = [
     "llm", "game-development", "open-world", "unreal-engine", "unity",
-    "consistency", "knowledge-graph", "cost-optimization", "langgraph", "copilot",
+    "consistency", "knowledge-graph", "cost-optimization", "copilot",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -28,7 +28,6 @@ classifiers = [
 dependencies = [
     "pydantic>=2.6",
     "networkx>=3.2",
-    "langgraph>=0.2",
     "openpyxl>=3.1",
     "numpy>=1.26",          # exact in-SQLite vector search (retrieval/vector.py); light, ubiquitous
     "pypdf>=4.0",           # PDF manuscript import (extraction/inspiration); small, pure-Python

@@ -21,6 +21,18 @@ _COLLECTIONS = (
     "localized_texts",
 )
 
+_REF_KIND_TO_COLLECTION = {
+    "entity": "entities",
+    "quest": "quests",
+    "region": "regions",
+    "poi": "pois",
+    "term": "terms",
+    "dialogue": "dialogues",
+    "dialogue_tree": "dialogue_trees",
+    "localized_text": "localized_texts",
+}
+_COLLECTION_TO_REF_KIND = {collection: kind for kind, collection in _REF_KIND_TO_COLLECTION.items()}
+
 
 class RefEdit(BaseModel):
     owner_ref: str  # where the reference lives, e.g. "quest:q1", "relation:0"
@@ -37,9 +49,9 @@ class RenamePlan(BaseModel):
 
 
 def _object_kind(bundle: ContentBundle, obj_id: str) -> str | None:
-    for kind in _COLLECTIONS:
-        if obj_id in getattr(bundle, kind):
-            return kind[:-1] if kind.endswith("s") and kind != "dialogue_trees" else kind
+    for collection in _COLLECTIONS:
+        if obj_id in getattr(bundle, collection):
+            return _COLLECTION_TO_REF_KIND.get(collection, collection)
     return None
 
 
@@ -48,6 +60,19 @@ def _kind_to_collection(bundle: ContentBundle, obj_id: str) -> str | None:
         if obj_id in getattr(bundle, kind):
             return kind
     return None
+
+
+def _normalize_ref(bundle: ContentBundle, ref: str) -> str:
+    """Accept both the internal bare id (``npc_mara``) and public refs (``entity:npc_mara``)."""
+    if _kind_to_collection(bundle, ref) is not None:
+        return ref
+    kind, sep, object_id = ref.partition(":")
+    if not sep:
+        return ref
+    collection = _REF_KIND_TO_COLLECTION.get(kind)
+    if collection is not None and object_id in getattr(bundle, collection):
+        return object_id
+    return ref
 
 
 def find_references(bundle: ContentBundle, old_id: str) -> list[RefEdit]:
@@ -109,6 +134,7 @@ def plan_rename(
     new_id: str | None = None,
 ) -> RenamePlan:
     """Dry-run: compute the edits a rename would make and any conflicts. Mutates nothing."""
+    ref = _normalize_ref(bundle, ref)
     collection = _kind_to_collection(bundle, ref)
     if collection is None:
         raise ValueError(f"对象不存在：{ref}")

@@ -139,7 +139,7 @@ class OfflineLogicDraftProvider:
     """
 
     def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-        stage_ids = re.findall(r"(?m)(?:^|、)([A-Za-z_]\w*)（", user)
+        stage_ids = re.findall(r"([A-Za-z_]\w*)（", user)
         first = stage_ids[0] if stage_ids else "stage_1"
         second = stage_ids[1] if len(stage_ids) > 1 else first
         refining = "[LOGIC_REFINE]" in user

@@ -15,6 +15,8 @@ from ..llm.gateway import LLMGateway
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
 from ..pipeline.audit import run_full_audit
+from ..pipeline.export_gate import assert_export_ready
+from ..pipeline.harness import run_quality_harness
 from ..pipeline.patches import find_issue, suggest_for_issue
 from ..pipeline.project import ProjectContext
 from ..qa.offline import OfflineQAProvider
@@ -50,10 +52,12 @@ def list_issues(
 ) -> dict[str, Any]:
     """List persisted audit issues for a project."""
     with _project(content_root, sqlite_path) as project:
+        # Treat an empty-string filter as "no filter" — a tool-calling model commonly passes ""
+        # to mean "unset" (real DeepSeek did exactly this), which would otherwise match no rows.
         issues = project.sqlite_store.list_issues(
-            severity=severity,
-            rule_code=rule_code,
-            status=status,
+            severity=severity or None,
+            rule_code=rule_code or None,
+            status=status or None,
         )
         return {
             "count": len(issues),
@@ -181,6 +185,32 @@ def propose_fix(
         }
 
 
+def quality_harness(
+    *,
+    content_root: str,
+    sqlite_path: str | None = None,
+    propose_fixes: bool = True,
+    max_issues: int = 5,
+    max_candidates_per_issue: int = 1,
+) -> dict[str, Any]:
+    """Run the MCP-safe quality loop: audit, gates, readiness, proposals, next tool calls.
+
+    This is the harness entrypoint an external agent should call before editing or exporting. It
+    may persist audit rows and proposed patches, but it never writes canon content.
+    """
+    with _project(content_root, sqlite_path) as project:
+        report = run_quality_harness(
+            project,
+            propose_fixes=propose_fixes,
+            max_issues=max_issues,
+            max_candidates_per_issue=max_candidates_per_issue,
+        )
+        return {
+            **report.model_dump(mode="json"),
+            "cost_budget": _deterministic_cost_budget("quality_harness"),
+        }
+
+
 def export_project(
     *,
     content_root: str,
@@ -192,6 +222,7 @@ def export_project(
     with _project(content_root, sqlite_path) as project:
         engine = EngineTarget(target_engine)
         actual_output = Path(output_dir) / engine.value
+        assert_export_ready(project)
         manifest = export_content_bundle(project.bundle, actual_output, target_engine=engine)
         return {
             "output_dir": str(actual_output),

@@ -128,6 +128,8 @@ class WorldRefineRound(BaseModel):
     fixes: list[str] = Field(default_factory=list)
     summary: str = ""
     auto_review_ok: bool = True  # False when this round's critique could not be parsed
+    # Verbal self-reflection distilled from this round (Reflexion memory), carried forward.
+    reflection: str = ""
 
 
 class WorldSeedDraft(BaseModel):

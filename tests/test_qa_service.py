@@ -128,6 +128,9 @@ def test_lore_qa_service_returns_verified_answer_through_gateway() -> None:
 
         assert answer.refused is False
         assert answer.citations[0].ref == "entity:npc_aldric"
+        assert answer.citations[0].text
+        assert answer.grounded is True
+        assert answer.verification_errors == []
         assert telemetry.records[0].task == "qa_answer"
     finally:
         store.close()
@@ -141,6 +144,8 @@ def test_lore_qa_service_refuses_when_context_pack_is_empty() -> None:
         answer = service.ask("unknown")
 
         assert answer.refused is True
+        assert answer.grounded is False
+        assert answer.verification_errors == ["empty_context_pack"]
         # No relevant lore at all: say so, rather than the same line used when lore exists but the
         # asked-for point isn't recorded.
         assert answer.answer == REFUSAL_NO_CONTEXT
@@ -170,6 +175,7 @@ def test_refusal_distinguishes_ungrounded_from_no_context() -> None:
 
         assert answer.refused is True
         assert answer.answer == REFUSAL_UNGROUNDED
+        assert answer.verification_errors == ["model_refused"]
     finally:
         store.close()
 
@@ -213,6 +219,7 @@ def test_lore_qa_service_refuses_on_unparseable_model_output() -> None:
         answer = service.ask("Aldric")  # must not raise
 
         assert answer.refused is True
+        assert answer.verification_errors == ["unparseable_model_output"]
     finally:
         store.close()
 
@@ -239,5 +246,7 @@ def test_lore_qa_service_refuses_invalid_model_citation() -> None:
         answer = service.ask("Aldric")
 
         assert answer.refused is True
+        assert answer.grounded is False
+        assert "was not in the context pack" in answer.verification_errors[0]
     finally:
         store.close()

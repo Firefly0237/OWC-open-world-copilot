@@ -1,6 +1,18 @@
+import sys
+import types
+
+import pytest
+
 from owcopilot.llm.gateway import LLMGateway, LLMGatewayError, MockProvider, OpenAICompatProvider
 from owcopilot.llm.router import StaticRouter
 from owcopilot.llm.telemetry import PRICES, TelemetryCollector
+
+
+def test_openai_provider_fails_fast_without_api_key():
+    # A missing key must raise an actionable error before any network call.
+    provider = OpenAICompatProvider(model="x", api_key_env="OWCOPILOT_UNSET_KEY_FOR_TEST")
+    with pytest.raises(RuntimeError, match="needs an API key"):
+        provider.complete(system="s", user="u", model="x")
 
 
 def test_routing_and_telemetry():
@@ -76,6 +88,34 @@ def test_openai_provider_gates_json_mode_on_prompt_mentioning_json():
     assert p._wants_json("Return ONE JSON object with keys: …", "make a quest") is True
     assert p._wants_json("You are a planner.", "Decompose into steps: foo") is False
     assert OpenAICompatProvider(model="x", json_mode=False)._wants_json("Return JSON", "x") is False
+
+
+def test_openai_provider_retries_with_max_completion_tokens(monkeypatch):
+    calls = []
+
+    class _Completions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            if "max_tokens" in kwargs:
+                raise RuntimeError(
+                    "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead."
+                )
+            return types.SimpleNamespace(
+                choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="pong"))],
+                usage=types.SimpleNamespace(prompt_tokens=4, completion_tokens=1),
+            )
+
+    client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=_Completions()))
+    fake_openai = types.SimpleNamespace(OpenAI=lambda **_kwargs: client)
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    provider = OpenAICompatProvider(model="gpt-current", max_output_tokens=16)
+    text, in_tok, out_tok, cached = provider.complete(system="s", user="u", model="cheap")
+
+    assert text == "pong"
+    assert (in_tok, out_tok, cached) == (4, 1, 0)
+    assert "max_tokens" in calls[0]
+    assert calls[1]["max_completion_tokens"] == 16
 
 
 def test_gateway_retries_transient_provider_error():

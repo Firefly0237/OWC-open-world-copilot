@@ -44,7 +44,12 @@ class LoreQAService:
             else self.context_builder.build(query, budget_tokens=budget_tokens)
         )
         if not pack.hits:
-            return refusal_answer(query, unresolved=[query], had_context=False)
+            return refusal_answer(
+                query,
+                unresolved=[query],
+                had_context=False,
+                verification_errors=["empty_context_pack"],
+            )
 
         raw = self.gateway.complete(
             task="qa_answer",
@@ -57,17 +62,28 @@ class LoreQAService:
             # The model returned something we cannot parse as an answer. We refuse — a QA system
             # that can't trust its own output must not crash, and must not fabricate. Refusal is
             # the designed behaviour ("no source, no answer"), not a degradation hiding a bug.
-            return refusal_answer(query, unresolved=[query], had_context=True)
+            return refusal_answer(
+                query,
+                unresolved=[query],
+                had_context=True,
+                verification_errors=["unparseable_model_output"],
+            )
         if _looks_like_refusal(answer):
             return refusal_answer(
-                query, unresolved=answer.unresolved_mentions or [query], had_context=True
+                query,
+                unresolved=answer.unresolved_mentions or [query],
+                had_context=True,
+                verification_errors=answer.verification_errors or ["model_refused"],
             )
         verification = verify_qa_answer(answer, pack=pack, bundle=self.bundle)
         if not verification.valid:
             return refusal_answer(
-                query, unresolved=verification.unresolved_mentions, had_context=True
+                query,
+                unresolved=verification.unresolved_mentions,
+                had_context=True,
+                verification_errors=verification.errors,
             )
-        return answer
+        return answer.model_copy(update={"grounded": True, "verification_errors": []})
 
     def _expand_query(self, query: str) -> list[str]:
         """Best-effort alternate phrasings to widen recall; failure just means no expansion.
@@ -109,7 +125,11 @@ REFUSAL_UNGROUNDED = (
 
 
 def refusal_answer(
-    query: str, *, unresolved: list[str] | None = None, had_context: bool = False
+    query: str,
+    *,
+    unresolved: list[str] | None = None,
+    had_context: bool = False,
+    verification_errors: list[str] | None = None,
 ) -> QAAnswer:
     return QAAnswer(
         answer=REFUSAL_UNGROUNDED if had_context else REFUSAL_NO_CONTEXT,
@@ -118,6 +138,8 @@ def refusal_answer(
         mentioned_entities=[],
         unresolved_mentions=unresolved or [query],
         refused=True,
+        grounded=False,
+        verification_errors=verification_errors or [],
     )
 
 

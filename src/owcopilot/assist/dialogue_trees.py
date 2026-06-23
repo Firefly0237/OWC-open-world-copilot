@@ -23,6 +23,7 @@ from ..llm.jsonio import extract_json_object
 from ..util import slugify, unique_id
 from .calibration import critic_from_trail
 from .critic import DIALOGUE_CRITIQUE_MARKER, DialogueCritic
+from .industry import DIALOGUE_RUBRIC_SOURCES, industry_source_block
 from .lint import AssistLintIssue, lint_text
 from .refine import RefineStep, run_refine_loop
 from .review_queue import ReviewItem, ReviewQueue
@@ -36,6 +37,8 @@ _SYSTEM_PROMPT = (
     "(2-3 options) and next for linear flow; a node with neither ends the branch. "
     "Every next/choice target must be a node id defined in nodes. "
     "Keep each line within the given character budget and within the speakers' voice cards.\n"
+    + industry_source_block(*DIALOGUE_RUBRIC_SOURCES)
+    + "\n"
     # Quality bar (二游 dialogue rubric): the #1 failure is interchangeable voices + on-the-nose
     # exposition that explains the setting at each other.
     "QUALITY BAR — make it sound like two distinct people, not an info dump:\n"

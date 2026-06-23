@@ -53,6 +53,7 @@ def test_create_mcp_server_registers_tools_when_fastmcp_is_available(monkeypatch
         "ask_lore",
         "impact_of",
         "propose_fix",
+        "quality_harness",
         "export_project",
     ]
     # The human write path must never be exposed over MCP.

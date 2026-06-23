@@ -50,7 +50,9 @@ def recognize_yarn(text: str, *, source_file: str = "") -> ImportPlan:
             loc = f"yarn:speaker:{name}@L{line_no}"
             entities.append(
                 ProposedEntity(
-                    id=name, name=name, type="npc",
+                    id=name,
+                    name=name,
+                    type="npc",
                     source_ref=SourceRef(file=source_file, locator=loc),
                 )
             )

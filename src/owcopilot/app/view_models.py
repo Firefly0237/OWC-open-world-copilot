@@ -435,5 +435,3 @@ def build_export_summary(
         "manifest": manifest.model_dump(mode="json") if manifest is not None else None,
         "cost_budget": _deterministic_cost_budget("export_summary"),
     }
-
-

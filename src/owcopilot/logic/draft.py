@@ -7,7 +7,7 @@ whatever survives still goes through human review (HITL). The determinism is the
 is the one place an "AI writes your quest logic" feature can honestly say *the result was checked*.
 
 No `eval`, no new schema — it produces a `QuestLogic` exactly like a human would, so every
-downstream consumer (audit, simulate, ink/Yarn/Twine export) works unchanged.
+downstream consumer (audit, simulate, content-bundle export) works unchanged.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pydantic import ValidationError
 
 from ..assist.critic import CritiqueResult
+from ..assist.industry import LOGIC_RUBRIC_SOURCES, industry_source_block
 from ..assist.refine import RefineStep, run_refine_loop
 from ..content.models import Quest, QuestLogic
 from ..llm.gateway import LLMGateway
@@ -30,7 +31,7 @@ LOGIC_REFINE_MARKER = "[LOGIC_REFINE]"
 
 _SYSTEM = (
     "你是任务逻辑设计助手。只输出一个 JSON 对象，描述任务的逻辑层 QuestLogic，不要解释。\n"
-    f"{LOGIC_DRAFT_MARKER}\n"
+    f"{LOGIC_DRAFT_MARKER}\n" + industry_source_block(*LOGIC_RUBRIC_SOURCES) + "\n"
     "JSON 结构：{\n"
     '  "variables": [{"id":"标识符(英文/下划线)","name":"中文名","type":"bool|int|enum",'
     '"default":false/0/"值","enum_values":["可选枚举值"]}],\n'
@@ -149,5 +150,5 @@ def draft_quest_logic(
         logic=outcome.artifact,
         issues=final_issues,
         trail=outcome.trail,
-        auto_review_incomplete=outcome.auto_review_incomplete or parse_failed,
+        auto_review_incomplete=outcome.auto_review_incomplete or parse_failed or bool(final_issues),
     )

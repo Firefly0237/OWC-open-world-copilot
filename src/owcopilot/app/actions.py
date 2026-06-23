@@ -60,6 +60,7 @@ from ..llm.gateway import LLMGateway, OpenAICompatProvider, require_offline_llm_
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
 from ..pipeline.audit import run_full_audit
+from ..pipeline.export_gate import assert_export_ready
 from ..pipeline.ingest import run_ingest
 from ..pipeline.patches import (
     apply_patch_workflow,
@@ -884,6 +885,7 @@ def run_project_export_action(
     engine = EngineTarget(target_engine)
     actual_output = Path(output_dir) / engine.value
     with _project(content_root, sqlite_path) as project:
+        assert_export_ready(project)
         manifest = export_content_bundle(project.bundle, actual_output, target_engine=engine)
         return {
             "output_dir": str(actual_output),
@@ -2291,8 +2293,13 @@ def recognize_import_action(
             else None
         )
         plan = _recognize_plan(
-            project, source_format, source_name=source_name,
-            rows=rows, text=text, data=data, field_mapping=field_mapping,
+            project,
+            source_format,
+            source_name=source_name,
+            rows=rows,
+            text=text,
+            data=data,
+            field_mapping=field_mapping,
         )
         return _recognize_finish(project, plan, apply=apply)
 
@@ -2376,8 +2383,14 @@ def recognize_content_action(
         elif fmt in {"articy", "ue", "unity"}:
             data = json.loads(text_all)
         plan = _recognize_plan(
-            project, fmt, source_name=filename,
-            rows=rows, text=text, data=data, field_mapping=field_mapping, llm_proposer=llm_proposer,
+            project,
+            fmt,
+            source_name=filename,
+            rows=rows,
+            text=text,
+            data=data,
+            field_mapping=field_mapping,
+            llm_proposer=llm_proposer,
         )
         return _recognize_finish(project, plan, apply=apply)
 
@@ -2876,7 +2889,7 @@ def probe_llm_connection_action(
                 os.environ[key] = value
             else:
                 os.environ.pop(key, None)
-        probe = provider or OpenAICompatProvider(model=model, timeout=timeout, max_output_tokens=16)
+        probe = provider or OpenAICompatProvider(model=model, timeout=timeout, max_output_tokens=64)
         started = time.perf_counter()
         result = probe.complete(
             system="You are a connectivity probe.",

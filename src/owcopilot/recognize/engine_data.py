@@ -137,7 +137,9 @@ def recognize_engine_data(
                 for target in targets:
                     relations.append(
                         ProposedRelation(
-                            source=row_id, target=target, kind=key,
+                            source=row_id,
+                            target=target,
+                            kind=key,
                             evidence=f"{key} -> {target}",
                             source_ref=SourceRef(file=source_file, locator=loc),
                         )

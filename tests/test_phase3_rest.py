@@ -20,7 +20,14 @@ def client(tmp_path, monkeypatch) -> TestClient:
     ContentStore(root).save(
         ContentBundle(
             entities={"npc_x": Entity(id="npc_x", name="甲", type=EntityType.NPC)},
-            quests={"q_edit": Quest(id="q_edit", title="将改", objective="旧目标")},
+            quests={
+                "q_edit": Quest(
+                    id="q_edit",
+                    title="将改",
+                    objective="旧目标",
+                    localization_keys=["quest.q_edit.objective"],
+                )
+            },
         )
     )
     monkeypatch.setenv(
@@ -97,9 +104,15 @@ def test_import_recognize_table_dry_run_and_apply(client: TestClient) -> None:
     applied = client.post(
         "/projects/demo/import:recognize",
         json={
-            "source_format": "table", "content": content, "filename": "cast.csv",
-            "field_mapping": {"id_column": "id", "name_column": "name", "type_column": "type",
-                              "relation_columns": {"home": "resides_in"}},
+            "source_format": "table",
+            "content": content,
+            "filename": "cast.csv",
+            "field_mapping": {
+                "id_column": "id",
+                "name_column": "name",
+                "type_column": "type",
+                "relation_columns": {"home": "resides_in"},
+            },
             "apply": True,
         },
     )

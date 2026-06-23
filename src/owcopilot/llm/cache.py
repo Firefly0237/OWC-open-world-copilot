@@ -265,7 +265,7 @@ def build_cache_backend(
     redis_client: Any | None = None,
     redis_ttl_seconds: int | None = None,
 ) -> CacheBackend:
-    """Factory for the cache backends used by benchmark and service assembly.
+    """Factory for the cache backends the service hangs off the gateway.
 
     ``embedder`` backs the L2 semantic layer. Pass a real multilingual model (bge-m3) so the
     paraphrase cache works for non-Latin content — the default ``HashingEmbedder`` tokenizes

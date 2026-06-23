@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from owcopilot.app.actions import (
@@ -19,8 +21,10 @@ from owcopilot.app.actions import (
     run_suggest_action,
 )
 from owcopilot.app.view_models import build_project_overview
+from owcopilot.assist.review_queue import ReviewQueue
 from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest, Relation
 from owcopilot.content.store import ContentStore
+from owcopilot.storage import SQLiteStore
 
 
 @pytest.fixture()
@@ -118,6 +122,29 @@ def test_create_and_review_loop(root: str) -> None:
     )
     assert decided["written_ref"] and decided["written_ref"].startswith("quest:")
     assert list_review_items_action(root)["count"] == 2
+
+
+def test_review_accept_blocks_draft_that_introduces_errors(root: str) -> None:
+    runtime_path = Path(root) / ".owcopilot" / "runtime.sqlite"
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    store = SQLiteStore(runtime_path)
+    try:
+        item = ReviewQueue(store).add_quest_draft(
+            {
+                "id": "quest_bad_draft",
+                "title": "Bad Draft",
+                "giver_npc": "npc_missing_new",
+                "objective": "",
+                "localization_keys": [],
+            }
+        )
+    finally:
+        store.close()
+
+    with pytest.raises(ValueError, match="草稿未通过确定性审计"):
+        decide_review_action(root, item_id=item.id, decision="accepted", operator="lead")
+
+    assert "quest_bad_draft" not in ContentStore(root).load().quests
 
 
 def test_barks_action_rejects_unknown_speaker(root: str) -> None:

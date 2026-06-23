@@ -60,9 +60,7 @@ class QuestLogicRule:
         faction that does not exist, the kind of silent inconsistency the audit is here to catch."""
         logic = quest.logic
         assert logic is not None
-        factions = {
-            e.id for e in ctx.bundle.entities.values() if e.type == EntityType.FACTION
-        }
+        factions = {e.id for e in ctx.bundle.entities.values() if e.type == EntityType.FACTION}
         seen: set[str] = set()
 
         def check(ref_name: str) -> Iterable[Issue]:

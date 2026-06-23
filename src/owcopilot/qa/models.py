@@ -32,6 +32,8 @@ class QAAnswer(BaseModel):
     mentioned_entities: list[str] = Field(default_factory=list)
     unresolved_mentions: list[str] = Field(default_factory=list)
     refused: bool = False
+    grounded: bool = False
+    verification_errors: list[str] = Field(default_factory=list)
 
     @field_validator("answer", mode="before")
     @classmethod
@@ -66,7 +68,9 @@ class QAAnswer(BaseModel):
                 return labels[normalized]
         return value
 
-    @field_validator("mentioned_entities", "unresolved_mentions", mode="before")
+    @field_validator(
+        "mentioned_entities", "unresolved_mentions", "verification_errors", mode="before"
+    )
     @classmethod
     def _coerce_string_list(cls, value: Any) -> list[str]:
         if value is None:

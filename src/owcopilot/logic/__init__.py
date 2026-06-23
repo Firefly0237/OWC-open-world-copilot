@@ -1,7 +1,7 @@
 """Native quest logic/state layer: a safe expression language, evaluation, and deterministic audit.
 
-Single source of truth for quest logic (variables/conditions/effects/branches); exported to ink and
-YarnSpinner by the exporters. Reused by WS-E (playtest) via the evaluator and WorldState.
+Single source of truth for quest logic (variables/conditions/effects/branches); serialized in the
+content-bundle export. Reused by WS-E (playtest) via the evaluator and WorldState.
 """
 
 from __future__ import annotations

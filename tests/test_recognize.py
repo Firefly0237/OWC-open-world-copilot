@@ -149,12 +149,19 @@ def test_relation_guards_keep_only_grounded_in_world_proposals() -> None:
     text = "Aldric allies with Mira in the north. Borin is unrelated."
 
     def _prop(
-        *, target="mira", kind="allies_with", evidence="Aldric allies with Mira",
-        confidence=0.9, source="aldric",
+        *,
+        target="mira",
+        kind="allies_with",
+        evidence="Aldric allies with Mira",
+        confidence=0.9,
+        source="aldric",
     ) -> dict:
         return {
-            "source": source, "target": target, "kind": kind,
-            "evidence": evidence, "confidence": confidence,
+            "source": source,
+            "target": target,
+            "kind": kind,
+            "evidence": evidence,
+            "confidence": confidence,
         }
 
     def proposer(_text: str, _known: list[str]) -> list[dict]:
@@ -224,8 +231,11 @@ def test_plan_to_bundle_marks_llm_relations_as_ai_draft() -> None:
         ["aldric", "mira"],
         proposer=lambda *_: [
             {
-                "source": "aldric", "target": "mira", "kind": "allies_with",
-                "evidence": "Aldric allies with Mira", "confidence": 0.9,
+                "source": "aldric",
+                "target": "mira",
+                "kind": "allies_with",
+                "evidence": "Aldric allies with Mira",
+                "confidence": 0.9,
             }
         ],
     )
@@ -303,9 +313,11 @@ def test_yarn_extracts_nodes_jumps_speakers_and_variables() -> None:
 def test_ue_datatable_rowhandles_and_foreign_keys() -> None:
     data = [
         {
-            "Name": "Quest_Intro", "Type": "Quest",
+            "Name": "Quest_Intro",
+            "Type": "Quest",
             "GiverNPC": {"RowName": "NPC_Aldric", "DataTable": "/Game/NPCs"},
-            "Reward": 100, "Items": [{"RowName": "Item_Sword"}],
+            "Reward": 100,
+            "Items": [{"RowName": "Item_Sword"}],
         },
         {"Name": "NPC_Aldric", "Type": "NPC", "Faction": "Fac_Iron"},
         {"Name": "Item_Sword", "Type": "Item"},
@@ -325,7 +337,8 @@ def test_ue_datatable_rowhandles_and_foreign_keys() -> None:
 def test_unity_asset_refs_are_flagged_not_invented() -> None:
     data = [
         {
-            "m_Name": "HeroData", "Type": "Character",
+            "m_Name": "HeroData",
+            "Type": "Character",
             "homeRegion": {"m_FileID": 11400000, "m_PathID": 5566},
             "alliedFaction": "IronGuard",
         },
@@ -356,9 +369,7 @@ def test_recognize_import_action_dry_run_then_apply(tmp_path) -> None:
     _seed_canon(content_root)
     csv_path = tmp_path / "cast.csv"
     csv_path.write_text(
-        "id,名称,类型,居住地\n"
-        "npc_a,Aldric,npc,loc_town\n"
-        "npc_b,Bob,npc,loc_missing\n",
+        "id,名称,类型,居住地\nnpc_a,Aldric,npc,loc_town\nnpc_b,Bob,npc,loc_missing\n",
         encoding="utf-8",
     )
     mapping = {
@@ -400,9 +411,12 @@ def test_cli_recognize_articy(tmp_path, capsys) -> None:
     code = main(
         [
             "recognize",
-            "--content-root", str(content_root),
-            "--source-format", "articy",
-            "--input", str(export_path),
+            "--content-root",
+            str(content_root),
+            "--source-format",
+            "articy",
+            "--input",
+            str(export_path),
         ]
     )
     assert code == 0
@@ -421,9 +435,12 @@ def test_cli_recognize_ink_apply(tmp_path, capsys) -> None:
     code = main(
         [
             "recognize",
-            "--content-root", str(content_root),
-            "--source-format", "ink",
-            "--input", str(ink_path),
+            "--content-root",
+            str(content_root),
+            "--source-format",
+            "ink",
+            "--input",
+            str(ink_path),
             "--apply",
         ]
     )
@@ -532,7 +549,11 @@ def test_enable_llm_offline_adds_guarded_relation(tmp_path) -> None:
     _seed_canon(content_root)
     csv = "id,name,type,desc\nnpc_a,Aldric,npc,Aldric and Mira are allies\nnpc_m,Mira,npc,broker\n"
     res = recognize_content_action(
-        content_root, source_format="table", content=csv, filename="c.csv",
-        enable_llm=True, llm_mode="offline",
+        content_root,
+        source_format="table",
+        content=csv,
+        filename="c.csv",
+        enable_llm=True,
+        llm_mode="offline",
     )
     assert any(r["method"] == "llm" for r in res["plan"]["relations"])

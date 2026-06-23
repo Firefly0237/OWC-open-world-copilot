@@ -30,6 +30,8 @@ from ..llm.gateway import LLMGateway, OpenAICompatProvider, require_offline_llm_
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
 from ..pipeline.audit import run_full_audit
+from ..pipeline.export_gate import assert_export_ready
+from ..pipeline.harness import run_quality_harness
 from ..pipeline.ingest import run_ingest
 from ..pipeline.patches import (
     apply_patch_workflow,
@@ -121,6 +123,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     readiness.set_defaults(handler=_cmd_readiness)
 
+    harness = subparsers.add_parser(
+        "quality-harness",
+        help="Run the deterministic MCP-style quality loop and return next tool calls.",
+    )
+    _add_project_args(harness)
+    harness.add_argument(
+        "--no-propose-fixes",
+        action="store_true",
+        help="Skip patch proposal persistence; report only gates and next tool calls.",
+    )
+    harness.add_argument("--max-issues", type=int, default=5)
+    harness.add_argument("--max-candidates-per-issue", type=int, default=1)
+    harness.set_defaults(handler=_cmd_quality_harness)
+
+    agent = subparsers.add_parser(
+        "agent",
+        help=(
+            "Run a ReAct agent that diagnoses the world via the read-only/propose tool surface "
+            "and reports the safe next step (never writes canon)."
+        ),
+    )
+    _add_project_args(agent)
+    agent.add_argument("--goal", required=True, help="What the agent should achieve / investigate.")
+    agent.add_argument("--max-steps", type=int, default=6, help="Tool-call budget for the loop.")
+    _add_llm_args(agent)
+    agent.set_defaults(handler=_cmd_agent)
+
     issues = subparsers.add_parser("issues", help="List persisted audit issues.")
     _add_project_args(issues)
     issues.add_argument("--severity")
@@ -176,6 +205,20 @@ def build_parser() -> argparse.ArgumentParser:
     suggest.add_argument("--budget-tokens", type=int, default=600)
     _add_llm_args(suggest)
     suggest.set_defaults(handler=_cmd_suggest)
+
+    repair_plan = subparsers.add_parser(
+        "repair-plan",
+        help=(
+            "Search (MCTS) for the best sequence of shadow-validated deterministic fixes that "
+            "clears the most audit errors. $0, reproducible; returns a plan only (never writes "
+            "canon — apply each move via the human write path)."
+        ),
+    )
+    _add_project_args(repair_plan)
+    repair_plan.add_argument("--max-iterations", type=int, default=200)
+    repair_plan.add_argument("--max-depth", type=int, default=8)
+    repair_plan.add_argument("--seed", type=int, default=0, help="RNG seed (reproducible search).")
+    repair_plan.set_defaults(handler=_cmd_repair_plan)
 
     apply_cmd = subparsers.add_parser(
         "apply", help="Apply a proposed patch to the content files (human write path)."
@@ -286,7 +329,9 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--operator", help="Required with --accept/--reject.")
     review.set_defaults(handler=_cmd_review)
 
-    export = subparsers.add_parser("export", help="Export project content as engine files.")
+    export = subparsers.add_parser(
+        "export", help="Export project content as a data bundle + localization files."
+    )
     _add_project_args(export)
     export.add_argument("--output-dir", required=True)
     export.add_argument(
@@ -294,9 +339,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[target.value for target in EngineTarget],
         default=EngineTarget.GENERIC.value,
         help=(
-            "ink & twine are verified against real compilers (inkjs/extwee); renpy is "
-            "syntax-validated; yarn is beta (syntax-validated against Yarn Spinner docs, "
-            "not yet engine-compiled)."
+            "Export target recorded in the manifest. Currently 'generic' only: a checksummed "
+            "content_bundle.json plus CSV/XLIFF localization. Per-engine script generation "
+            "(ink/Yarn/Ren'Py/Twine) was removed — engine schemas differ project to project."
         ),
     )
     export.set_defaults(handler=_cmd_export)
@@ -310,7 +355,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_project_args(recognize)
     recognize.add_argument(
-        "--source-format", required=True,
+        "--source-format",
+        required=True,
         choices=["table", "articy", "ink", "yarn", "ue", "unity"],
         help=(
             "table: .csv/.xlsx/.json rows with unknown columns. articy/ue/unity: a JSON export. "
@@ -388,13 +434,15 @@ def _add_llm_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _llm_gateway(
-    args: argparse.Namespace, *, task: str, offline_provider: Any
+    args: argparse.Namespace, *, task: str, offline_provider: Any, real_json_mode: bool = True
 ) -> tuple[LLMGateway, TelemetryCollector]:
     telemetry = TelemetryCollector()
     real = getattr(args, "llm_mode", "offline") == "real"
     if real:
         load_dotenv()  # pick up OPENAI_BASE_URL / OPENAI_API_KEY from .env; shell env wins
-        provider: Any = OpenAICompatProvider(model=args.llm_model)
+        # The ReAct agent needs free-form Thought/Action text, so its caller disables JSON mode —
+        # otherwise the provider would force a single json_object and break the ReAct format.
+        provider: Any = OpenAICompatProvider(model=args.llm_model, json_mode=real_json_mode)
     else:
         require_offline_llm_allowed()  # `--llm-mode offline` is a test/CI dry-run, not a product
         provider = offline_provider
@@ -530,6 +578,56 @@ def _cmd_readiness(args: argparse.Namespace) -> int:
         return _emit(payload, args)
 
 
+def _cmd_quality_harness(args: argparse.Namespace) -> int:
+    with _project(args) as project:
+        report = run_quality_harness(
+            project,
+            propose_fixes=not args.no_propose_fixes,
+            max_issues=args.max_issues,
+            max_candidates_per_issue=args.max_candidates_per_issue,
+        )
+        return _emit(
+            {
+                **report.model_dump(mode="json"),
+                "cost_budget": _deterministic_cost_budget("quality_harness"),
+            },
+            args,
+        )
+
+
+def _cmd_agent(args: argparse.Namespace) -> int:
+    from ..agent import ReActAgent
+    from ..agent.offline import OfflineReactProvider
+    from ..core.skills import default_skill_registry
+
+    content_root = Path(args.content_root)
+    if not content_root.exists():
+        raise FileNotFoundError(f"content root does not exist: {content_root}")
+    sqlite_path = str(args.sqlite_path or _default_sqlite_path(content_root))
+    if sqlite_path != ":memory:":
+        Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
+    # The agent reasons in free-form ReAct text, so disable JSON mode on the real provider.
+    gateway, telemetry = _llm_gateway(
+        args, task="agent_react", offline_provider=OfflineReactProvider(), real_json_mode=False
+    )
+    registry = default_skill_registry(content_root=str(content_root), sqlite_path=sqlite_path)
+    result = ReActAgent(gateway=gateway, registry=registry, max_steps=args.max_steps).run(args.goal)
+    telemetry_summary = telemetry.summary()
+    cost_budget = summarize_workflow(
+        [llm_step("agent_react", telemetry_summary)], budget_usd=args.max_cost_usd
+    ).budget
+    return _emit(
+        {
+            **result.model_dump(mode="json"),
+            "skills": registry.names(),
+            "llm_mode": args.llm_mode,
+            "telemetry": telemetry_summary,
+            "cost_budget": cost_budget.model_dump(mode="json"),
+        },
+        args,
+    )
+
+
 def _cmd_issues(args: argparse.Namespace) -> int:
     with _project(args) as project:
         issues = project.sqlite_store.list_issues(
@@ -620,6 +718,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
     with _project(args) as project:
         target_engine = EngineTarget(args.target_engine)
         output_dir = Path(args.output_dir) / target_engine.value
+        assert_export_ready(project)
         manifest = export_content_bundle(
             project.bundle,
             output_dir,
@@ -742,6 +841,26 @@ def _cmd_suggest(args: argparse.Namespace) -> int:
                 "llm_mode": args.llm_mode,
                 "telemetry": telemetry_summary,
                 "cost_budget": cost_budget.model_dump(mode="json"),
+            },
+            args,
+        )
+
+
+def _cmd_repair_plan(args: argparse.Namespace) -> int:
+    from ..patches.search import plan_repairs
+
+    with _project(args) as project:
+        plan = plan_repairs(
+            project.bundle,
+            project.audit_runner,
+            max_iterations=args.max_iterations,
+            max_depth=args.max_depth,
+            seed=args.seed,
+        )
+        return _emit(
+            {
+                **plan.model_dump(mode="json"),
+                "cost_budget": _deterministic_cost_budget("repair_plan"),
             },
             args,
         )

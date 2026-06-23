@@ -94,7 +94,9 @@ class DialogueChoiceConditionRule:
                         tree_expr = parse_expr(choice.condition)
                     except LogicSyntaxError as exc:
                         yield self._issue(
-                            tree.id, "DIALOGUE_CONDITION_SYNTAX_ERROR", path,
+                            tree.id,
+                            "DIALOGUE_CONDITION_SYNTAX_ERROR",
+                            path,
                             f"condition does not parse: {exc}",
                         )
                         continue
@@ -106,7 +108,9 @@ class DialogueChoiceConditionRule:
                         if ref.startswith("rep:") and ref[len("rep:") :] in factions:
                             continue
                         yield self._issue(
-                            tree.id, self.code, path,
+                            tree.id,
+                            self.code,
+                            path,
                             f"condition references '{ref}', not declared in quest "
                             f"'{quest.id}' logic (nor a known quest/reputation ref)",
                         )

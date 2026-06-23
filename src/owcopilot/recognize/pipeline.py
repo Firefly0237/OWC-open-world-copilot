@@ -102,16 +102,24 @@ def recognize(
     guards as everything else, are marked ``method='llm'``, and carry evidence into review."""
     plan = _dispatch(
         source_format,
-        rows=rows, articy_data=articy_data, text=text, engine_data=engine_data,
-        mapping=mapping, source_file=source_file, canon_ids=canon_ids,
+        rows=rows,
+        articy_data=articy_data,
+        text=text,
+        engine_data=engine_data,
+        mapping=mapping,
+        source_file=source_file,
+        canon_ids=canon_ids,
     )
     if enable_llm and llm_proposer is not None:
         known = [e.id for e in plan.entities]
         source = _llm_source_text(plan, llm_text)
         if known and source.strip():
             kept, dropped = propose_relations_guarded(
-                source, known, proposer=llm_proposer,
-                allowed_kinds=allowed_kinds, source_file=source_file,
+                source,
+                known,
+                proposer=llm_proposer,
+                allowed_kinds=allowed_kinds,
+                source_file=source_file,
             )
             plan.relations.extend(kept)
             if dropped:

@@ -23,6 +23,7 @@ from ..llm.jsonio import extract_json_object
 from ..retrieval.context_pack import ContextPackBuilder
 from ..util import slugify
 from .critic import CHARACTER_CRITIQUE_MARKER, CharacterCritic
+from .industry import CHARACTER_RUBRIC_SOURCES, industry_source_block
 from .refine import RefineStep, run_refine_loop
 
 PROFILE_SECTIONS: list[tuple[str, str]] = [
@@ -58,6 +59,8 @@ _SYSTEM_PROMPT = (
     "relationships (list of {target, kind, note} — target MUST be an entity id that "
     "appears in the world facts context; if no suitable entity exists, leave the list "
     "empty rather than inventing ids). Honor every constraint the brief states.\n"
+    + industry_source_block(*CHARACTER_RUBRIC_SOURCES)
+    + "\n"
     # Quality bar (二游 character rubric — same bar applied to quests/dialogue):
     "QUALITY BAR — a memorable character, not an archetype with a label:\n"
     "1. MOTIVATION has an inner contradiction: a want PLUS a fear/cost that pulls against it "

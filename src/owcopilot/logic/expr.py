@@ -184,8 +184,8 @@ def refs_in(expr: Expr) -> set[str]:
 
 
 def render_expr(expr: Expr, ref: Callable[[str], str] = lambda name: name) -> str:
-    """Render an AST back to an infix string, mapping reference names through ``ref`` (used by the
-    ink/Yarn exporters to sanitize ``quest:q.done`` into valid target identifiers)."""
+    """Render an AST back to an infix string, mapping reference names through ``ref`` (a hook for
+    callers that need to sanitize ``quest:q.done`` into valid target identifiers)."""
     if isinstance(expr, BoolLit):
         return "true" if expr.value else "false"
     if isinstance(expr, IntLit):

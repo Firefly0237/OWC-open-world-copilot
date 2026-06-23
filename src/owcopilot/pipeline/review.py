@@ -11,6 +11,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ..assist.review_queue import ReviewItem, ReviewItemType, ReviewQueue
+from ..audit.baseline import issue_fingerprint
+from ..audit.context import AuditContext
 from ..content.models import (
     ContentBundle,
     DialogueTree,
@@ -74,19 +76,29 @@ def decide_review_item(
         quest = quest.model_copy(update={"review_status": ReviewStatus.APPROVED})
         bundle = project.content_store.load()
         bundle.quests[quest.id] = quest
+        _assert_no_new_accept_errors(project, bundle)
         project.content_store.save(bundle)
         project.reload()
         written_ref = f"quest:{quest.id}"
     elif item.item_type is ReviewItemType.QUEST_LOGIC_DRAFT:
         # B7: apply ONLY the drafted logic layer to an existing quest (everything else untouched).
         from ..content.models import QuestLogic
+        from ..logic import audit_quest_logic
 
         quest_id = str(item.payload.get("quest_id") or "")
         bundle = project.content_store.load()
         if quest_id not in bundle.quests:
             raise ValueError(f"任务「{quest_id}」已不存在，无法应用逻辑草稿；请驳回此项。")
         logic = QuestLogic.model_validate(item.payload.get("logic") or {})
-        bundle.quests[quest_id] = bundle.quests[quest_id].model_copy(update={"logic": logic})
+        candidate_quest = bundle.quests[quest_id].model_copy(update={"logic": logic})
+        logic_issues = audit_quest_logic(candidate_quest)
+        if logic_issues:
+            preview = "；".join(f"{issue.code}: {issue.message}" for issue in logic_issues[:5])
+            raise ValueError(
+                f"逻辑草稿未通过确定性审计，不能写入正典；请继续修正或驳回。问题：{preview}"
+            )
+        bundle.quests[quest_id] = candidate_quest
+        _assert_no_new_accept_errors(project, bundle)
         project.content_store.save(bundle)
         project.reload()
         written_ref = f"quest:{quest_id}"
@@ -102,6 +114,7 @@ def decide_review_item(
         bundle = project.content_store.load()
         approved = _approve_bundle(seed_bundle)
         _merge_bundle(bundle, approved)
+        _assert_no_new_accept_errors(project, bundle)
         project.content_store.save(bundle)
         project.reload()
         written_ref = item.object_ref
@@ -115,6 +128,7 @@ def decide_review_item(
         tree = tree.model_copy(update={"review_status": ReviewStatus.APPROVED})
         bundle = project.content_store.load()
         bundle.dialogue_trees[tree.id] = tree
+        _assert_no_new_accept_errors(project, bundle)
         project.content_store.save(bundle)
         project.reload()
         written_ref = f"dialogue_tree:{tree.id}"
@@ -134,6 +148,7 @@ def decide_review_item(
         for relation in relations:
             if (relation.source, relation.target, relation.kind) not in existing_keys:
                 bundle.relations.append(relation)
+        _assert_no_new_accept_errors(project, bundle)
         project.content_store.save(bundle)
         project.reload()
         written_ref = f"entity:{entity.id}"
@@ -149,6 +164,7 @@ def decide_review_item(
             bundle.entities[entity.id] = entity.model_copy(
                 update={"review_status": ReviewStatus.APPROVED}
             )
+        _assert_no_new_accept_errors(project, bundle)
         project.content_store.save(bundle)
         project.reload()
         written_ref = item.object_ref
@@ -189,6 +205,25 @@ def _world_seed_conflicts(existing: ContentBundle, incoming: ContentBundle) -> l
     conflicts.extend(_conflict_refs("term", existing.terms, incoming.terms))
     conflicts.extend(_conflict_refs("style_guide", existing.style_guides, incoming.style_guides))
     return conflicts
+
+
+def _assert_no_new_accept_errors(project: ProjectContext, candidate: ContentBundle) -> None:
+    """Review accepts are write paths; block candidates that would add deterministic errors."""
+    before = {
+        issue_fingerprint(issue)
+        for issue in project.audit_runner.run(AuditContext.from_bundle(project.bundle)).open_errors
+    }
+    after_result = project.audit_runner.run(AuditContext.from_bundle(candidate))
+    introduced = [
+        issue for issue in after_result.open_errors if issue_fingerprint(issue) not in before
+    ]
+    if introduced:
+        preview = "；".join(
+            f"{issue.rule_code} @ {issue.target_ref}: {issue.message}" for issue in introduced[:5]
+        )
+        raise ValueError(
+            f"草稿未通过确定性审计，不能写入正典；请继续修正或驳回。新增错误：{preview}"
+        )
 
 
 def _conflict_refs(

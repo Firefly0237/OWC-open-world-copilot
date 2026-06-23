@@ -11,11 +11,19 @@ def verify_qa_answer(
     answer: QAAnswer, *, pack: ContextPack, bundle: ContentBundle
 ) -> QAVerification:
     errors: list[str] = []
+    if not answer.refused and not answer.citations:
+        errors.append("non-refusal answer must cite at least one retrieved lore ref")
     allowed_refs = set(pack.refs)
+    citation_text_by_ref = {
+        hit.ref: " ".join(part for part in (hit.title, hit.body) if part).strip()
+        for hit in pack.hits
+    }
     for citation in answer.citations:
         canonical_ref = _canonical_ref(citation.ref, allowed_refs)
         if canonical_ref:
             citation.ref = canonical_ref
+            if not citation.text:
+                citation.text = citation_text_by_ref.get(canonical_ref, "")[:500]
         else:
             errors.append(f"citation {citation.ref!r} was not in the context pack")
 

@@ -16,6 +16,7 @@ from .tools import (
     impact_of,
     list_issues,
     propose_fix,
+    quality_harness,
 )
 
 
@@ -44,5 +45,6 @@ def create_mcp_server(name: str = "owcopilot") -> Any:
     server.tool()(ask_lore)
     server.tool()(impact_of)
     server.tool()(propose_fix)
+    server.tool()(quality_harness)
     server.tool()(export_project)
     return server

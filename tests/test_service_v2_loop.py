@@ -148,6 +148,16 @@ def test_barks_unknown_speaker_is_422(client: TestClient) -> None:
 
 
 def test_export_endpoint_writes_under_project_runtime(client: TestClient, tmp_path) -> None:
+    audit = client.post("/projects/demo/audits", json={"persist": True})
+    assert audit.status_code == 200
+    issues = client.get("/projects/demo/issues", params={"rule_code": "UNKNOWN_ENTITY_REF"}).json()[
+        "issues"
+    ]
+    suggest = client.post(f"/projects/demo/issues/{issues[0]['id']}/suggestions", json={})
+    patch_id = suggest.json()["candidates"][0]["patch_id"]
+    applied = client.post(f"/projects/demo/patches/{patch_id}:apply", json={"operator": "lead"})
+    assert applied.status_code == 200
+
     response = client.post("/projects/demo/exports", json={"target_engine": "generic"})
     assert response.status_code == 200
     payload = response.json()

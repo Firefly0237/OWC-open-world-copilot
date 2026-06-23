@@ -27,6 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ..assist.industry import WORLD_RUBRIC_SOURCES, industry_source_block
 from ..content.models import (
     POI,
     ContentBundle,
@@ -468,7 +469,7 @@ _ROLE = (
     "Descriptions must be concrete enough for a level designer to build from, with a current "
     "tension or hook. Use uploaded references only as inspiration per reference_mode, never as "
     "canon facts. Each reference_report item must include source_ref, source_title, used_for, "
-    "transformation, excluded."
+    "transformation, excluded." + "\n" + industry_source_block(*WORLD_RUBRIC_SOURCES)
 )
 
 

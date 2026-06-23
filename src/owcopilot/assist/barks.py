@@ -8,6 +8,7 @@ from ..content.models import ContentBundle, Origin, ReviewStatus
 from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json
 from .critic import BarkCritic, CritiqueResult
+from .industry import BARK_RUBRIC_SOURCES, industry_source_block
 from .lint import AssistLintIssue, lint_text
 from .refine import run_refine_loop
 from .review_queue import ReviewItem, ReviewItemType, ReviewQueue
@@ -189,5 +190,7 @@ def _system_prompt(voice_card: VoiceCard, *, max_chars: int) -> str:
     return (
         "Generate short NPC bark variants as JSON. Return {'variants': [text, ...]}. "
         f"Each variant must be <= {max_chars} characters. Stay within this voice card:\n"
+        + industry_source_block(*BARK_RUBRIC_SOURCES)
+        + "\n"
         f"{voice_card.model_dump_json()}"
     )

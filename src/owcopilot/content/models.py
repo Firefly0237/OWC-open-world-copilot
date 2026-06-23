@@ -1,7 +1,7 @@
 """Unified content models for the v2 content hub.
 
-These models are intentionally broader than the old WorldBible schema. They are the file-backed
-facts that later pipeline stages index, audit, retrieve, patch, review and export.
+These models are the file-backed facts that later pipeline stages index, audit, retrieve, patch,
+review and export.
 """
 
 from __future__ import annotations
@@ -157,7 +157,7 @@ class Branch(BaseModel):
 
 
 class QuestLogic(BaseModel):
-    """The native quest logic/state layer (single source of truth; exported to ink/Yarn).
+    """The native quest logic/state layer (single source of truth).
 
     Variables + boolean preconditions + on-complete effects + branches turn a quest from metadata
     into playable logic. Deterministic audit (see audit/rules/logic_rules.py) checks it for

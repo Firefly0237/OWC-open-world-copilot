@@ -1,4 +1,4 @@
-"""Markdown importer compatible with the original World Bible markdown shape."""
+"""Markdown importer for the conventional lore shape (NPCs / Locations / Factions / Relations)."""
 
 from __future__ import annotations
 

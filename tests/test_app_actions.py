@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from owcopilot.app import run_project_audit_action, run_project_export_action
-from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest
+from owcopilot.content.models import ContentBundle, Entity, EntityType, Origin, Quest, ReviewStatus
 from owcopilot.content.store import ContentStore
 
 
@@ -21,6 +23,30 @@ def _write_project(content_root) -> None:
     )
 
 
+def _write_clean_project(content_root) -> None:
+    ContentStore(content_root).save(
+        ContentBundle(
+            entities={
+                "npc_aldric": Entity(
+                    id="npc_aldric",
+                    name="Aldric",
+                    type=EntityType.NPC,
+                    description="Caravan master",
+                )
+            },
+            quests={
+                "q1": Quest(
+                    id="q1",
+                    title="Q1",
+                    giver_npc="npc_aldric",
+                    objective="Help Aldric.",
+                    localization_keys=["quest.q1.objective"],
+                )
+            },
+        )
+    )
+
+
 def test_run_project_audit_action_persists_issues(tmp_path) -> None:
     content_root = tmp_path / "content"
     _write_project(content_root)
@@ -36,7 +62,7 @@ def test_run_project_audit_action_persists_issues(tmp_path) -> None:
 def test_run_project_export_action_writes_target_engine_bundle(tmp_path) -> None:
     content_root = tmp_path / "content"
     output_root = tmp_path / "exports"
-    _write_project(content_root)
+    _write_clean_project(content_root)
 
     result = run_project_export_action(
         content_root, output_dir=output_root, target_engine="generic"
@@ -48,3 +74,33 @@ def test_run_project_export_action_writes_target_engine_bundle(tmp_path) -> None
     assert (export_dir / "content_bundle.json").exists()
     assert (export_dir / "manifest.json").exists()
     assert result["cost_budget"]["used_usd"] == 0.0
+
+
+def test_run_project_export_action_blocks_open_errors(tmp_path) -> None:
+    content_root = tmp_path / "content"
+    output_root = tmp_path / "exports"
+    _write_project(content_root)
+
+    with pytest.raises(ValueError, match="导出被发布门阻断"):
+        run_project_export_action(content_root, output_dir=output_root, target_engine="generic")
+
+
+def test_run_project_export_action_blocks_unreviewed_ai_content(tmp_path) -> None:
+    content_root = tmp_path / "content"
+    output_root = tmp_path / "exports"
+    ContentStore(content_root).save(
+        ContentBundle(
+            entities={
+                "npc_ai": Entity(
+                    id="npc_ai",
+                    name="AI Draft",
+                    type=EntityType.NPC,
+                    origin=Origin.AI_DRAFT,
+                    review_status=ReviewStatus.PENDING_REVIEW,
+                )
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="UNREVIEWED_AI_CONTENT"):
+        run_project_export_action(content_root, output_dir=output_root, target_engine="generic")

@@ -1,8 +1,7 @@
 """THE single chokepoint for every model call in the system.
 
-Cache, router and telemetry all hang off this one method. Call sites never touch a
-provider directly — so in P2 you add caching + cascade routing here and *nothing else
-changes*. That is the entire reason this exists in P0.
+Cache, router and telemetry all hang off this one method, and call sites never touch a provider
+directly — so caching, routing and cost controls are added here once and nothing else changes.
 """
 
 from __future__ import annotations
@@ -12,8 +11,6 @@ import time
 from typing import Any, Protocol
 
 from ..fakes import MockProvider as MockProvider
-from ..fakes import ScriptedFakeProvider as ScriptedFakeProvider
-from ..fakes import StructuredFakeProvider as StructuredFakeProvider
 from .cache import CacheBackend, CacheKey, NoOpCache
 from .router import Router, StaticRouter
 from .telemetry import CallRecord, TelemetryCollector
@@ -107,6 +104,15 @@ class OpenAICompatProvider:
         return self.json_mode and ("json" in f"{system}\n{user}".lower())
 
     def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int, int]:
+        # Fail fast with an actionable message instead of a cryptic SDK error. A common footgun: an
+        # existing shell OPENAI_API_KEY overrides .env (load_dotenv uses setdefault), so a shell key
+        # for a different provider silently shadows the .env one — name that explicitly.
+        if not self.api_key:
+            raise RuntimeError(
+                "real LLM mode needs an API key, but OPENAI_API_KEY is empty. Set it (and "
+                "OPENAI_BASE_URL for a non-OpenAI provider) in your environment or .env. Note: an "
+                "existing shell OPENAI_API_KEY takes precedence over .env."
+            )
         from openai import OpenAI  # lazy import: offline runs never need this
 
         client: Any = OpenAI(base_url=self.base_url, api_key=self.api_key, timeout=self.timeout)
@@ -115,11 +121,30 @@ class OpenAICompatProvider:
         )
         if self.max_output_tokens > 0:
             kwargs["max_tokens"] = self.max_output_tokens
-        resp = client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            **kwargs,
-        )
+        try:
+            resp = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                **kwargs,
+            )
+        except Exception as exc:
+            if "max_tokens" not in str(exc) or "max_completion_tokens" not in str(exc):
+                raise
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs.pop("max_tokens", None)
+            if self.max_output_tokens > 0:
+                fallback_kwargs["max_completion_tokens"] = self.max_output_tokens
+            resp = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                **fallback_kwargs,
+            )
         text = resp.choices[0].message.content or ""
         usage = resp.usage
         prompt_tokens = usage.prompt_tokens if usage else 0
@@ -174,9 +199,7 @@ class LLMGateway:
         # while the tier label stays "cheap", so two different models share a tier — without the
         # model id a request that switches models would be served the other model's cached answer.
         model = getattr(provider, "model", None) or tier
-        key = CacheKey(
-            tier=tier, system=system, user=user, namespace=self.namespace, model=model
-        )
+        key = CacheKey(tier=tier, system=system, user=user, namespace=self.namespace, model=model)
 
         t0 = time.perf_counter()
         cached = self.cache.get(key)

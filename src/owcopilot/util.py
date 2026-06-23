@@ -42,9 +42,9 @@ def unique_id(prefix: str, raw: str, used: set[str], *, fallback: str = "item") 
 
 def use_utf8_stdout() -> None:
     """Force UTF-8 console output. Windows shells often default to a legacy codepage
-    (e.g. GBK on a Chinese system), which raises UnicodeEncodeError on the demo's bullets —
-    and on any non-ASCII World Bible content (Chinese NPC/location names). Called only by the
-    console entry points, so test capture is untouched.
+    (e.g. GBK on a Chinese system), which raises UnicodeEncodeError on non-ASCII content
+    (Chinese NPC/location names). Called only by the console entry points, so test capture
+    is untouched.
     """
     for stream in (sys.stdout, sys.stderr):
         try:
