@@ -46,7 +46,7 @@ organize** what you've written:
   import** that reads edited quest rows back into the human review queue.
 
 It runs as **one local process** (FastAPI serving a Vue frontend), a **CLI** for CI gates, a
-**REST API** for services, and an **MCP server** for the agent ecosystem.
+**REST API** for services, and a guarded tool surface for agents.
 
 ## What it focuses on
 
@@ -78,12 +78,13 @@ made.
 | Pillar | What it does |
 |---|---|
 | 🗂️ **Content hub** | Import from JSON / CSV / XLSX (incl. Chinese headers) / Markdown, dry-run by default. Content *is* files; SQLite only holds rebuildable runtime state. |
-| 📖 **Catches any input** | Manuscript extraction covers a whole novel via **adaptive full-coverage chunking** (granularity coarsens to stay within a bounded budget — never a silent truncation; truly enormous docs report the uncovered tail honestly). Automatic **language detection** answers in the source language and keeps proper nouns verbatim; the inspiration library indexes a whole book as RAG chunks. Language and granularity are the system's job, not a knob for the user. |
+| 📖 **Catches any input** | Bring in manuscripts, spreadsheets, and design notes as structured world content. Long documents are covered by a planned pass instead of silent truncation; source language and proper nouns are preserved, missed facts are revisited, and unsupported claims are marked for review. |
 | 🛡️ **Consistency audit** | Deterministic rules (reference integrity, graph relations, world-lore, region/level, **quest logic — deadlock / unreachable stage / undefined variable / faction-reputation ref**, dialogue-condition scope, localization pre-flight, injection scan, AI-trust) with structured evidence. Audits the content **authored in OWCopilot** (the source of truth); it is not an importer that lints external narrative-tool files. A baseline ratchet lets a legacy project adopt the CI gate the same day. |
 | 🕸️ **Impact analysis** | Before you change a row, see the blast radius: a pure graph walk yields a "must change / suggest check" list — zero cost, zero hallucination. |
-| 🔮 **Retrieval Q&A** | Two-stage hybrid RAG: three-way recall — BM25 + **real multilingual semantic vectors** (bge-m3, local; downloaded once on first run, then $0/offline) + entity-anchored graph expansion — and RRF fusion, then a **hybrid reranker** (lexical signals + query↔document cosine) lifts the on-topic document to the top so even a tight context window contains the answer, then a token budgeter. Cross-lingual and paraphrase queries that share no words with the canon still retrieve. Answers cite their sources; **no source, no answer.** |
+| 🔮 **World Q&A** | Ask about a single fact or the shape of the whole world: major factions, tensions, quest lines, and how pieces relate. Specific answers trace back to sources; broad questions use the world overview. If the world does not support the answer, it says what is missing. |
 | ⚒️ **Repair loop** | issue → deterministic fixer + LLM candidates → **re-audit on a shadow copy** (a candidate that adds new errors is discarded) → human apply (operator logged) → one-click rollback. |
 | 🎭 **Constrained generation** | Staged grounded world creation, expansion, quests, characters, dialogue trees — each referencing only in-graph entities, each running a critique→refine loop, each entering the review queue. World creation can be **grounded directly in what you brought in** (draw on the inspiration library + your approved canon) and generates in the source language. |
+| 🧭 **Agent collaboration** | Humans and agents use the same bounded tool surface: diagnose, retrieve, analyze impact, propose repairs, and check delivery. Agents can investigate and recommend the next step, but they cannot bypass review to write canon. |
 | ✦ **Visual views (editable)** | Relationship star-graph (drag, connect, focus, ripple-preview), chronology timeline (reorder, flag violations), dialogue flow editor, and canon snapshot diff. Layout is computed deterministically; edits go to canon through the normal pipeline. |
 | 📦 **Data + localization delivery** | The world as a checksummed `content_bundle.json` (universal handoff any importer reads) + localization as **CSV and XLIFF 1.2** (the CAT/TMS standard; UI char-caps carried as `maxwidth`). Every artifact in a `sha256` manifest. **Engine import** back-syncs quest rows edited engine-side into the review queue. (Per-engine *code* generation was dropped: engine schemas differ project to project, so there is no portable one-click paradigm — the value is clean data + the standard localization format.) |
 | 💰 **Cost engineering** | Every model call goes through one gateway: two-tier cache, cascade routing, output caps, per-action cost readout and budget guards. Offline default is **$0**. |
@@ -130,19 +131,20 @@ Zhipu / Qwen / Doubao / custom), paste your API key, choose a model, and Test Co
 lives only in the local process memory and calls the provider directly — there is no middle server.
 You can browse, review, and export with no model connected at all.
 
-## Architecture
+## How it works
 
 ```
-  Workbench UI       CLI            REST           MCP (read-only tools)
-        └───────────────┴──────┬───────┴───────────────┘
-                       pipeline/  fixed workflows (audit · patches · review · ingest)
-         ┌───────────────────────┼───────────────────────┐
-   audit/   deterministic    patches/  suggest+shadow    assist/  drafts · dialogue · lint
-   impact/  graph propagation qa/       cited Q&A · refuse retrieval/ recall · rerank · budget
-   graph/   content graph + views (timeline · star-graph · dialogue flow · diff)
-         └───────────────────────┼───────────────────────┐
-   content/  files are the source of truth    storage/  SQLite (WAL) runtime cache
-                       llm/  the one gateway: cache · routing · telemetry · retries · token caps
+  existing material / new ideas / engine-side edits
+              ↓
+  content hub: structured, versioned, reviewable
+              ↓
+  quality layer: audit · impact · timeline · quest logic · localization checks
+              ↓
+  collaboration layer: world Q&A · agent diagnosis · repair proposals · grounded drafts
+              ↓
+  human review: review queue · operator log · shadow re-check · rollback
+              ↓
+  delivery: data bundle · localization files · engine feedback loop
 ```
 
 **Tech stack:** Python 3.11+, FastAPI, Pydantic v2, NetworkX, SQLite (WAL); Vue 3 + Vite + TypeScript
@@ -156,8 +158,8 @@ LLM gateway. Offline deterministic doubles make the entire test suite run at **$
   `rollback`, `ask`, `draft`/`expand`, `export`, `eval-acceptance`. Every command prints JSON.
 - **REST API** — resource-oriented per project, SSE for long jobs; `OWCOPILOT_API_KEY` gates
   paid `llm_mode=real` calls (fail-closed for non-local clients).
-- **MCP server** — read-only tools for the agent ecosystem (write actions are deliberately not
-  exposed).
+- **MCP server** — a guarded tool surface for the agent ecosystem: diagnose, retrieve, propose, and
+  check delivery without exposing direct canon writes.
 
 ## License
 
