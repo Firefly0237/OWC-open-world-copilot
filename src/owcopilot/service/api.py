@@ -364,6 +364,8 @@ class ProjectExtractionRunRequest(_LLMModeRequest):
     # the boundary nor silently truncated — at worst it is covered partially and reported as such.
     text: str = Field(min_length=1, max_length=2_000_000)
     source_kind: str = Field(default="文稿", max_length=40)
+    glean_rounds: int = Field(default=1, ge=0, le=5)
+    verify_faithfulness: bool = False
 
 
 class ProjectExtractionRunResponse(BaseModel):
@@ -784,6 +786,7 @@ _JOB_PARAM_KEYS: dict[str, set[str]] = {
         "title",
         "text",
         "source_kind",
+        "glean_rounds",
         "verify_faithfulness",
         "llm_mode",
         "llm_model",
@@ -1375,7 +1378,7 @@ def create_app() -> FastAPI:
                         "OWCOPILOT_PROJECTS_JSON or send inline content"
                     ),
                 )
-            builder = project_context.context_builder
+            builder = project_context.qa_context_builder()
             bundle = project_context.bundle
         else:
             store, builder = _context_builder_for_bundle(req.content)
@@ -1390,7 +1393,7 @@ def create_app() -> FastAPI:
             ask_provider = OfflineQAProvider()
         gateway = LLMGateway(
             providers={"cheap": ask_provider},
-            router=StaticRouter(mapping={"qa_answer": "cheap"}),
+            router=StaticRouter(mapping={"qa_answer": "cheap", "qa_expand": "cheap"}),
             cache=service_cache,  # app-lifetime L1/L2: repeated lore questions cost $0
             telemetry=telemetry,
             max_retries=1 if req.llm_mode == "real" else 0,
@@ -1402,6 +1405,7 @@ def create_app() -> FastAPI:
                 gateway=gateway,
                 context_builder=builder,
                 bundle=bundle,
+                expand=(req.llm_mode == "real"),
             ).ask(req.query, budget_tokens=req.budget_tokens)
             telemetry_summary = telemetry.summary()
             cost_budget = summarize_workflow(
@@ -1439,6 +1443,7 @@ def create_app() -> FastAPI:
         task: str,
         offline_provider: Any,
         namespace: str = "",
+        extra_tasks: list[str] | None = None,
     ) -> tuple[LLMGateway | None, TelemetryCollector]:
         """Per-request gateway for v2 assist tasks. `offline_provider=None` with offline mode
         means the caller runs deterministically without any gateway (suggest).
@@ -1457,9 +1462,12 @@ def create_app() -> FastAPI:
         else:
             _require_offline_allowed()
             provider = offline_provider
+        mapping = {task: "cheap"}
+        for extra in extra_tasks or []:
+            mapping[extra] = "cheap"
         gateway = LLMGateway(
             providers={"cheap": provider},
-            router=StaticRouter(mapping={task: "cheap"}),
+            router=StaticRouter(mapping=mapping),
             cache=service_cache,
             telemetry=telemetry,
             max_retries=1 if req.llm_mode == "real" else 0,
@@ -1771,12 +1779,15 @@ def create_app() -> FastAPI:
                 task="extract_lore",
                 offline_provider=OfflineExtractionProvider(),
                 namespace=project,
+                extra_tasks=["verify_faithfulness"],
             )
             assert gateway is not None
             draft = ExtractionService(gateway=gateway, bundle=project_context.bundle).extract(
                 title=req.title,
                 text=req.text,
                 source_kind=req.source_kind,
+                glean_rounds=req.glean_rounds,
+                verify_faithfulness=req.verify_faithfulness and req.llm_mode == "real",
             )
             telemetry_summary = telemetry.summary()
             return ProjectExtractionRunResponse(
