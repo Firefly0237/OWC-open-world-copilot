@@ -449,7 +449,12 @@ def _add_llm_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _llm_gateway(
-    args: argparse.Namespace, *, task: str, offline_provider: Any, real_json_mode: bool = True
+    args: argparse.Namespace,
+    *,
+    task: str,
+    offline_provider: Any,
+    real_json_mode: bool = True,
+    extra_tasks: list[str] | None = None,
 ) -> tuple[LLMGateway, TelemetryCollector]:
     telemetry = TelemetryCollector()
     real = getattr(args, "llm_mode", "offline") == "real"
@@ -461,9 +466,12 @@ def _llm_gateway(
     else:
         require_offline_llm_allowed()  # `--llm-mode offline` is a test/CI dry-run, not a product
         provider = offline_provider
+    mapping = {task: "cheap"}
+    for extra in extra_tasks or []:
+        mapping[extra] = "cheap"
     gateway = LLMGateway(
         providers={"cheap": provider},
-        router=StaticRouter(mapping={task: "cheap"}),
+        router=StaticRouter(mapping=mapping),
         cache=NoOpCache(),
         telemetry=telemetry,
         max_retries=1 if real else 0,
@@ -678,13 +686,17 @@ def _cmd_context_pack(args: argparse.Namespace) -> int:
 def _cmd_ask(args: argparse.Namespace) -> int:
     with _project(args) as project:
         gateway, telemetry = _llm_gateway(
-            args, task="qa_answer", offline_provider=OfflineQAProvider()
+            args,
+            task="qa_answer",
+            offline_provider=OfflineQAProvider(),
+            extra_tasks=["qa_expand"],
         )
         service = LoreQAService(
             gateway=gateway,
             # also recall the GraphRAG macro-overview reports (a no-op until `build-overview` runs)
             context_builder=project.qa_context_builder(),
             bundle=project.bundle,
+            expand=(args.llm_mode == "real"),
         )
         answer = service.ask(args.query, budget_tokens=args.budget_tokens)
         telemetry_summary = telemetry.summary()
