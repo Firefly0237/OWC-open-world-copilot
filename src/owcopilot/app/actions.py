@@ -1026,6 +1026,7 @@ def run_extraction_action(
             llm_mode=llm_mode,
             llm_model=llm_model,
             offline_provider=OfflineExtractionProvider(),
+            extra_tasks=["verify_faithfulness"],
         )
         draft = ExtractionService(gateway=gateway, bundle=project.bundle).extract(
             title=title,
