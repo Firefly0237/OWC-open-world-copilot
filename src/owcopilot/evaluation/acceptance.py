@@ -584,11 +584,11 @@ def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
         qa = LoreQAService(
             gateway=LLMGateway(
                 providers={"cheap": OfflineQAProvider()},
-                router=StaticRouter(mapping={"qa_answer": "cheap"}),
+                router=StaticRouter(mapping={"qa_answer": "cheap", "qa_expand": "cheap"}),
                 cache=NoOpCache(),
                 telemetry=TelemetryCollector(),
             ),
-            context_builder=clean_project.context_builder,
+            context_builder=clean_project.qa_context_builder(),
             bundle=clean_project.bundle,
         )
         answerable = [
