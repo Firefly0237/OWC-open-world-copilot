@@ -85,11 +85,11 @@ def run_golden_evaluation(workspace: str | Path) -> GoldenEvaluationReport:
         answer = LoreQAService(
             gateway=LLMGateway(
                 providers={"cheap": OfflineQAProvider()},
-                router=StaticRouter(mapping={"qa_answer": "cheap"}),
+                router=StaticRouter(mapping={"qa_answer": "cheap", "qa_expand": "cheap"}),
                 cache=NoOpCache(),
                 telemetry=telemetry,
             ),
-            context_builder=project.context_builder,
+            context_builder=project.qa_context_builder(),
             bundle=project.bundle,
         ).ask("Who is Aldric?", budget_tokens=200)
         manifest = export_content_bundle(
