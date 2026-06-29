@@ -33,3 +33,7 @@
 - **备选**（若 sqlite-vec 不可用）：usearch（pip、mmap on-disk、量化、Windows 支持？）、LanceDB（pip、列式磁盘 IVF-PQ、Windows？）、numpy.memmap flat（无依赖、磁盘驻留但仍 O(N) 搜索——只解内存不解搜索成本）、faiss-cpu（Windows wheel？离线？）。逐个验证**离线可装 + 本机真能 import/跑**，给推荐与理由。
 - **增量同步模式**：replace_content_index/replace_graph_edges/replace_reference_index 现在全 DELETE+重插（storage/sqlite.py），怎么改成 diff（content_hash/mtime）→ upsert changed + prune removed，事务内安全。
 - **共享 ProjectContext 模式**：现 mcp_server/tools.py 每工具各 open。怎么做 session 级共享（参考 pipeline/project.py 的 qa_context_builder 注释）；工具如何接受注入的 context；轻量工具瘦路径怎么走。
+
+## 待办跟踪（显式，不静默）
+- **F-1（非阻塞，中，2b 复查发现）**：8 个 mcp_server/tools.py handler 新增的 `project: ProjectContext` 参，可能干扰真 FastMCP transport（transport.py:42-49）的 `model_json_schema()`。范围=仅「已装 [mcp] 可选 extra 并跑真 MCP transport」的面；agent/skill 路径不受影响（LLM 工具 schema 来自显式 SkillParameter 而非 handler 签名）。本机未装 [mcp] 无法实测。候选修法：注入改 contextvar（脱离签名，但有线程上下文传播 subtlety）/ transport 注册时排除 project 参 / transport 测试桩改真构 schema。决策：待 G1 验收+监督定夺；若修，倾向 transport 边界过滤（装 [mcp] 后可测再做）。
+- 组 2 待接：int8 量化 + usearch ANN（性能）；#0 分片 spike。

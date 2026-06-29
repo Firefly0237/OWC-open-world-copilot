@@ -687,30 +687,44 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     gateway, telemetry = _llm_gateway(
         args, task="agent_react", offline_provider=OfflineReactProvider(), real_json_mode=False
     )
-    registry = default_skill_registry(content_root=str(content_root), sqlite_path=sqlite_path)
-    # BE-9: wire --skills allowlist into ReActAgent so users can restrict tool access.
-    # None means "all skills"; an empty list would restrict to none.
-    allowed_skills: set[str] | None = set(args.skills) if args.skills is not None else None
-    # BUG-8: cross-validate --skills against the registry; warn (not fail) on unknown names
-    # so the user knows the typo/stale skill name is silently excluded from the manifest.
-    if allowed_skills is not None:
-        unknown_skills = sorted(allowed_skills - set(registry.names()))
-        if unknown_skills:
-            print(
-                json.dumps(
-                    {
-                        "warning": "unknown skill(s) in --skills allowlist (will be ignored)",
-                        "unknown_skills": unknown_skills,
-                        "known_skills": registry.names(),
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-                file=sys.stderr,
-            )
-    result = ReActAgent(
-        gateway=gateway, registry=registry, max_steps=args.max_steps, allowed_skills=allowed_skills
-    ).run(args.goal)
+    # SCALE-P0 #2b: open ONE shared ProjectContext for the whole ReAct run and bind it into the
+    # registry. Every step's tool call reuses this context (one parse/graph/vector build per task
+    # instead of one per step) and sees writes from earlier steps via the one live SQLiteStore.
+    # ProjectContext.open already runs the (now incremental, 2a) replace_* sync, so the shared view
+    # is consistent with the latest persisted state at session start.
+    project = ProjectContext.open(content_root, sqlite_path=sqlite_path)
+    try:
+        registry = default_skill_registry(
+            content_root=str(content_root), sqlite_path=sqlite_path, project=project
+        )
+        # BE-9: wire --skills allowlist into ReActAgent so users can restrict tool access.
+        # None means "all skills"; an empty list would restrict to none.
+        allowed_skills: set[str] | None = set(args.skills) if args.skills is not None else None
+        # BUG-8: cross-validate --skills against the registry; warn (not fail) on unknown names
+        # so the user knows the typo/stale skill name is silently excluded from the manifest.
+        if allowed_skills is not None:
+            unknown_skills = sorted(allowed_skills - set(registry.names()))
+            if unknown_skills:
+                print(
+                    json.dumps(
+                        {
+                            "warning": "unknown skill(s) in --skills allowlist (will be ignored)",
+                            "unknown_skills": unknown_skills,
+                            "known_skills": registry.names(),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    file=sys.stderr,
+                )
+        result = ReActAgent(
+            gateway=gateway,
+            registry=registry,
+            max_steps=args.max_steps,
+            allowed_skills=allowed_skills,
+        ).run(args.goal)
+    finally:
+        project.close()
     telemetry_summary = telemetry.summary()
     cost_budget = summarize_workflow(
         [llm_step("agent_react", telemetry_summary)], budget_usd=args.max_cost_usd
@@ -749,23 +763,34 @@ def _cmd_multi_agent(args: argparse.Namespace) -> int:
     gateway, telemetry = _llm_gateway(
         args, task="agent_react", offline_provider=OfflineReactProvider(), real_json_mode=False
     )
-    registry = default_skill_registry(content_root=str(content_root), sqlite_path=sqlite_path)
-    session = MultiAgentSession(gateway=gateway, registry=registry)
+    # SCALE-P0 #2b: open ONE shared ProjectContext for the whole multi-agent session. The
+    # Diag/Repair/Verifier workers all run tool calls through this one context — one
+    # parse/graph/vector build for the session, and every worker sees the issues another worker
+    # (e.g. an audit) persisted via the one live SQLiteStore connection. ProjectContext.open runs
+    # the incremental (2a) replace_* sync, so the shared view starts consistent with disk.
+    project = ProjectContext.open(content_root, sqlite_path=sqlite_path)
     try:
-        report = session.run(args.goal)
-        # The blackboard message flow is the product-facing proof of true multi-agent
-        # collaboration: each row is attributed (from→to) and ordered.
-        flow = [
-            {
-                "msg_type": msg.msg_type,
-                "from_agent": msg.from_agent,
-                "to_agent": msg.to_agent,
-                "status": msg.status,
-            }
-            for msg in session.blackboard.session_flow(report.session_id)
-        ]
+        registry = default_skill_registry(
+            content_root=str(content_root), sqlite_path=sqlite_path, project=project
+        )
+        session = MultiAgentSession(gateway=gateway, registry=registry)
+        try:
+            report = session.run(args.goal)
+            # The blackboard message flow is the product-facing proof of true multi-agent
+            # collaboration: each row is attributed (from→to) and ordered.
+            flow = [
+                {
+                    "msg_type": msg.msg_type,
+                    "from_agent": msg.from_agent,
+                    "to_agent": msg.to_agent,
+                    "status": msg.status,
+                }
+                for msg in session.blackboard.session_flow(report.session_id)
+            ]
+        finally:
+            session.close()
     finally:
-        session.close()
+        project.close()
     telemetry_summary = telemetry.summary()
     cost_budget = summarize_workflow(
         [llm_step("multi_agent", telemetry_summary)], budget_usd=args.max_cost_usd
