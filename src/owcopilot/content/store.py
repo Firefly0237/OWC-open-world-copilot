@@ -7,6 +7,7 @@ rebuildable from this directory.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -35,6 +36,17 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 class ContentStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
+        # mtime/size fast path for reload(): a per-file parse cache keyed on the file's identity
+        # plus its (mtime_ns, size) stat. An unchanged file is served from cache without re-reading
+        # or re-deserializing it -- the dominant cost when a long-running project re-opens a corpus
+        # of which only a handful of files changed. Files are the source of truth, so a changed file
+        # always misses (its stat differs) and is re-parsed; this is purely a performance shortcut,
+        # never a correctness one. Keyed by absolute path string -> (mtime_ns, size, parsed value).
+        self._parse_cache: dict[str, tuple[int, int, Any]] = {}
+        # Test/diagnostic counters: how many cached files were reused vs. read from disk on the last
+        # set of loads. Lets a test assert "an unchanged directory touched zero disk reads".
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     def load(self) -> ContentBundle:
         bundle = ContentBundle()
@@ -61,6 +73,11 @@ class ContentStore:
         return bundle
 
     def save(self, bundle: ContentBundle) -> None:
+        # A save rewrites files in place; mtime_ns + size usually shifts, but an edit that preserves
+        # both on a same-second filesystem could otherwise let the parse cache serve the pre-save
+        # value. save() is rare relative to load(), so drop the whole cache and let the next load
+        # re-stat -- correctness over a micro-optimisation on the write path.
+        self._parse_cache.clear()
         self._write_json_dir(self.root / "world" / "entities", bundle.entities)
         self._write_relations(bundle.relations)
         self._write_quest_event_refs(bundle.quest_event_refs)
@@ -76,59 +93,97 @@ class ContentStore:
     def exists(self) -> bool:
         return self.root.exists()
 
+    def _read_parsed(self, file_path: Path, parse: Callable[[str], Any]) -> Any:
+        """Read + parse ``file_path``, reusing the cache when its (mtime, size) is unchanged.
+
+        ``parse`` turns the file's text into the value to cache (a model, a list, …). The cache key
+        folds in both the modification time (nanosecond precision) and the byte size, so an in-place
+        edit that happens to preserve one still misses on the other. A changed or vanished file
+        re-reads from disk -- files remain the source of truth and the fast path never serves
+        stale data. The cache holds the value, not the text, so an unchanged file skips re-parsing.
+        """
+        stat = file_path.stat()
+        key = str(file_path.resolve())
+        cached = self._parse_cache.get(key)
+        if cached is not None and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+            self._cache_hits += 1
+            return cached[2]
+        self._cache_misses += 1
+        value = parse(file_path.read_text(encoding="utf-8"))
+        self._parse_cache[key] = (stat.st_mtime_ns, stat.st_size, value)
+        return value
+
     def _load_json_dir(self, path: Path, model: type[ModelT]) -> list[ModelT]:
         if not path.exists():
             return []
         loaded: list[ModelT] = []
         for file_path in sorted(path.glob("*.json")):
-            loaded.append(model.model_validate_json(file_path.read_text(encoding="utf-8")))
+            loaded.append(self._read_parsed(file_path, model.model_validate_json))
         return loaded
 
     def _load_relations(self) -> list[Relation]:
         path = self.root / "world" / "relations.jsonl"
         if not path.exists():
             return []
-        relations: list[Relation] = []
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            if raw.strip():
-                relations.append(Relation.model_validate_json(raw))
-        return relations
+
+        def parse(text: str) -> list[Relation]:
+            return [
+                Relation.model_validate_json(raw) for raw in text.splitlines() if raw.strip()
+            ]
+
+        return self._read_parsed(path, parse)
 
     def _load_quest_event_refs(self) -> dict[str, QuestEventReference]:
         path = self.root / "quests" / "event_refs.jsonl"
         if not path.exists():
             return {}
-        refs: dict[str, QuestEventReference] = {}
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            if raw.strip():
-                ref = QuestEventReference.model_validate_json(raw)
-                refs[ref.id] = ref
-        return refs
+
+        def parse(text: str) -> dict[str, QuestEventReference]:
+            refs: dict[str, QuestEventReference] = {}
+            for raw in text.splitlines():
+                if raw.strip():
+                    ref = QuestEventReference.model_validate_json(raw)
+                    refs[ref.id] = ref
+            return refs
+
+        return self._read_parsed(path, parse)
 
     def _load_style_guides(self) -> list[StyleGuide]:
         """Full-fidelity JSON is canonical; an old body-only ``style_guide.md`` still loads (so
         worlds saved before this format upgrade keep working, just without their rules)."""
         path = self.root / "world" / "style_guides.json"
         if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return [StyleGuide.model_validate(raw) for raw in data.values()]
-            return []
+
+            def parse_guides(text: str) -> list[StyleGuide]:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    return [StyleGuide.model_validate(raw) for raw in data.values()]
+                return []
+
+            return self._read_parsed(path, parse_guides)
         legacy = self.root / "world" / "style_guide.md"
         if legacy.exists():
-            return [StyleGuide(body=legacy.read_text(encoding="utf-8"))]
+            return self._read_parsed(legacy, lambda text: [StyleGuide(body=text)])
         return []
 
     def _load_terms(self) -> list[Term]:
         path = self.root / "world" / "terms.json"
         if not path.exists():
             return []
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return [Term.model_validate(item) for item in data]
-        if isinstance(data, dict):
-            return [Term.model_validate(item) for item in data.values() if isinstance(item, dict)]
-        return []
+
+        def parse_terms(text: str) -> list[Term]:
+            data = json.loads(text)
+            if isinstance(data, list):
+                return [Term.model_validate(item) for item in data]
+            if isinstance(data, dict):
+                return [
+                    Term.model_validate(item)
+                    for item in data.values()
+                    if isinstance(item, dict)
+                ]
+            return []
+
+        return self._read_parsed(path, parse_terms)
 
     def _write_json_dir(self, path: Path, objects: dict[str, ModelT]) -> None:
         # Write-boundary id invariant (the last line of defense). Every object_id here becomes

@@ -6,6 +6,7 @@ audit runs, issues, patches, graph edges, search index rows and telemetry.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -111,7 +112,8 @@ class SQLiteStore:
                 object_type TEXT NOT NULL,
                 object_id TEXT NOT NULL,
                 title TEXT NOT NULL,
-                body TEXT NOT NULL
+                body TEXT NOT NULL,
+                row_hash TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS content_vectors (
@@ -139,7 +141,8 @@ class SQLiteStore:
                 kind TEXT NOT NULL,
                 edge_type TEXT NOT NULL,
                 valid_from INTEGER,
-                valid_until INTEGER
+                valid_until INTEGER,
+                edge_fingerprint TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS telemetry (
@@ -248,12 +251,36 @@ class SQLiteStore:
         self._ensure_column("review_items", "critic_score", "REAL")
         # IN-B1 M2: primary failing dimension from last critique (dimension-aware lessons).
         self._ensure_column("review_items", "critic_primary_dim", "TEXT")
+        # P0 #2a incremental sync: content_index/graph_edges grew a content-derived hash/fingerprint
+        # so re-opening a project diffs (upsert changed + prune removed) instead of dropping and
+        # re-inserting the whole table. Older runtime DBs upgrade in place; the empty-string default
+        # marks legacy rows as "unknown hash", so the first incremental sync re-stamps them.
+        self._ensure_column("content_index", "row_hash", "TEXT NOT NULL DEFAULT ''")
+        added_edge_fingerprint = self._ensure_column(
+            "graph_edges", "edge_fingerprint", "TEXT NOT NULL DEFAULT ''"
+        )
+        if added_edge_fingerprint:
+            # A legacy DB's existing edges all carry the '' default, which would collide under the
+            # UNIQUE index below. graph_edges is fully rebuildable from the bundle on the next
+            # open/reload, so clear it once here rather than back-filling fingerprints for rows we
+            # are about to re-diff anyway.
+            self.conn.execute("DELETE FROM graph_edges")
+        # The fingerprint already embeds an occurrence ordinal, so it is unique per edge row even
+        # when a MultiDiGraph holds byte-identical parallel edges -- this lets the incremental
+        # upsert key on it via ON CONFLICT.
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_edges_fingerprint "
+            "ON graph_edges(edge_fingerprint)"
+        )
         self.conn.commit()
 
-    def _ensure_column(self, table: str, column: str, column_type: str) -> None:
+    def _ensure_column(self, table: str, column: str, column_type: str) -> bool:
+        """Add ``column`` to ``table`` if missing. Returns ``True`` when it was just added."""
         existing = {str(row["name"]) for row in self.conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+            return True
+        return False
 
     def save_audit_run(self, run: AuditRun) -> None:
         self.conn.execute(
@@ -662,20 +689,64 @@ class SQLiteStore:
     # ------------------------------------------------------------------------------------------
 
     def replace_content_index(self, bundle: ContentBundle) -> None:
-        self.conn.execute("DELETE FROM content_index")
-        self.conn.execute("DELETE FROM content_fts")
+        """Sync content_index + content_fts to ``bundle`` incrementally.
+
+        The bundle is the source of truth; this diffs the desired rows against the persisted ones
+        (keyed by ``ref``, compared on a content ``row_hash``) and only touches what changed:
+        changed/new rows are upserted, vanished rows are deleted, and unchanged rows are left
+        alone. content_fts is a plain (non external-content) fts5 table, so its rows are deleted by
+        ``ref`` and re-inserted by hand for exactly the changed/new/removed refs.
+
+        The end state is identical to the old drop-and-reinsert: same content_index rows (now also
+        carrying row_hash) and the same content_fts rows. Runs in a single transaction."""
         rows = list(_content_rows(bundle))
-        self.conn.executemany(
-            """
-            INSERT INTO content_index (ref, object_type, object_id, title, body)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-        self.conn.executemany(
-            "INSERT INTO content_fts (ref, object_type, title, body) VALUES (?, ?, ?, ?)",
-            [(ref, object_type, title, body) for ref, object_type, _object_id, title, body in rows],
-        )
+        desired: dict[str, tuple[str, str, str, str, str]] = {}
+        desired_hash: dict[str, str] = {}
+        for ref, object_type, object_id, title, body in rows:
+            desired[ref] = (ref, object_type, object_id, title, body)
+            desired_hash[ref] = _content_row_hash(title, body)
+
+        existing_hash = {
+            str(row["ref"]): str(row["row_hash"])
+            for row in self.conn.execute("SELECT ref, row_hash FROM content_index")
+        }
+
+        removed = [ref for ref in existing_hash if ref not in desired]
+        # A legacy/back-filled row carries row_hash='' (never a real sha1), so it always counts as
+        # changed and gets re-stamped on the first incremental sync -- correctness over the mtime
+        # fast path.
+        changed = [
+            ref for ref, h in desired_hash.items() if existing_hash.get(ref) != h
+        ]
+
+        try:
+            for ref in removed:
+                self.conn.execute("DELETE FROM content_index WHERE ref = ?", (ref,))
+                self.conn.execute("DELETE FROM content_fts WHERE ref = ?", (ref,))
+            for ref in changed:
+                _r, object_type, object_id, title, body = desired[ref]
+                self.conn.execute(
+                    """
+                    INSERT INTO content_index (ref, object_type, object_id, title, body, row_hash)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(ref) DO UPDATE SET
+                        object_type = excluded.object_type,
+                        object_id = excluded.object_id,
+                        title = excluded.title,
+                        body = excluded.body,
+                        row_hash = excluded.row_hash
+                    """,
+                    (ref, object_type, object_id, title, body, desired_hash[ref]),
+                )
+                # Plain fts5 has no upsert; delete any prior row for this ref, then re-insert.
+                self.conn.execute("DELETE FROM content_fts WHERE ref = ?", (ref,))
+                self.conn.execute(
+                    "INSERT INTO content_fts (ref, object_type, title, body) VALUES (?, ?, ?, ?)",
+                    (ref, object_type, title, body),
+                )
+        except Exception:
+            self.conn.rollback()
+            raise
         self.conn.commit()
 
     def get_vectors(
@@ -869,24 +940,57 @@ class SQLiteStore:
         self.conn.commit()
 
     def replace_graph_edges(self, graph: ContentGraph) -> None:
-        self.conn.execute("DELETE FROM graph_edges")
-        self.conn.executemany(
-            """
-            INSERT INTO graph_edges (source, target, kind, edge_type, valid_from, valid_until)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    edge.source,
-                    edge.target,
-                    edge.kind,
-                    edge.edge_type,
-                    edge.valid_from,
-                    edge.valid_until,
+        """Sync graph_edges to ``graph`` incrementally via a deterministic per-edge fingerprint.
+
+        graph_edges has no natural key (its ``id`` is AUTOINCREMENT) and a MultiDiGraph can hold
+        byte-identical parallel edges, so the fingerprint is
+        ``sha1(source|target|kind|edge_type|valid_from|valid_until|#occurrence)`` -- the occurrence
+        ordinal disambiguates true duplicates so each maps to its own stable row. Edges whose
+        fingerprint already exists are skipped, new fingerprints are inserted, and fingerprints no
+        longer present are deleted. The resulting row *set* is identical to the old
+        drop-and-reinsert (same edges, same multiplicity); only the AUTOINCREMENT ``id`` values may
+        differ, and nothing reads that column. Runs in a single transaction."""
+        desired: dict[str, tuple[str, str, str, str, int | None, int | None]] = {}
+        seen: dict[tuple[str, str, str, str, int | None, int | None], int] = {}
+        for edge in graph.edge_refs():
+            key = (
+                edge.source,
+                edge.target,
+                edge.kind,
+                edge.edge_type,
+                edge.valid_from,
+                edge.valid_until,
+            )
+            occurrence = seen.get(key, 0)
+            seen[key] = occurrence + 1
+            fingerprint = _edge_fingerprint(edge, occurrence)
+            desired[fingerprint] = key
+
+        existing = {
+            str(row["edge_fingerprint"])
+            for row in self.conn.execute("SELECT edge_fingerprint FROM graph_edges")
+        }
+        removed = existing - desired.keys()
+        added = desired.keys() - existing
+
+        try:
+            for fingerprint in sorted(removed):
+                self.conn.execute(
+                    "DELETE FROM graph_edges WHERE edge_fingerprint = ?", (fingerprint,)
                 )
-                for edge in graph.edge_refs()
-            ],
-        )
+            for fingerprint in sorted(added):
+                source, target, kind, edge_type, valid_from, valid_until = desired[fingerprint]
+                self.conn.execute(
+                    """
+                    INSERT INTO graph_edges (
+                        source, target, kind, edge_type, valid_from, valid_until, edge_fingerprint
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (source, target, kind, edge_type, valid_from, valid_until, fingerprint),
+                )
+        except Exception:
+            self.conn.rollback()
+            raise
         self.conn.commit()
 
     def search_content(self, query: str, *, limit: int = 10) -> list[dict[str, str]]:
@@ -917,66 +1021,117 @@ class SQLiteStore:
         sources: list[Any],
         chunks: list[Any],
     ) -> None:
-        self.conn.execute("DELETE FROM reference_sources")
-        self.conn.execute("DELETE FROM reference_chunks")
-        self.conn.execute("DELETE FROM reference_fts")
-        self.conn.executemany(
-            """
-            INSERT INTO reference_sources (
-                id, title, source_type, original_filename, allowed_uses_json,
-                text_hash, metadata_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    source.id,
-                    source.title,
-                    source.source_type,
-                    source.original_filename,
-                    _json(list(source.allowed_uses)),
-                    source.text_hash,
-                    _json(source.metadata),
-                    source.created_at,
-                )
-                for source in sources
-            ],
-        )
+        """Sync the three reference tables to ``sources``/``chunks`` incrementally.
+
+        A reference source is a (possibly book-length) document; its ``text_hash`` covers its full
+        text, so a source whose hash is unchanged has byte-identical chunks and is skipped entirely
+        -- the biggest win, since the inspiration corpus is the largest. The diff is per source:
+        sources gone from the bundle are pruned (with their chunks + fts rows), sources whose
+        text_hash changed (or whose stored metadata/title differs) are re-chunked and re-inserted,
+        and unchanged sources are left untouched.
+
+        The end state is identical to the old drop-and-reinsert: same reference_sources /
+        reference_chunks / reference_fts rows. Runs in a single transaction."""
         source_titles = {source.id: source.title for source in sources}
-        self.conn.executemany(
-            """
-            INSERT INTO reference_chunks (
-                ref, source_id, chunk_index, title, body, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    f"reference_chunk:{chunk.id}",
-                    chunk.source_id,
-                    chunk.chunk_index,
-                    chunk.title,
-                    chunk.body,
-                    _json(chunk.metadata),
+        chunks_by_source: dict[str, list[Any]] = {}
+        for chunk in chunks:
+            chunks_by_source.setdefault(chunk.source_id, []).append(chunk)
+
+        # (text_hash, title, source_type, original_filename, allowed_uses, metadata, created_at) is
+        # everything persisted for a source row; comparing the whole tuple means a metadata-only
+        # edit re-syncs too, while a genuinely unchanged book is skipped. text_hash alone gates the
+        # expensive chunk work below.
+        existing_sources = {
+            str(row["id"]): row
+            for row in self.conn.execute(
+                """
+                SELECT id, title, source_type, original_filename, allowed_uses_json,
+                       text_hash, metadata_json, created_at
+                FROM reference_sources
+                """
+            )
+        }
+        desired_ids = {source.id for source in sources}
+        removed_ids = [sid for sid in existing_sources if sid not in desired_ids]
+
+        try:
+            for sid in removed_ids:
+                self._delete_reference_source(sid)
+
+            for source in sources:
+                prior = existing_sources.get(source.id)
+                if prior is not None and _reference_source_unchanged(prior, source):
+                    continue  # whole book unchanged -- no re-chunk, no re-insert
+                # Changed or new: replace the source row and all its chunks/fts rows wholesale. We
+                # re-chunk only this one source's chunks (chunk ids are derived from the source, so
+                # a text change reshuffles them); deleting by source_id first keeps stale chunks
+                # from a shorter previous revision from lingering.
+                self._delete_reference_source(source.id)
+                self.conn.execute(
+                    """
+                    INSERT INTO reference_sources (
+                        id, title, source_type, original_filename, allowed_uses_json,
+                        text_hash, metadata_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        source.id,
+                        source.title,
+                        source.source_type,
+                        source.original_filename,
+                        _json(list(source.allowed_uses)),
+                        source.text_hash,
+                        _json(source.metadata),
+                        source.created_at,
+                    ),
                 )
-                for chunk in chunks
-            ],
-        )
-        self.conn.executemany(
-            """
-            INSERT INTO reference_fts (ref, source_id, source_title, title, body)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    f"reference_chunk:{chunk.id}",
-                    chunk.source_id,
-                    source_titles.get(chunk.source_id, ""),
-                    chunk.title,
-                    chunk.body,
-                )
-                for chunk in chunks
-            ],
-        )
+                for chunk in chunks_by_source.get(source.id, []):
+                    ref = f"reference_chunk:{chunk.id}"
+                    self.conn.execute(
+                        """
+                        INSERT INTO reference_chunks (
+                            ref, source_id, chunk_index, title, body, metadata_json
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ref,
+                            chunk.source_id,
+                            chunk.chunk_index,
+                            chunk.title,
+                            chunk.body,
+                            _json(chunk.metadata),
+                        ),
+                    )
+                    self.conn.execute(
+                        """
+                        INSERT INTO reference_fts (ref, source_id, source_title, title, body)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ref,
+                            chunk.source_id,
+                            source_titles.get(chunk.source_id, ""),
+                            chunk.title,
+                            chunk.body,
+                        ),
+                    )
+        except Exception:
+            self.conn.rollback()
+            raise
         self.conn.commit()
+
+    def _delete_reference_source(self, source_id: str) -> None:
+        """Remove a reference source and its chunks + fts rows (plain fts5 needs manual deletes)."""
+        chunk_refs = [
+            str(row["ref"])
+            for row in self.conn.execute(
+                "SELECT ref FROM reference_chunks WHERE source_id = ?", (source_id,)
+            )
+        ]
+        for ref in chunk_refs:
+            self.conn.execute("DELETE FROM reference_fts WHERE ref = ?", (ref,))
+        self.conn.execute("DELETE FROM reference_chunks WHERE source_id = ?", (source_id,))
+        self.conn.execute("DELETE FROM reference_sources WHERE id = ?", (source_id,))
 
     def list_reference_sources(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -1302,6 +1457,51 @@ def _content_rows(bundle: ContentBundle) -> list[tuple[str, str, str, str, str]]
             )
         )
     return rows
+
+
+def _content_row_hash(title: str, body: str) -> str:
+    """Content fingerprint for a content_index row.
+
+    Mirrors the vector layer's text_hash (sha1 over the row's indexable text) so the incremental
+    sync re-stamps a row only when its title or body actually changed. A NUL separator keeps
+    ``(title, body)`` unambiguous against ``(title+body, "")``."""
+    return hashlib.sha1(f"{title}\x00{body}".encode()).hexdigest()
+
+
+def _edge_fingerprint(edge: Any, occurrence: int) -> str:
+    """Deterministic, stable key for a graph edge row.
+
+    graph_edges has no natural key and a MultiDiGraph can hold byte-identical parallel edges, so
+    the fingerprint folds in an occurrence ordinal: the first identical edge is ``#0``, the second
+    ``#1`` and so on. This keeps each parallel edge mapped to its own row (preserving multiplicity)
+    while staying deterministic across re-opens."""
+    parts = [
+        str(edge.source),
+        str(edge.target),
+        str(edge.kind),
+        str(edge.edge_type),
+        "" if edge.valid_from is None else str(edge.valid_from),
+        "" if edge.valid_until is None else str(edge.valid_until),
+        f"#{occurrence}",
+    ]
+    return hashlib.sha1("\x00".join(parts).encode()).hexdigest()
+
+
+def _reference_source_unchanged(prior: sqlite3.Row, source: Any) -> bool:
+    """True when a persisted reference source row matches the bundle source byte-for-byte.
+
+    text_hash gates the (expensive) chunk rebuild, but a metadata/title-only edit must still
+    re-sync the source row, so every persisted column is compared. ``_json`` is the same canonical
+    serializer used on write, so the JSON columns compare exactly."""
+    return (
+        str(prior["text_hash"]) == str(source.text_hash)
+        and str(prior["title"]) == str(source.title)
+        and str(prior["source_type"]) == str(source.source_type)
+        and prior["original_filename"] == source.original_filename
+        and str(prior["allowed_uses_json"]) == _json(list(source.allowed_uses))
+        and str(prior["metadata_json"]) == _json(source.metadata)
+        and str(prior["created_at"]) == str(source.created_at)
+    )
 
 
 _VECTOR_TABLES = {"content_vectors", "reference_vectors"}
