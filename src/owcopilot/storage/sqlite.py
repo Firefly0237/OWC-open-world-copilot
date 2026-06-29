@@ -7,17 +7,25 @@ audit runs, issues, patches, graph edges, search index rows and telemetry.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
 
 from ..audit.models import AuditRun, Issue
 from ..content.hash import content_hash
 from ..content.models import ContentBundle
 from ..graph.index import ContentGraph
 from ..llm.telemetry import CallRecord
+
+if TYPE_CHECKING:
+    from ..retrieval.vector_backend import SqliteVecBackend
+
+logger = logging.getLogger(__name__)
 
 
 class SQLiteStore:
@@ -710,6 +718,53 @@ class SQLiteStore:
         )
         self.conn.commit()
 
+    def make_vector_backend(
+        self, model_id: str, *, dim: int, table: str = "content_vectors"
+    ) -> SqliteVecBackend | None:
+        """Build the disk-resident vec0 backend for ``table``, or ``None`` to fall back to numpy.
+
+        Returns ``None`` (with a guided log line, never a crash) when sqlite-vec is unavailable or
+        its extension cannot load on this connection -- the retriever then uses the numpy backend so
+        environments without the extension stay functional.
+
+        The vec0 table is created on this store's own connection (one file, FTS5 + vectors together)
+        and, on first use, **backfilled once** from the existing ``content_vectors`` blob cache so a
+        project that already has persisted fp32 vectors does not need to re-embed to populate the
+        index."""
+        from ..retrieval.vector_backend import SqliteVecBackend, SqliteVecError
+
+        _vectors_table(table)  # validate the blob table name
+        vec0 = _vec0_table(table)
+        try:
+            backend = SqliteVecBackend(self.conn, dim=int(dim), table=vec0)
+            # Backfill is inside the guard: probing/inserting against a vec0 table that was
+            # persisted at a different dimensionality raises sqlite3.OperationalError, which must
+            # degrade to the numpy backend with a guided log line -- never a bare crash.
+            self._backfill_vec0(model_id, backend, dim=int(dim), table=table)
+        except (SqliteVecError, sqlite3.OperationalError) as exc:
+            logger.info(
+                "sqlite-vec unavailable for %s (%s); using the in-memory numpy vector backend.",
+                table,
+                exc,
+            )
+            return None
+        return backend
+
+    def _backfill_vec0(
+        self, model_id: str, backend: SqliteVecBackend, *, dim: int, table: str
+    ) -> None:
+        """One-time populate of an empty vec0 table from the fp32 blob cache for ``model_id``.
+
+        Only runs when the vec0 table is empty (fresh / just-created): the retriever's incremental
+        upsert/delete keeps it in step afterwards, so this never re-stamps an already-populated
+        index."""
+        if backend.search(np.zeros(dim, dtype=np.float32), limit=1):
+            return  # already populated; incremental sync owns it from here
+        for ref, (_text_hash, stored_dim, blob) in self.get_vectors(model_id, table=table).items():
+            if stored_dim != dim:
+                continue  # a stale row from a different model dimensionality; skip, will re-embed
+            backend.upsert(ref, np.frombuffer(blob, dtype=np.float32))
+
     def prune_vectors(
         self, model_id: str, keep_refs: set[str], *, table: str = "content_vectors"
     ) -> None:
@@ -1251,12 +1306,23 @@ def _content_rows(bundle: ContentBundle) -> list[tuple[str, str, str, str, str]]
 
 _VECTOR_TABLES = {"content_vectors", "reference_vectors"}
 
+# The vec0 virtual table that backs each blob cache table. The blob table stays the authoritative
+# fp32 source (and the cross-backend fallback); the vec0 table is the disk-resident search index.
+_VEC0_TABLES = {"content_vectors": "content_vec", "reference_vectors": "reference_vec"}
+
 
 def _vectors_table(table: str) -> str:
     """Whitelist the vectors table name before it is interpolated into SQL."""
     if table not in _VECTOR_TABLES:
         raise ValueError(f"unknown vectors table: {table!r}")
     return table
+
+
+def _vec0_table(table: str) -> str:
+    """The validated vec0 virtual-table name for a given blob cache ``table``."""
+    if table not in _VEC0_TABLES:
+        raise ValueError(f"unknown vectors table: {table!r}")
+    return _VEC0_TABLES[table]
 
 
 def _reference_hit_from_row(row: sqlite3.Row, *, score: float) -> dict[str, Any]:

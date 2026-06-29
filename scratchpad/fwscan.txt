@@ -1,0 +1,3 @@
+./pages/GenesisPage.vue:384  [FW=]  | placeholder="想从素材里借鉴的焦点（留空＝按核心想法自动检索）"
+
+TOTAL=1

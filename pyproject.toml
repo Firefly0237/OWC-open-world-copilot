@@ -31,6 +31,11 @@ dependencies = [
     "openpyxl>=3.1",
     "numpy>=1.26",          # exact in-SQLite vector search (retrieval/vector.py); light, ubiquitous
     "pypdf>=4.0",           # PDF manuscript import (extraction/inspiration); small, pure-Python
+    # Disk-resident vec0 vector backend (retrieval/vector_backend.py): incremental upsert, no
+    # in-memory matrix rebuild. Pinned + vendored under scratchpad/wheels/ for offline install.
+    # Pure-Python wheel bundling vec0.dll; if the import/extension load fails the retriever degrades
+    # to the numpy-matrix backend, so environments without it stay functional.
+    "sqlite-vec==0.1.9",
 ]
 
 # No [project.urls] yet — the project is local-only (not published to a public repo).

@@ -6,13 +6,21 @@ real semantic leg of the hybrid retriever.
 
 Embeddings are **persisted in SQLite** keyed by ``(ref, model_id, text_hash)`` so a neural
 model only ever embeds new or changed rows -- re-opening a project reads vectors back instead
-of re-running the model over unchanged canon. Search is an **exact** cosine top-k over an
-in-memory numpy matrix: deterministic ordering, no ANN approximation, fast at lore scale.
+of re-running the model over unchanged canon.
+
+Search runs through a pluggable :class:`~owcopilot.retrieval.vector_backend.VectorSearchBackend`.
+The default is the disk-resident sqlite-vec ``vec0`` index (``SqliteVecBackend``): vectors live on
+disk and a changed row is an incremental upsert, no full in-memory matrix rebuild. When the
+sqlite-vec extension is unavailable the retriever degrades to the in-memory numpy-matrix backend
+(``NumpyMatrixBackend``) with a guided log line — old environments stay functional. Either way the
+search is **exact** (fp32, brute-force over the corpus): deterministic ordering, no ANN
+approximation, and bit-identical results across the two backends.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -21,6 +29,13 @@ import numpy as np
 from ..llm.cache import Embedder, HashingEmbedder
 from ..storage import SQLiteStore
 from .models import RetrievalHit
+from .vector_backend import (
+    NumpyMatrixBackend,
+    VectorSearchBackend,
+    _normalise,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -65,14 +80,18 @@ class VectorRetriever:
         embedder: Embedder | None = None,
         rows_loader: Callable[[SQLiteStore], list[_Row]] = load_content_rows,
         vectors_table: str = "content_vectors",
+        backend: VectorSearchBackend | None = None,
     ) -> None:
         self.store = store
         self.embedder = embedder or HashingEmbedder()
         self._rows_loader = rows_loader
         self._vectors_table = vectors_table
         self._rows: list[_Row] = []
-        self._row_index: dict[str, int] = {}
-        self._matrix = np.empty((0, 0), dtype=np.float32)
+        # The search index. Built lazily once the embedding dim is known (a sqlite-vec ``vec0``
+        # table is declared ``FLOAT[dim]``, and a lazy ``SemanticEmbedder`` only reveals its dim
+        # after the first embed). ``backend`` may be injected (tests / a shared connection);
+        # otherwise ``_reindex`` builds the sqlite-vec backend, falling back to numpy when absent.
+        self._backend: VectorSearchBackend | None = backend
         self._reindex()
 
     @property
@@ -98,32 +117,34 @@ class VectorRetriever:
 
     def similarities(self, query: str, refs: list[str]) -> dict[str, float]:
         """Cosine of ``query`` to each requested ref's stored vector, for hybrid reranking."""
-        if not refs or self._matrix.size == 0:
+        if not refs or self._backend is None:
             return {}
         q = _normalise(np.asarray(self.embedder.embed(query), dtype=np.float32))
-        if q.shape[0] != self._matrix.shape[1]:
-            return {}
         scores: dict[str, float] = {}
         for ref in refs:
-            index = self._row_index.get(ref)
-            if index is not None:
-                scores[ref] = float(self._matrix[index] @ q)
+            stored = self._backend.vector_for(ref)
+            if stored is None or stored.shape[0] != q.shape[0]:
+                continue
+            scores[ref] = float(stored @ q)
         return scores
 
     def search(self, query: str, *, limit: int = 10) -> list[RetrievalHit]:
-        if not self._rows or self._matrix.size == 0:
+        if not self._rows or self._backend is None:
             return []
         q = _normalise(np.asarray(self.embedder.embed(query), dtype=np.float32))
-        if q.shape[0] != self._matrix.shape[1]:
-            return []
-        scores = self._matrix @ q
-        order = np.argsort(-scores, kind="stable")
+        # The backend returns up to ``limit`` (ref, score) pairs already ordered by score desc,
+        # ref asc on ties. Apply the retriever's ``score > 0`` rule and materialise hits; because
+        # the backend order matches the historical stable argsort, the kept set is identical to the
+        # previous "argsort, break on first score <= 0, cap at limit" walk.
+        scored = self._backend.search(q, limit=limit)
+        rows_by_ref = {row.ref: row for row in self._rows}
         hits: list[RetrievalHit] = []
-        for index in order:
-            score = float(scores[index])
+        for ref, score in scored:
             if score <= 0:
-                break
-            row = self._rows[index]
+                continue
+            row = rows_by_ref.get(ref)
+            if row is None:
+                continue
             hits.append(
                 RetrievalHit(
                     ref=row.ref,
@@ -134,12 +155,10 @@ class VectorRetriever:
                     source="vector",
                 )
             )
-            if len(hits) >= limit:
-                break
         return hits
 
     def _reindex(self) -> None:
-        """Load rows, (re)embed only what changed, persist, build the search matrix.
+        """Load rows, (re)embed only what changed, persist, and sync the search backend.
 
         The persisted cache is keyed by the embedder's id. A lazy semantic embedder can *degrade*
         mid-reindex (its first ``embed_many`` here fails to load the model and falls back to
@@ -148,14 +167,21 @@ class VectorRetriever:
         post-degrade id — never under the original ``st:*`` key, which would poison the cache for a
         later run where the real model loads. We therefore re-read ``self.model_id`` *after*
         embedding and, if the backend changed, discard the lookup done under the stale key and
-        re-key the whole index to the backend that actually produced the vectors."""
+        re-key the whole index to the backend that actually produced the vectors.
+
+        The search index is synced **incrementally**: only re-embedded rows are upserted and only
+        vanished rows are deleted (no full matrix rebuild). The disk-resident sqlite-vec backend
+        persists across re-opens, so an unchanged corpus touches the index zero times; the in-memory
+        numpy fallback starts empty per instance, so it is fully populated once."""
         self._rows = self._rows_loader(self.store)
         if not self._rows:
-            self._matrix = np.empty((0, 0), dtype=np.float32)
-            self._row_index = {}
+            if self._backend is not None:
+                self._backend.clear()
             return
 
         table = self._vectors_table
+        # Refs persisted before this reindex — used to compute the set of vanished rows to prune
+        # from both the blob cache and the search index, mirroring ``prune_vectors``.
         # Key used for the *lookup*, captured before embedding can trigger a degrade.
         lookup_model_id = self.model_id
         cached = self.store.get_vectors(lookup_model_id, table=table)
@@ -205,15 +231,54 @@ class VectorRetriever:
                 upserts.append((ref, text_hash, int(arr.shape[0]), arr.tobytes()))
             self.store.upsert_vectors(persist_model_id, upserts, table=table)
 
-        self.store.prune_vectors(
-            persist_model_id, {row.ref for row in self._rows}, table=table
+        current_refs = {row.ref for row in self._rows}
+        persisted_refs = set(self.store.get_vectors(persist_model_id, table=table))
+        removed_refs = persisted_refs - current_refs
+        self.store.prune_vectors(persist_model_id, current_refs, table=table)
+
+        dim = int(next(iter(vectors.values())).shape[0])
+        self._sync_backend(
+            vectors=vectors,
+            changed_refs={ref for ref, _text, _h in to_embed},
+            removed_refs=removed_refs,
+            dim=dim,
+            model_id=persist_model_id,
         )
-        self._matrix = np.vstack([_normalise(vectors[row.ref]) for row in self._rows])
-        self._row_index = {row.ref: index for index, row in enumerate(self._rows)}
 
+    def _sync_backend(
+        self,
+        *,
+        vectors: dict[str, np.ndarray],
+        changed_refs: set[str],
+        removed_refs: set[str],
+        dim: int,
+        model_id: str,
+    ) -> None:
+        """Bring the search backend in step with ``vectors`` (the current normalised corpus).
 
-def _normalise(vector: np.ndarray) -> np.ndarray:
-    norm = float(np.linalg.norm(vector))
-    if norm <= 0:
-        return vector
-    return vector / norm
+        Constructs the backend on first call (now that ``dim`` is known): the disk-resident
+        sqlite-vec backend when available — pre-populated from the blob cache by the store — else
+        the in-memory numpy fallback. A fresh numpy backend is empty and must take every row; a
+        re-opened sqlite-vec backend already holds the unchanged rows, so it only needs the changed
+        ones upserted and the vanished ones deleted."""
+        if self._backend is None:
+            built: VectorSearchBackend | None = self.store.make_vector_backend(
+                model_id, dim=dim, table=self._vectors_table
+            )
+            self._backend = built if built is not None else NumpyMatrixBackend()
+
+        backend = self._backend
+        if isinstance(backend, NumpyMatrixBackend):
+            # In-memory, per-instance: nothing persists, so (re)populate the whole corpus. clear()
+            # first so a reload that dropped rows does not leave stale entries behind.
+            backend.clear()
+            for row in self._rows:
+                backend.upsert(row.ref, vectors[row.ref])
+            return
+
+        # Persistent backend (sqlite-vec): incremental. Upsert only re-embedded rows, delete only
+        # vanished ones — the store already backfilled the unchanged rows from the blob cache.
+        for ref in changed_refs:
+            backend.upsert(ref, vectors[ref])
+        for ref in removed_refs:
+            backend.delete(ref)
