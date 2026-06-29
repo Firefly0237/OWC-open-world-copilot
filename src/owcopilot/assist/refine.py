@@ -16,11 +16,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from pydantic import BaseModel
 
+from .calibration import primary_failing_dimension
 from .critic import CritiqueResult
+
+if TYPE_CHECKING:
+    from ..llm.gateway import LLMGateway
 
 T = TypeVar("T")
 
@@ -38,6 +42,9 @@ class RefineStep(BaseModel):
     # The verbal self-reflection distilled from this round's critique (Reflexion memory). Carried
     # forward into every later attempt so the generator learns from the whole history.
     reflection: str = ""
+    # IN-B1 M2: primary failing dimension from this round's CritiqueResult.
+    # "general" when parse_ok=False or no dimensions. Used by calibration to track per-dim lessons.
+    primary_dim: str = "general"
 
 
 @dataclass
@@ -53,6 +60,7 @@ def run_refine_loop(
     max_rounds: int,
     assess: Callable[[T], tuple[list[str], CritiqueResult]],
     regenerate: Callable[[T, list[str]], T],
+    evaluator_gateway: LLMGateway | None = None,  # accepted for API symmetry; used by callers
 ) -> RefineOutcome[T]:
     """Drive the loop. ``assess(artifact) -> (deterministic_gaps, critique)`` is the objective +
     subjective read; ``regenerate(artifact, fixes) -> artifact`` produces an improved version.
@@ -83,6 +91,7 @@ def run_refine_loop(
                 fixes=fixes,
                 summary=critique.summary,
                 reflection=reflection,
+                primary_dim=primary_failing_dimension(critique),  # IN-B1 M2
             )
         )
         if critique.parse_ok and critique.verdict == "pass" and not gaps:

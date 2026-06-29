@@ -113,7 +113,10 @@ def run_golden_evaluation(workspace: str | Path) -> GoldenEvaluationReport:
             details={"refs": pack.refs},
         ),
         GoldenCheck(
-            name="qa_grounded",
+            # Named to match the acceptance gate `qa_citation_existence_or_refuse`: this asserts
+            # only citation *existence* (answered with citations, or refused) — not entailment of
+            # the claim by those citations. Same scope, same name, no over-claim of fact-checking.
+            name="qa_citation_existence_or_refuse",
             passed=(not answer.refused and bool(answer.citations)),
             details=answer.model_dump(mode="json"),
         ),

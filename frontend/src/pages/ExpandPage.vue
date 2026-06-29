@@ -349,7 +349,7 @@ async function run(): Promise<void> {
       </template>
 
       <p v-if="result.trail.length" class="muted refs">
-        自评精修：{{ result.trail.map((r) => `${r.verdict}(缺口${r.gap_count})`).join(" → ") }}
+        自评精修：{{ result.trail.map((r) => `${r.verdict === "pass" ? "通过" : "需精修"}(缺口${r.gap_count})`).join(" → ") }}
       </p>
       <p class="muted">新内容已入审阅台，采纳后并入既有世界。</p>
     </div>
@@ -402,7 +402,7 @@ textarea,
 select {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.5rem 0.65rem;
   font: inherit;
@@ -435,7 +435,7 @@ textarea:focus {
 button.primary {
   background: linear-gradient(180deg, #f0d28a 0%, #b9924a 100%);
   border: 1px solid rgba(240, 210, 138, 0.65);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: #241a05;
   font-weight: 600;
   padding: 0.6rem 1rem;
@@ -503,7 +503,11 @@ button.primary:disabled {
 .chip.static {
   border: 1px solid var(--ow-line);
   background: rgba(16, 22, 48, 0.6);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   color: var(--ow-muted);
   font-size: 0.8rem;
   padding: 0.22rem 0.7rem;

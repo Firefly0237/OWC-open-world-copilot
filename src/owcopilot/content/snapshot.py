@@ -15,8 +15,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from ..trust.security import resolve_under_root
 from .hash import content_hash
 from .models import ContentBundle
+from .normalize import _FORBIDDEN_ID_CHARS, _validate_id_chars
 from .store import ContentStore
 
 _SNAP_DIR = ".snapshots"
@@ -77,6 +79,9 @@ def write_snapshot(store: ContentStore, *, label: str = "") -> SnapshotMeta:
     )
     payload = {**meta.model_dump(mode="json"), "bundle": bundle.model_dump(mode="json")}
     path = store.root / _SNAP_DIR / f"{snap_id}.json"
+    # `snap_id` is an internal timestamp, but assert the final path stays under the store root
+    # anyway (same shared canon helper as the store write boundary — defense-in-depth).
+    resolve_under_root(store.root, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return meta
@@ -97,7 +102,19 @@ def list_snapshots(store: ContentStore) -> list[SnapshotMeta]:
 
 
 def load_snapshot(store: ContentStore, snapshot_id: str) -> ContentBundle | None:
-    path = store.root / _SNAP_DIR / f"{snapshot_id}.json"
+    # ``snapshot_id`` is externally controlled (GET /diff?from=, POST /snapshots:restore).
+    # Validate it with the SAME id-invariant the store write boundary uses so a crafted id
+    # like ``../../secret`` or ``C:/Windows/foo`` cannot escape ``<root>/.snapshots`` when
+    # it is interpolated into ``{id}.json``. Internally generated ids (write_snapshot's
+    # timestamp) always pass; only attacker-supplied ids are rejected.
+    safe_id = _validate_id_chars(
+        snapshot_id, context="snapshot_id (load_snapshot)", forbidden=_FORBIDDEN_ID_CHARS
+    )
+    path = store.root / _SNAP_DIR / f"{safe_id}.json"
+    # Second layer: a container assertion over the final interpolated path, via the same shared
+    # canon helper. `_validate_id_chars` above already rejects traversal ids with a guided error;
+    # this is the defense-in-depth backstop (PathSecurityError is a ValueError subclass).
+    resolve_under_root(store.root, path)
     if not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))

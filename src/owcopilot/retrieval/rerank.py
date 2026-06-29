@@ -1,22 +1,30 @@
-"""Deterministic relevance reranking -- the precision half of two-stage retrieval.
+"""Field-weighted lexical re-scoring -- the precision half of two-stage retrieval.
 
-Recall (BM25 + vector + graph expansion, fused by reciprocal-rank fusion) casts a wide
-net, but RRF collapses every candidate down to its *rank* in each list and throws away
-how strongly it actually matched the query. Graph expansion makes this worse: it pulls in
-every 1-2 hop neighbour of a seed entity at a fixed score, flooding the candidate set with
-documents that share no query terms at all. The most on-topic document can therefore sit
-below a cluster of weakly-related neighbours, and -- once the token budget is applied --
-fall out of the context pack entirely.
+This module implements **LexicalReScorer**: a deterministic, field-weighted lexical
+re-scoring stage placed after multi-retriever recall (BM25 + vector + graph expansion,
+fused by reciprocal-rank fusion).
 
-This stage re-scores the *fused* candidates against the query with a deterministic,
-field-weighted relevance estimate, so the documents that genuinely answer the question
-rise to the top before the budget is spent. It is the offline, reproducible analogue of
-the cross-encoder rerankers that production RAG stacks (Cohere Rerank, ColBERT) place
-after first-stage recall.
+**What this is**: a lexical re-scorer that combines explicit signals -- term coverage,
+field-weighted density, exact-phrase bonus, recall prior, and (when available) cosine
+similarity from a real embedding model. There is no learned weight and no neural
+cross-attention. The ordering is golden-testable and matches the project's
+deterministic-and-auditable north star.
 
-The estimate combines explainable signals -- there is no learned weight and no hidden state
-in the lexical part, so the ordering is golden-testable and matches the project's
-deterministic-and-auditable north star:
+**What this is NOT**: this is NOT a neural cross-encoder. A true cross-encoder (e.g.
+bge-reranker-v2-m3, sentence-transformers CrossEncoder) encodes query and document
+*jointly* via cross-attention, computing interaction scores that capture semantic
+entailment and paraphrase relationships invisible to any lexical scorer. For the neural
+cross-encoder path see ``retrieval/neural_rerank.py`` (opt-in via
+``OWCOPILOT_RERANKER=auto`` when model is cached locally).
+
+**Why lexical re-scoring still matters**: RRF collapses every candidate down to its
+*rank* and discards match strength. Graph expansion floods the candidate set with 1-2 hop
+neighbours that share no query terms. The lexical re-scorer restores field-signal
+(title hit >> body hit) and exact-phrase bonuses, so the most on-topic document rises
+before the token budget is spent. The semantic leg (cosine from bge-m3) is added when
+real embeddings are available, making the scorer hybrid rather than purely lexical.
+
+The signals combined:
 
 * breadth  -- the fraction of distinct query terms the document covers,
 * depth    -- a field-weighted, specificity-weighted (longer term = more informative)
@@ -26,12 +34,12 @@ deterministic-and-auditable north star:
               breaks ties without ever overriding a clearly more on-topic document,
 * semantic -- (only when real embeddings are available) the cosine similarity of the
               query to the document, so a paraphrase or synonym that shares *no* words with
-              the canon still ranks. Without this signal a purely lexical reranker would
+              the canon still ranks. Without this signal a purely lexical re-scorer would
               demote exactly the semantic hits the dense retriever worked to surface --
-              so the reranker is hybrid whenever the vector leg is semantic, and degrades
+              so the re-scorer is hybrid whenever the vector leg is semantic, and degrades
               to lexical-only (deterministic) when it is the hashing stub.
 
-Reranking never invents, drops, or rewrites candidates: it only reorders the fused list.
+Re-scoring never invents, drops, or rewrites candidates: it only reorders the fused list.
 A query with no usable terms (punctuation/emoji only) leaves the recall order untouched.
 """
 
@@ -43,6 +51,38 @@ from .models import RetrievalHit
 from .text_match import query_terms
 
 _WS_RE = re.compile(r"\s+")
+
+# ---------------------------------------------------------------------------
+# Public alias: LexicalReScorer
+# The callable below (rerank_hits) is the implementation.  The class name
+# exists so that call-sites and documentation can use the honest name without
+# importing a different symbol.
+# ---------------------------------------------------------------------------
+
+
+class LexicalReScorer:
+    """Field-weighted lexical re-scorer for fused retrieval candidates.
+
+    This is the deterministic, lexical re-scoring stage of the two-stage
+    retrieval pipeline.  It is **not** a neural cross-encoder: it does not
+    perform joint query–document attention.  For the neural path see
+    ``retrieval/neural_rerank.py``.
+
+    Usage::
+
+        scorer = LexicalReScorer()
+        ranked = scorer.rerank(query, hits, semantic_scores=scores)
+    """
+
+    def rerank(
+        self,
+        query: str,
+        hits: list[RetrievalHit],
+        *,
+        semantic_scores: dict[str, float] | None = None,
+    ) -> list[RetrievalHit]:
+        """Re-score and reorder ``hits`` by field-weighted lexical relevance."""
+        return rerank_hits(query, hits, semantic_scores=semantic_scores)
 
 # Field weights: a query term landing in the title is a far stronger relevance signal than
 # the same term buried in the body; the ref (which embeds the object id) is the weakest.
@@ -66,11 +106,16 @@ def rerank_hits(
     *,
     semantic_scores: dict[str, float] | None = None,
 ) -> list[RetrievalHit]:
-    """Reorder fused ``hits`` by query relevance (highest first).
+    """Re-score fused ``hits`` by field-weighted lexical relevance (highest first).
+
+    This is a **lexical re-scoring** function, not a neural cross-encoder.  It uses
+    term coverage, field-weighted density, exact-phrase bonuses, and (optionally) cosine
+    similarity from a real embedding model.  For neural cross-encoder re-ranking see
+    ``retrieval/neural_rerank.py`` (``NeuralReranker``).
 
     ``semantic_scores`` maps ref -> cosine(query, doc) from a real embedding model; when
     given, semantic similarity becomes a first-class signal so paraphrase hits are not
-    demoted. When ``None`` (the hashing stub / tests) reranking is purely lexical and
+    demoted. When ``None`` (the hashing stub / tests) re-scoring is purely lexical and
     deterministic. Returns a new list; the input is not mutated. Each returned hit carries
     its relevance in ``score`` and ``source="reranked"``. A query with no usable terms and
     no semantic scores leaves the recall order untouched."""

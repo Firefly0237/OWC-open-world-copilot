@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { useRouter } from "vue-router";
+
+const router = useRouter();
 
 interface Feature {
   name: string;
@@ -53,7 +56,7 @@ const STEPS: Step[] = [
   {
     selector: '[data-tour="校勘 · 分析"]',
     title: "校勘 · 分析",
-    body: "改动前看清涟漪，改动后跑确定性审查。",
+    body: "改动前看清涟漪，改动后用规则引擎检查一致性。",
     features: [
       { name: "校勘修复", desc: "审查一致性，给出可回滚的修复。" },
       { name: "影响分析", desc: "预演一处改动会牵连哪些设定。" },
@@ -84,8 +87,8 @@ const STEPS: Step[] = [
   {
     title: "开始吧",
     body:
-      "建议先到「设置」接入模型，再到「工作区」建一个世界。每个页面标题旁的「?」可看本页详细说明，" +
-      "左下角「新手引导」随时重开本向导。",
+      "建议先到「设置」填入 AI 服务的账号凭证（API Key），这样才能用生成功能。如果暂时没有，也可以先到「工作区」建一个世界，导入已有素材、使用一致性检查等功能不需要接入模型。" +
+      "每个页面标题旁的「?」可看本页详细说明，左下角「新手引导」随时重开本向导。",
   },
 ];
 
@@ -169,6 +172,11 @@ function finish(): void {
   emit("close");
 }
 
+function goSettings(): void {
+  finish();
+  void router.push("/settings");
+}
+
 function onKey(e: KeyboardEvent): void {
   if (!props.open) return;
   if (e.key === "Escape") finish();
@@ -225,6 +233,7 @@ watch(
           <button class="ghost" @click="finish">跳过</button>
           <span class="spacer"></span>
           <button v-if="index > 0" class="ghost" @click="prev">上一步</button>
+          <button v-if="isLast" class="settings-link" @click="goSettings">去设置</button>
           <button class="primary" @click="next">{{ isLast ? "完成" : "下一步" }}</button>
         </div>
       </div>
@@ -377,7 +386,7 @@ watch(
 }
 
 button {
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   cursor: pointer;
   font: inherit;
   font-size: 0.83rem;
@@ -401,6 +410,16 @@ button.primary {
   border-color: rgba(240, 210, 138, 0.65);
   color: #241a05;
   font-weight: 600;
+}
+
+button.settings-link {
+  border-color: var(--ow-gold-soft);
+  color: var(--ow-gold-bright);
+  background: var(--ow-gold-faint);
+}
+
+button.settings-link:hover {
+  box-shadow: 0 0 10px rgba(240, 210, 138, 0.25);
 }
 
 .tour-fade-enter-active,

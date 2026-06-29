@@ -168,7 +168,7 @@ async function commit(): Promise<void> {
 }
 
 button {
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   cursor: pointer;
   font: inherit;
   font-size: 0.86rem;
@@ -216,7 +216,11 @@ button:disabled {
 
 .chip {
   border: 1px solid var(--ow-line);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   background: rgba(16, 22, 48, 0.6);
   color: var(--ow-muted);
   font-size: 0.78rem;
@@ -266,7 +270,11 @@ button:disabled {
 
 .sev {
   font-size: 0.72rem;
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   padding: 0.06rem 0.5rem;
   border: 1px solid rgba(224, 133, 133, 0.45);
   color: #e89a9a;
@@ -284,7 +292,7 @@ button:disabled {
   gap: 0.6rem;
   align-items: baseline;
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   background: var(--ow-panel-2);
   padding: 0.4rem 0.7rem;
   font-size: 0.83rem;

@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
+from ..trust.security import resolve_under_root
 from .models import (
     POI,
     ContentBundle,
@@ -26,6 +27,7 @@ from .models import (
     StyleGuide,
     Term,
 )
+from .normalize import _FORBIDDEN_ID_CHARS, _validate_id_chars
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -129,13 +131,35 @@ class ContentStore:
         return []
 
     def _write_json_dir(self, path: Path, objects: dict[str, ModelT]) -> None:
+        # Write-boundary id invariant (the last line of defense). Every object_id here becomes
+        # a `{object_id}.json` filename, so a traversal / separator / control-char id could
+        # escape the content directory. The normalize ingest path already enforces this via
+        # `_resolve_id`, but other ingest paths (recognize → human review → store.save) bypass
+        # normalize entirely. Validating at the write boundary with the SAME shared invariant
+        # (`_validate_id_chars`, imported from normalize — not a copy) means *every* path that
+        # produces a `{id}.json` file shares one guarantee, instead of each remembering to call
+        # normalize. jsonl / aggregate writers (relations, quest_event_refs, terms, style_guides)
+        # do NOT pass through here, so the quest_event_ref synthetic colon id stays legal.
+        for object_id in objects:
+            _validate_id_chars(
+                object_id,
+                context=f"content store write to {path}",
+                forbidden=_FORBIDDEN_ID_CHARS,
+            )
         path.mkdir(parents=True, exist_ok=True)
         expected = {f"{object_id}.json" for object_id in objects}
         for existing in path.glob("*.json"):
             if existing.name not in expected:
                 existing.unlink()
         for object_id, model in sorted(objects.items()):
-            self._write_json(path / f"{object_id}.json", model)
+            target = path / f"{object_id}.json"
+            # Second layer: assert the FINAL path stays inside the content root using the same
+            # canon container helper the rest of the codebase uses (resolve_under_root), instead
+            # of a second hand-rolled resolve. PathSecurityError is a ValueError subclass, so the
+            # CLI's guided-error boundary still formats it. `_validate_id_chars` above already
+            # rejected traversal/separator ids; this is defense-in-depth over the real filename.
+            resolve_under_root(self.root, target)
+            self._write_json(target, model)
 
     def _write_relations(self, relations: list[Relation]) -> None:
         path = self.root / "world" / "relations.jsonl"

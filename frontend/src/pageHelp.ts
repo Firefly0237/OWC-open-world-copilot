@@ -81,7 +81,7 @@ export const PAGE_HELP: Record<string, PageHelp> = {
   "/timeline": {
     title: "时间线",
     tips: [
-      "任务与事件按 timeline_order 排到一条轴上，编年违例标红。",
+      "任务与事件按时间顺序排到一条轴上，编年违例标红。",
       "点星钻开右侧面板改顺序 / 标题 / 前置，也可横向拖动定序。",
       "切「纪元轮盘」换同心环视图；用下方控件缩放、拖动、放大全屏。",
     ],

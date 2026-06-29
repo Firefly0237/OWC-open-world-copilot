@@ -321,14 +321,14 @@ async function remove(): Promise<void> {
   min-width: 12rem;
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.45rem 0.7rem;
 }
 .sel {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.45rem 0.6rem;
   font: inherit;
@@ -372,7 +372,11 @@ td {
 }
 .type-chip {
   border: 1px solid var(--ow-line);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   padding: 0.06rem 0.5rem;
   font-size: 0.76rem;
   color: var(--ow-cyan);
@@ -404,7 +408,11 @@ td {
 }
 .d-tag {
   border: 1px solid var(--ow-gold-soft);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   color: var(--ow-gold-bright);
   font-size: 0.72rem;
   padding: 0.08rem 0.5rem;
@@ -422,7 +430,7 @@ td {
 .f textarea {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.5rem 0.65rem;
   font: inherit;
@@ -459,7 +467,7 @@ td {
   align-items: baseline;
   gap: 0.55rem;
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   background: var(--ow-panel-2);
   padding: 0.35rem 0.6rem;
   font-size: 0.82rem;
@@ -467,7 +475,11 @@ td {
 .asset-kind {
   color: var(--ow-cyan);
   border: 1px solid var(--ow-line);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   padding: 0.02rem 0.45rem;
   font-size: 0.72rem;
 }
@@ -503,7 +515,7 @@ td {
   min-width: 8rem;
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.4rem 0.6rem;
   font: inherit;
@@ -516,7 +528,7 @@ td {
   align-self: flex-start;
   background: transparent;
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-muted);
   font: inherit;
   font-size: 0.78rem;
@@ -533,7 +545,7 @@ td {
   overflow: auto;
   background: var(--ow-night-deep);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   padding: 0.6rem 0.7rem;
   font-family: ui-monospace, Consolas, monospace;
   font-size: 0.74rem;
@@ -544,7 +556,7 @@ td {
 button {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.45rem 0.9rem;
   cursor: pointer;

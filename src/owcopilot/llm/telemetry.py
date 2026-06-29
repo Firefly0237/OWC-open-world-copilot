@@ -69,6 +69,19 @@ class CallRecord:
     cached_input_tokens: int = 0  # provider/server-side prefix-cache hit tokens (subset of input)
     cache_hit: bool = False  # CLIENT-side (L1/L2) short-circuit: no provider call happened
     latency_ms: float = 0.0
+    # The *real* model id behind `tier` (e.g. "deepseek-v4-pro"), resolved by the gateway from
+    # the chosen provider. Falls back to the tier label for providers that expose no `model`
+    # attribute (the offline fakes). Consumers (OTEL gen_ai.request.model) read it from here so
+    # the model dimension is honest rather than carrying an internal task/tier label.
+    # This is the model we *requested* (the provider's configured id, resolved before the call).
+    model: str = ""
+    # The model id reported by the API *response body* (the model that actually ANSWERED), as
+    # opposed to `model` above (what we requested). The two diverge precisely on a failover: the
+    # request side stays the primary, while the response side carries the secondary that handled
+    # the call. Consumers (OTEL gen_ai.response.model) read it — and set the span attribute ONLY
+    # when it is non-empty, so an offline fake (which can't report it) leaves response.model unset
+    # rather than echoing a request-side guess.
+    response_model: str = ""
 
     @property
     def cost_usd(self) -> float:
@@ -84,6 +97,25 @@ class TelemetryCollector:
 
     def record(self, rec: CallRecord) -> None:
         self.records.append(rec)
+
+    def records_since(self, snapshot_idx: int) -> list[CallRecord]:
+        """Return records appended after position snapshot_idx.
+
+        Typical usage::
+
+            snap = len(gateway.telemetry.records)   # before step
+            ... run skill ...
+            step_records = gateway.telemetry.records_since(snap)
+            latency_ms = sum(r.latency_ms for r in step_records)
+            cost_usd   = sum(r.cost_usd   for r in step_records)
+
+        Raises IndexError when snapshot_idx is outside [0, len(records)].
+        """
+        if snapshot_idx < 0 or snapshot_idx > len(self.records):
+            raise IndexError(
+                f"snapshot_idx {snapshot_idx} out of range [0, {len(self.records)}]"
+            )
+        return self.records[snapshot_idx:]
 
     @property
     def total_cost(self) -> float:

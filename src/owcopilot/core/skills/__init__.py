@@ -39,6 +39,18 @@ class SkillError(ValueError):
     the model as an observation so it can self-correct (e.g. supply a missing argument)."""
 
 
+# Map our compact parameter type names to JSON-schema types for the OpenAI tools serialization.
+# Unknown types fall back to "string" (the safest permissive default).
+_JSON_SCHEMA_TYPES: dict[str, str] = {
+    "string": "string",
+    "integer": "integer",
+    "boolean": "boolean",
+    "array": "array",
+    "object": "object",
+    "number": "number",
+}
+
+
 @dataclass(frozen=True)
 class SkillParameter:
     """One model-facing argument. Bound session arguments (content_root, sqlite_path) are NOT
@@ -67,6 +79,15 @@ class Skill:
         Only declared parameters are forwarded: a model that hallucinates an extra argument (or
         re-supplies a session argument like ``content_root``) can't crash the bound handler.
         """
+        # Item 7: WRITES_CANON guard — canon writes require human review and must never be
+        # auto-invoked by an agent.  Turning this design constraint into a code contract means
+        # any future skill mis-classified as WRITES_CANON fails loudly at first call rather than
+        # silently writing approved content without a human in the loop.
+        if self.side_effect is SideEffect.WRITES_CANON:
+            raise SkillError(
+                f"skill '{self.name}' has side_effect=WRITES_CANON and cannot be "
+                "auto-invoked by the agent. Canon writes require human review."
+            )
         missing = [p.name for p in self.parameters if p.required and p.name not in args]
         if missing:
             raise SkillError(
@@ -87,6 +108,35 @@ class Skill:
             f"- {self.signature()}: {self.description} "
             f"[{self.cost_tier.value}; {self.side_effect.value}]"
         )
+
+    def openai_tool_schema(self) -> dict[str, Any]:
+        """Render this skill as one OpenAI ``tools`` entry (function-calling schema).
+
+        Used by the agent's opt-in native tool-calling path: the model receives this JSON schema
+        and replies with structured ``tool_calls`` instead of the text ``Action:``/``Action Input:``
+        format. Session-bound arguments (content_root, sqlite_path) are intentionally absent — same
+        as the text manifest — because the registry injects them. Mirrors :meth:`run`'s validation
+        surface so the two paths accept the same arguments.
+        """
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+        for p in self.parameters:
+            properties[p.name] = {"type": _JSON_SCHEMA_TYPES.get(p.type, "string")}
+            if p.description:
+                properties[p.name]["description"] = p.description
+            if p.required:
+                required.append(p.name)
+        parameters: dict[str, Any] = {"type": "object", "properties": properties}
+        if required:
+            parameters["required"] = required
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": parameters,
+            },
+        }
 
 
 @dataclass
@@ -123,9 +173,30 @@ class SkillRegistry:
         """Dispatch by name. Raises :class:`SkillError` for an unknown name or bad arguments."""
         return self.get(name).run(args)
 
-    def manifest(self) -> str:
-        """Render every skill as a manifest block for an agent's system prompt."""
-        return "\n".join(skill.manifest_line() for skill in self)
+    def manifest(self, allowed: set[str] | None = None) -> str:
+        """Render every skill as a manifest block for an agent's system prompt.
+
+        allowed=None (default): render ALL registered skills (backward-compatible).
+        allowed=set[str]: render only skills whose name is in the set.
+        Unknown names in allowed are silently ignored (the skill simply won't appear).
+        """
+        if allowed is None:
+            skills: list[Skill] = list(self._skills.values())
+        else:
+            skills = [s for s in self._skills.values() if s.name in allowed]
+        return "\n".join(skill.manifest_line() for skill in skills)
+
+    def openai_tools(self, allowed: set[str] | None = None) -> list[dict[str, Any]]:
+        """Render the skills as an OpenAI ``tools`` schema list (native function-calling).
+
+        Honours the same ``allowed`` filter as :meth:`manifest`, so the native-tools path exposes
+        exactly the same tool surface as the text path.
+        """
+        if allowed is None:
+            skills: list[Skill] = list(self._skills.values())
+        else:
+            skills = [s for s in self._skills.values() if s.name in allowed]
+        return [skill.openai_tool_schema() for skill in skills]
 
 
 from .builtin import default_skill_registry  # noqa: E402  re-exported after the abstraction

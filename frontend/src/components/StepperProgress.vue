@@ -84,7 +84,11 @@ const flavor = computed(() => {
   font-size: 0.84rem;
   color: var(--ow-muted);
   border: 1px solid var(--ow-line);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   padding: 0.18rem 0.7rem;
   transition: color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, background 0.3s ease;
 }

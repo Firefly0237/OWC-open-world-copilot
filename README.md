@@ -89,6 +89,16 @@ made.
 | 📦 **Data + localization delivery** | The world as a checksummed `content_bundle.json` (universal handoff any importer reads) + localization as **CSV and XLIFF 1.2** (the CAT/TMS standard; UI char-caps carried as `maxwidth`). Every artifact in a `sha256` manifest. **Engine import** back-syncs quest rows edited engine-side into the review queue. (Per-engine *code* generation was dropped: engine schemas differ project to project, so there is no portable one-click paradigm — the value is clean data + the standard localization format.) |
 | 💰 **Cost engineering** | Every model call goes through one gateway: two-tier cache, cascade routing, output caps, per-action cost readout and budget guards. Offline default is **$0**. |
 
+## 叙事策划怎么开始
+
+OWCopilot 需要在电脑上运行一个小程序才能使用。如果你不熟悉命令行，找团队里的程序员或技术支持，把下面"Quick start"里的命令在你的电脑上跑一次（大约 5 分钟），之后每次打开浏览器访问 `http://localhost:8000` 就可以直接用了。
+
+**你需要让程序员帮你做的事（一次性）：** 安装 Python、克隆代码、启动服务。之后你就可以独立用浏览器操作——建世界、导入素材、检查一致性、导出设定集——都在网页里完成，不需要再碰命令行。
+
+**需要 AI 生成功能时：** 还需要在「设置」页填入一个 AI 服务的账号凭证（API Key）。具体去哪注册、大概要花多少钱，设置页面里有每个服务商的直链引导，第一次设置时可以参考。
+
+> 诚实说明：命令行安装是目前的结构性门槛，上面的文字只能降低误解，不能消除门槛本身。真正的"打开就用"体验（一键安装包或托管版）属于更大工程，目前还没有——请知悉。
+
 ## Quick start
 
 ```bash
@@ -102,10 +112,11 @@ python -m venv .venv && .venv/Scripts/pip install -e ".[dev,serve]"   # Windows
 .venv/Scripts/python -m owcopilot.cli.main eval-acceptance --workspace .tmp/demo
 ```
 
-`eval-acceptance` builds a 65-entity / 10-region / 36-quest bilingual world and verifies five gates
+`eval-acceptance` builds a 65-entity / 10-region / 36-quest bilingual world and verifies seven gates
 (zero false positives on a clean world, 25/25 seeded errors caught, 100% impact recall, 30/30
-retrieval hits, grounded-or-refuse Q&A). It needs no API key — the offline deterministic doubles
-keep the whole thing **$0**.
+retrieval hits, a tighter-budget rerank retrieval gate, citation-existence-or-refuse Q&A, and
+tool-selection accuracy). It needs no API key — the offline deterministic doubles keep the whole
+thing **$0**.
 
 ### Launch the workbench
 
@@ -147,10 +158,6 @@ You can browse, review, and export with no model connected at all.
   delivery: data bundle · localization files · engine feedback loop
 ```
 
-**Tech stack:** Python 3.11+, FastAPI, Pydantic v2, NetworkX, SQLite (WAL); Vue 3 + Vite + TypeScript
-(zero graph-viz dependencies — the visual views are hand-rolled, deterministic SVG); OpenAI-compatible
-LLM gateway. Offline deterministic doubles make the entire test suite run at **$0**.
-
 ## Surfaces
 
 - **Web workbench** — the main path; one process, Vue served by FastAPI.
@@ -160,6 +167,12 @@ LLM gateway. Offline deterministic doubles make the entire test suite run at **$
   paid `llm_mode=real` calls (fail-closed for non-local clients).
 - **MCP server** — a guarded tool surface for the agent ecosystem: diagnose, retrieve, propose, and
   check delivery without exposing direct canon writes.
+
+## For developers
+
+**Tech stack:** Python 3.11+, FastAPI, Pydantic v2, NetworkX, SQLite (WAL); Vue 3 + Vite + TypeScript
+(zero graph-viz dependencies — the visual views are hand-rolled, deterministic SVG); OpenAI-compatible
+LLM gateway. Offline deterministic doubles make the entire test suite run at **$0**.
 
 ## License
 

@@ -26,6 +26,7 @@ from ..retrieval.models import ContextPack
 from .critic import CritiqueResult, QuestCritic
 from .industry import QUEST_RUBRIC_SOURCES, industry_source_block
 from .refine import summarize_reflection, with_reflection_memory
+from .term_injection import build_term_block
 
 
 class RefineRound(BaseModel):
@@ -65,6 +66,7 @@ class QuestDraftService:
         bundle: ContentBundle,
         critic: QuestCritic | None = None,
         max_refine_rounds: int = 0,
+        lessons: list[dict] | None = None,  # IN-3 BE-1: cross-session lesson archive
     ) -> None:
         self.gateway = gateway
         self.context_builder = context_builder
@@ -73,6 +75,9 @@ class QuestDraftService:
         # The loop is opt-in: without a critic the service is the original single-shot draft.
         self.critic = critic
         self.max_refine_rounds = max_refine_rounds if critic is not None else 0
+        # IN-3 BE-1: lessons fetched from the lesson archive (get_lessons_for_type) by the caller
+        # and injected here so _generate can include them in the system prompt.
+        self.lessons = lessons
 
     def draft_quest(self, brief: str, *, budget_tokens: int = 800) -> DraftResult:
         pack = self.context_builder.build(brief, budget_tokens=budget_tokens)
@@ -188,7 +193,12 @@ class QuestDraftService:
         prior: Quest | None = None,
         feedback: list[str] | None = None,
     ) -> Quest:
-        system = _system_prompt(pack, brief=brief)
+        # IN-3 BE-1: inject lessons from the cross-session archive when available.
+        # inject_lessons=True is the explicit activation; self.lessons is None when
+        # no lessons have been fetched (e.g. first run, empty archive).
+        system = _system_prompt(
+            pack, brief=brief, lessons=self.lessons, inject_lessons=self.lessons is not None
+        )
         user = _draft_user_message(brief, prior=prior, feedback=feedback)
         raw = self.gateway.complete(task="quest_draft", system=system, user=user)
         try:
@@ -409,20 +419,38 @@ def _normalize_stage(stage: dict, index: int) -> dict:
     return normalized
 
 
-def _system_prompt(pack: ContextPack, *, brief: str = "") -> str:
+def _system_prompt(
+    pack: ContextPack,
+    *,
+    brief: str = "",
+    terms: list | None = None,
+    inject_terms: bool = True,
+    lessons: list | None = None,
+    inject_lessons: bool = True,
+) -> str:
     context_lines = [f"- [{hit.ref}] {hit.title}: {hit.body}".strip() for hit in pack.hits]
     # Keep the output in the brief's language — the (English) quality bar below was drifting the
     # model to English on Chinese briefs; the directive pins player-facing text back to the source.
     lang = language_directive(detect_language(brief)) if brief.strip() else ""
     lang_line = f"{lang}\n" if lang else ""
-    return (
-        "Draft one structured Quest as JSON using only the provided content context. "
-        "Return keys compatible with owcopilot.content.models.Quest: id, title, giver_npc, "
-        "location, objective, prerequisites, timeline_order, localization_keys, dialogue_refs, "
-        "stages, rewards, tags, metadata. Use entity ids, not display names, for references. "
-        "The draft is not approved content; it will enter human review.\n\n"
-        + industry_source_block(*QUEST_RUBRIC_SOURCES)
-        + "\n"
+
+    # Vocabulary constraints block (IN-1): injected after quality bar and lesson block so those
+    # take higher recency priority (BE-3). Empty when inject_terms=False or no terms.
+    term_block = build_term_block(
+        list(terms) if terms else [],
+        context_hits=[hit.ref for hit in pack.hits],
+        inject_terms=inject_terms,
+    )
+    term_section = f"{term_block}\n\n" if term_block else ""
+
+    # Lesson memory block (IN-3): injected after quality bar, before term block (BE-3).
+    lesson_section = ""
+    if inject_lessons and lessons:
+        from .lessons import build_lesson_block
+        lb = build_lesson_block(lessons, inject_lessons=inject_lessons)
+        lesson_section = f"{lb}\n\n" if lb else ""
+
+    quality_bar = (
         # Quality bar (from the 二游剧情 rubric): a quest is a small drama, not a checklist. Thin,
         # abstract stages ("learn the history", "make a choice") are the #1 failure mode to avoid.
         "QUALITY BAR — write stages as a small drama, not a to-do list:\n"
@@ -438,6 +466,19 @@ def _system_prompt(pack: ContextPack, *, brief: str = "") -> str:
         "world's tone; use concrete imagery, not abstract sentiment.\n"
         "5. No filler — every stage must advance stakes or reveal something. Stay grounded: only "
         "reference entity ids that appear in the context below.\n"
-        f"{lang_line}\n"
-        "Content context:\n" + "\n".join(context_lines)
+    )
+    return (
+        "Draft one structured Quest as JSON using only the provided content context. "
+        "Return keys compatible with owcopilot.content.models.Quest: id, title, giver_npc, "
+        "location, objective, prerequisites, timeline_order, localization_keys, dialogue_refs, "
+        "stages, rewards, tags, metadata. Use entity ids, not display names, for references. "
+        "The draft is not approved content; it will enter human review.\n\n"
+        + industry_source_block(*QUEST_RUBRIC_SOURCES)
+        + "\n"
+        + quality_bar        # BE-3: quality_bar first (highest priority, furthest from user msg)
+        + lesson_section     # BE-3: lesson after quality_bar (recency-closer, recent context)
+        + term_section       # BE-3: term constraints closest to content context
+        + f"{lang_line}\n"
+        + "Content context:\n"
+        + "\n".join(context_lines)
     )

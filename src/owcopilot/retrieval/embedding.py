@@ -2,9 +2,11 @@
 
 The retrieval stack runs against the ``Embedder`` protocol (``llm.cache``). Two backends:
 
-* ``HashingEmbedder`` -- deterministic, dependency-free bag-of-words hash. The test/offline
-  baseline; it carries no semantic signal and (by design) drops CJK, so it only exists to keep
-  the suite $0 and golden-testable.
+* ``HashingEmbedder`` -- deterministic, dependency-free bag-of-characters/words hash. The
+  test/offline baseline; it carries no deep semantic signal but is CJK-aware (char + char-bigram
+  tokenization), so Chinese/Japanese/Korean paraphrases with high character overlap do hit L2.
+  Exists to keep the suite $0 and golden-testable, and to give L2 a useful baseline for CJK even
+  without the ``[semantic]`` extras installed.
 * ``SemanticEmbedder`` -- a real multilingual sentence embedding model (default BAAI/bge-m3)
   run locally via sentence-transformers. This is the production path: it makes the "vector"
   leg of the hybrid retriever actually semantic, so paraphrases and synonyms that share no
@@ -17,6 +19,31 @@ is downloaded (first run, needs network once) and loaded lazily on the first emb
 fails (e.g. offline on the very first run), the semantic embedder degrades to the hashing stub
 with a one-time warning instead of crashing retrieval. The choice is overridable by env so CI/tests
 pin the deterministic stub while an installed deployment gets real RAG with no code change.
+
+**bge-m3 asymmetric retrieval -- NO instruction prefix required (authoritative note)**
+
+Unlike earlier BGE models (e.g. bge-large-en-v1.5) that require an explicit instruction
+prefix such as ``"Represent this sentence for searching relevant passages: "`` on the query
+side, **bge-m3 dense retrieval does NOT need an instruction prefix**.
+
+Source: BAAI/bge-m3 official HuggingFace model card
+(https://huggingface.co/BAAI/bge-m3) lists ``query_instruction_for_retrieval = N/A`` for
+the dense path. Community confirmation: HuggingFace discussions/35 on the same repo.
+Additional reference: bge-model.com official docs (https://bge-model.com/bge/bge_m3.html).
+
+The reason: bge-m3 was trained with three unified objectives (dense / lexical / multi-vec),
+aligning query and passage into the same embedding space without relying on instruction
+following.  As a result:
+
+* ``embed(query)`` and ``embed(passage)`` both call the same ``SentenceTransformer.encode()``
+  without any prefix -- this is correct behaviour, not a bug.
+* The older models' asymmetric prefix is *not* applicable here; applying it would actually
+  degrade retrieval quality by shifting the query distribution away from the trained space.
+
+If the default model is ever changed to a model that *does* require asymmetric prefixes
+(e.g. e5-mistral, bge-large-v1.5), add ``query_prefix`` / ``passage_prefix`` parameters
+to ``resolve_embedder()`` and thread them into ``SemanticEmbedder.embed()`` /
+``embed_many()``.  Do not add prefixes to bge-m3.
 """
 
 from __future__ import annotations
@@ -51,6 +78,13 @@ class SemanticEmbedder:
         self.model_id = f"st:{model_name}"
         self._model: object | None = None
         self._fallback: HashingEmbedder | None = None
+        #: Machine-readable degrade flag. ``False`` until the semantic model fails to load and this
+        #: embedder silently falls back to the hashing stub, at which point it flips to ``True`` and
+        #: ``model_id`` switches to the fallback's id. A downstream consumer (context pack builder,
+        #: QA layer, telemetry) can read this to know the result is BM25-only, not semantic — the
+        #: warning log alone is not visible to callers. ``auto`` mode only; explicit ``semantic``
+        #: opt-in fails loud instead (never degrades).
+        self.degraded: bool = False
 
     def _ensure_model(self) -> object:
         if self._model is None:
@@ -76,6 +110,10 @@ class SemanticEmbedder:
                 exc,
             )
             self._fallback = HashingEmbedder()
+            # mark the degrade machine-readably so downstream consumers (not just the log) can tell
+            # this process is on the BM25-only fallback, and key vectors under the fallback's id.
+            self.degraded = True
+            self.model_id = self._fallback.model_id
             return self._fallback.embed_many(texts)
         # normalize so cosine == dot; convert_to_numpy keeps memory flat for large batches.
         vectors = model.encode(  # type: ignore[attr-defined]

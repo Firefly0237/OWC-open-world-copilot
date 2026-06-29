@@ -267,3 +267,114 @@ def _merge_bundle(target: ContentBundle, incoming: ContentBundle) -> None:
     target.localized_texts.update(incoming.localized_texts)
     target.terms.update(incoming.terms)
     target.style_guides.update(incoming.style_guides)
+
+
+# --- IN-4: Read-only aggregated context for a review item -----------------------------------
+
+def get_review_item_context_action(project: ProjectContext, item_id: str) -> dict:
+    """Build the aggregated context dict for a single review item (GET :context endpoint).
+
+    Returns a dict compatible with ReviewItemContextResponse. Raises KeyError when item_id
+    does not exist in the store.
+
+    This function is purely read-only: it never writes to the store or modifies content.
+    """
+
+    from ..assist.calibration import build_calibration_report
+    from ..assist.review_queue import ReviewItem, ReviewItemType
+
+    store = project.sqlite_store
+    raw = store.get_review_item(item_id)
+    if raw is None:
+        raise KeyError(item_id)
+
+    # get_review_item returns a dict with pre-parsed "payload" and "issue_refs" fields.
+    raw_payload = raw.get("payload")
+    payload: dict = raw_payload if isinstance(raw_payload, dict) else {}
+    raw_refs = raw.get("issue_refs")
+    issue_refs: list[str] = list(raw_refs) if isinstance(raw_refs, list) else []
+    item_type_str: str = raw.get("item_type", "")
+
+    # payload_summary
+    if item_type_str == ReviewItemType.QUEST_DRAFT.value:
+        stages_raw = payload.get("stages") or []
+        stages = [
+            {
+                "id": str(s.get("id", "")),
+                "description": str(s.get("summary", s.get("description", "")))[:100],
+            }
+            for s in stages_raw[:2]
+            if isinstance(s, dict)
+        ]
+        payload_summary = {
+            "title": payload.get("title"),
+            "objective": payload.get("objective"),
+            "stages": stages,
+            "summary": None,
+        }
+    else:
+        payload_summary = {
+            "title": None,
+            "objective": None,
+            "stages": [],
+            "summary": str(raw.get("object_ref", "")),
+        }
+
+    # refine_trail_last_reflection
+    trail = payload.get("refine_trail") or []
+    last_reflection: str | None = None
+    if trail and isinstance(trail[-1], dict):
+        last_reflection = trail[-1].get("reflection") or None
+
+    # calibration_context: load all resolved items of the same type
+    all_rows = store.list_review_items(status="accepted") + store.list_review_items(
+        status="rejected"
+    )
+    same_type = [r for r in all_rows if r.get("item_type") == item_type_str]
+    resolved = [
+        ReviewItem(
+            id=r["id"],
+            item_type=ReviewItemType(r["item_type"]),
+            object_ref=r.get("object_ref", ""),
+            payload=(r["payload"] if isinstance(r.get("payload"), dict) else {}),
+            issue_refs=(r["issue_refs"] if isinstance(r.get("issue_refs"), list) else []),
+            status=r.get("status", "pending_review"),
+            critic_verdict=r.get("critic_verdict"),
+            critic_score=r.get("critic_score"),
+            critic_primary_dim=r.get("critic_primary_dim"),  # IN-B1 M2
+        )
+        for r in same_type
+    ]
+    cal_report = build_calibration_report(resolved)
+    by_type_matrix = cal_report.by_type.get(item_type_str)
+    if by_type_matrix is not None:
+        critic_pass_total = (
+            by_type_matrix.critic_pass_human_accept + by_type_matrix.critic_pass_human_reject
+        )
+        fp_rate: float | None = (
+            by_type_matrix.critic_pass_human_reject / critic_pass_total
+            if critic_pass_total > 0
+            else None
+        )
+    else:
+        fp_rate = None
+
+    sample_size = len(resolved)
+    sufficient = sample_size >= 20
+
+    return {
+        "item_id": item_id,
+        "item_type": item_type_str,
+        "status": raw.get("status", ""),
+        "payload_summary": payload_summary,
+        "issue_refs": issue_refs,
+        "critic_verdict": raw.get("critic_verdict"),
+        "critic_score": raw.get("critic_score"),
+        "refine_trail_last_reflection": last_reflection,
+        "calibration_context": {
+            "item_type": item_type_str,
+            "false_pass_rate": fp_rate if sufficient else None,
+            "sample_size": sample_size,
+            "sufficient_sample": sufficient,
+        },
+    }

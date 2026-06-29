@@ -531,7 +531,7 @@ onMounted(async () => {
 
     <template v-if="view">
       <div v-if="!view.items.length && !view.unsequenced.length" class="pane empty">
-        <p class="muted">还没有带时序的任务或事件。给任务填上 timeline_order，这条轴就会长出来。</p>
+        <p class="muted">还没有带时序的任务或事件。给任务填上时间顺序，这条轴就会长出来。</p>
       </div>
 
       <template v-else>
@@ -740,7 +740,7 @@ onMounted(async () => {
             </label>
 
             <label class="f narrow">
-              <span>顺序（timeline_order）</span>
+              <span>时间顺序</span>
               <input v-model.number="edit.order" type="number" step="1" />
             </label>
 
@@ -836,7 +836,7 @@ onMounted(async () => {
         </ul>
 
         <div v-if="view.unsequenced.length" class="unseq">
-          <div class="section sub"><span class="t">未定序（缺 timeline_order）</span></div>
+          <div class="section sub"><span class="t">未定序（缺时间顺序）</span></div>
           <p class="muted small">这些还没排进时间线，点「排入」会接到当前最末位，纳入校验后可再微调。</p>
           <div class="chips">
             <span v-for="u in view.unsequenced" :key="u.ref" class="chip">
@@ -880,7 +880,11 @@ onMounted(async () => {
 .warn-count {
   border: 1px solid rgba(224, 133, 133, 0.5);
   background: rgba(224, 133, 133, 0.1);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   color: #e89a9a;
   font-size: 0.78rem;
   padding: 0.14rem 0.62rem;
@@ -1096,7 +1100,7 @@ input,
 textarea {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.45rem 0.6rem;
   font: inherit;
@@ -1141,7 +1145,7 @@ textarea:focus {
 .b7-intent {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.4rem 0.6rem;
   font: inherit;
@@ -1155,7 +1159,11 @@ textarea:focus {
 .b7-round {
   font-size: 0.74rem;
   border: 1px solid var(--ow-line);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   padding: 0.05rem 0.5rem;
   color: var(--ow-muted);
 }
@@ -1251,7 +1259,7 @@ textarea:focus {
 }
 
 button {
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   cursor: pointer;
   font: inherit;
   font-size: 0.84rem;
@@ -1298,7 +1306,11 @@ button:disabled {
   border: 1px solid rgba(224, 112, 90, 0.45);
   background: rgba(224, 112, 90, 0.1);
   color: #e0a878;
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   font-size: 0.72rem;
   padding: 0.04rem 0.5rem;
 }
@@ -1352,7 +1364,11 @@ button:disabled {
 
 .chip {
   border: 1px solid var(--ow-line);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   background: rgba(16, 22, 48, 0.6);
   color: var(--ow-ink);
   font-size: 0.78rem;
@@ -1371,7 +1387,11 @@ button:disabled {
 .chip .seq {
   padding: 0.06rem 0.5rem;
   font-size: 0.74rem;
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   color: var(--ow-gold-bright);
   border-color: var(--ow-gold-faint);
   background: transparent;

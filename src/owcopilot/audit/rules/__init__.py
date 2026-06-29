@@ -27,6 +27,7 @@ from .pipeline_rules import (
     TermInconsistentRule,
     TextTooLongForUIRule,
 )
+from .quest_reachability import QuestGlobalReachabilityRule
 from .reference_rules import (
     DeprecatedEntityReferenceRule,
     MissingDialogueReferenceRule,
@@ -62,6 +63,7 @@ __all__ = [
     "PlaceholderMismatchRule",
     "PrerequisiteCycleRule",
     "PromptInjectionRule",
+    "QuestGlobalReachabilityRule",
     "QuestLogicRule",
     "QuestMissingObjectiveRule",
     "RegionBannedContentRule",

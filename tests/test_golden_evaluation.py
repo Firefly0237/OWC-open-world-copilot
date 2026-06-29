@@ -29,7 +29,7 @@ def test_run_golden_evaluation_passes_all_checks(tmp_path) -> None:
     assert {check.name for check in report.checks} == {
         "audit_no_open_errors",
         "retrieval_has_aldric",
-        "qa_grounded",
+        "qa_citation_existence_or_refuse",
         "export_manifest_written",
         "provenance_all_approved",
     }

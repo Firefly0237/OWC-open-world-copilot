@@ -42,11 +42,16 @@ def client(tmp_path, monkeypatch) -> TestClient:
 def test_extraction_run_then_submit_round_trip(client: TestClient) -> None:
     run = client.post(
         "/projects/demo/extractions:run",
-        json={"title": "第一章", "text": "沈青澜说道：灯不对。沈青澜与陆惊鸿前往枯叶林。"},
+        json={
+            "title": "第一章",
+            "text": "沈青澜说道：灯不对。沈青澜与陆惊鸿前往枯叶林。",
+            "glean_rounds": 0,
+        },
     )
     assert run.status_code == 200, run.text
     body = run.json()
     assert body["stats"]["entities"] >= 2
+    assert body["telemetry"]["calls"] == 1
     submitted = client.post(
         "/projects/demo/extractions:submit",
         json={"draft": body["draft"], "include_beats_as_quests": True},

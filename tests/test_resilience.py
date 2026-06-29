@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from owcopilot.llm.gateway import OpenAICompatProvider
+from owcopilot.llm.cache import ExactCache
+from owcopilot.llm.gateway import LLMGateway, OpenAICompatProvider
 from owcopilot.llm.resilience import (
     CircuitBreakerProvider,
     CircuitOpenError,
     FailoverProvider,
     build_real_provider,
 )
+from owcopilot.llm.router import StaticRouter
+from owcopilot.llm.telemetry import TelemetryCollector
 
 
 class _Ok:
@@ -46,6 +49,19 @@ class _Scripted:
         if isinstance(behaviour, Exception):
             raise behaviour
         return "ok", 1, 1
+
+
+class _Model:
+    """Provider exposing a real ``.model`` (like ``OpenAICompatProvider``) and returning that id
+    as its completion text, so a gateway test can see which provider actually answered."""
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+        self.calls = 0
+
+    def complete(self, *, system: str, user: str, model: str):
+        self.calls += 1
+        return self.model, 1, 1
 
 
 def _call(provider):
@@ -157,3 +173,80 @@ def test_build_real_provider_wraps_failover_then_breaker(monkeypatch) -> None:
     assert isinstance(provider.inner, FailoverProvider)
     assert isinstance(provider.inner.primary, OpenAICompatProvider)
     assert isinstance(provider.inner.secondary, OpenAICompatProvider)
+
+
+# ----------------------------------------------------------- .model passthrough (gen_ai/cache key)
+def test_failover_exposes_primary_model() -> None:
+    fp = FailoverProvider(_Model("deepseek-v4-pro"), _Model("gpt-4o-mini"))
+    # The gateway resolves the model id before the call, so it must see the primary — the
+    # provider actually tried first — not the tier label.
+    assert fp.model == "deepseek-v4-pro"
+
+
+def test_circuit_breaker_passes_through_inner_model() -> None:
+    cb = CircuitBreakerProvider(_Model("deepseek-v4-pro"))
+    assert cb.model == "deepseek-v4-pro"
+
+
+def test_breaker_over_failover_chains_model_to_live_primary() -> None:
+    # The real build order (breaker wrapping failover wrapping the real provider): the passthrough
+    # must chain all the way down to the primary's true model id.
+    provider = CircuitBreakerProvider(
+        FailoverProvider(_Model("deepseek-v4-pro"), _Model("gpt-4o-mini"))
+    )
+    assert provider.model == "deepseek-v4-pro"
+
+
+def test_wrapper_model_is_empty_when_inner_has_none() -> None:
+    # A bare provider with no `.model` (offline fake) must yield "" — gateway then falls back to
+    # the tier label, exactly as for a plain offline provider.
+    fp = FailoverProvider(_Ok("primary"), _Ok("secondary"))
+    assert fp.model == ""
+    assert CircuitBreakerProvider(_Ok("only")).model == ""
+
+
+def _gateway_with(provider) -> tuple[LLMGateway, TelemetryCollector]:
+    telemetry = TelemetryCollector()
+    gateway = LLMGateway(
+        providers={"cheap": provider},
+        router=StaticRouter(mapping={"generate": "cheap"}),
+        cache=ExactCache(),
+        telemetry=telemetry,
+    )
+    return gateway, telemetry
+
+
+def test_gateway_records_real_model_through_resilience_wrappers() -> None:
+    # End-to-end: the resolved `gen_ai.request.model` (CallRecord.model, read by react.py into the
+    # span) must be the real inner model, NOT the "cheap" tier label, even when failover + breaker
+    # wrap the provider. This is the regression the wrapper `.model` passthrough fixes.
+    provider = CircuitBreakerProvider(
+        FailoverProvider(_Model("deepseek-v4-pro"), _Model("gpt-4o-mini"))
+    )
+    gateway, telemetry = _gateway_with(provider)
+
+    gateway.complete(task="generate", system="s", user="u")
+
+    assert telemetry.records[-1].model == "deepseek-v4-pro"
+
+
+def test_cache_key_distinguishes_primary_and_secondary_through_wrappers() -> None:
+    # The same `model` variable feeds the cache key. If it degraded to the tier label, the primary
+    # and secondary (two distinct real models sharing the "cheap" tier) would collide on one key
+    # and the secondary's answer could be served for the primary. With the passthrough, the primary
+    # model id keys the entry; a fresh provider on a *different* model must miss, not reuse.
+    primary_gateway, _ = _gateway_with(_Model("deepseek-v4-pro"))
+    text_a = primary_gateway.complete(task="generate", system="s", user="u")
+    assert text_a == "deepseek-v4-pro"  # filled the cache under model="deepseek-v4-pro"
+
+    # A second gateway on a different real model, same tier/prompt: distinct model -> cache MISS.
+    other = _Model("gpt-4o-mini")
+    secondary_gateway = LLMGateway(
+        providers={"cheap": other},
+        router=StaticRouter(mapping={"generate": "cheap"}),
+        cache=primary_gateway.cache,  # share the backend to prove keys differ, not the store
+        telemetry=TelemetryCollector(),
+    )
+    text_b = secondary_gateway.complete(task="generate", system="s", user="u")
+    assert text_b == "gpt-4o-mini"  # did not reuse the primary's cached answer
+    assert other.calls == 1

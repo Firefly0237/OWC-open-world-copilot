@@ -25,6 +25,11 @@ class JSONImporter:
                     data = json.loads(raw)
                 except json.JSONDecodeError as e:
                     raise ValueError(f"第 {line_number} 行不是合法 JSON，请检查该行格式。") from e
+                except RecursionError as e:
+                    raise ValueError(
+                        f"第 {line_number} 行的 JSON 嵌套层数过深，无法解析。"
+                        "请减少该行数据的嵌套层级后重试。"
+                    ) from e
                 if isinstance(data, dict):
                     objects.append(
                         RawObject(
@@ -40,6 +45,14 @@ class JSONImporter:
         except json.JSONDecodeError as e:
             raise ValueError(
                 "文件不是合法 JSON，可能已损坏或格式不对（应是对象或对象数组）。"
+            ) from e
+        except RecursionError as e:
+            # Pathologically deep nesting (~thousands of levels) makes json.loads exceed
+            # Python's recursion limit. Convert the raw RecursionError into a guided
+            # domain error instead of leaking the interpreter-level message.
+            raise ValueError(
+                f"JSON 文件嵌套层数过深，无法解析（可能是异常或恶意构造的文件）。"
+                f"请减少嵌套层级后重试。（文件：{source}）"
             ) from e
         return _objects_from_json(data, source_path=str(source))
 
@@ -67,7 +80,14 @@ def _objects_from_json(data: Any, *, source_path: str) -> list[RawObject]:
                 payload.setdefault("kind", key.rstrip("s"))
                 objects.append(_raw_object(payload, source_path=source_path))
         return objects
-    return []
+    # BUG-6: top-level scalars (number, string, bool, null) are never valid content files.
+    # Silently returning [] would mask a corrupt or mis-named file; raise a friendly error instead.
+    type_name = type(data).__name__
+    raise ValueError(
+        f"JSON 文件顶层必须是对象（{{...}}）或对象数组（[...]），"
+        f"但实际得到的是 {type_name}（{data!r:.80}）。"
+        f"请检查文件格式是否正确。（文件：{source_path}）"
+    )
 
 
 def _kind_for(data: dict[str, Any]) -> str:

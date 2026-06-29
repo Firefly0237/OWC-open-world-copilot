@@ -199,7 +199,7 @@ async function ask(): Promise<void> {
 .chip {
   border: 1px solid var(--ow-gold-soft);
   background: var(--ow-gold-faint);
-  border-radius: 999px;
+  border-radius: 3px;
   color: var(--ow-gold-bright);
   font-size: 0.74rem;
   padding: 0.1rem 0.55rem;
@@ -216,7 +216,7 @@ async function ask(): Promise<void> {
   flex: 1;
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.55rem 0.75rem;
 }
@@ -224,7 +224,7 @@ async function ask(): Promise<void> {
 button.primary {
   background: linear-gradient(180deg, #f0d28a 0%, #b9924a 100%);
   border: 1px solid rgba(240, 210, 138, 0.65);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: #241a05;
   font-weight: 600;
   padding: 0.5rem 1.1rem;
@@ -247,7 +247,7 @@ button.primary:disabled {
 button.ghost {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-gold-soft);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-gold-bright);
   padding: 0.35rem 0.8rem;
   cursor: pointer;

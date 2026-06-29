@@ -21,7 +21,7 @@ from ..content.models import (
 from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json_object
 from ..util import slugify, unique_id
-from .calibration import critic_from_trail
+from .calibration import critic_from_trail, primary_dim_from_trail
 from .critic import DIALOGUE_CRITIQUE_MARKER, DialogueCritic
 from .industry import DIALOGUE_RUBRIC_SOURCES, industry_source_block
 from .lint import AssistLintIssue, lint_text
@@ -148,11 +148,14 @@ class DialogueTreeService:
             auto_review_incomplete=auto_review_incomplete,
         )
         if self.review_queue is not None:
-            verdict, score = critic_from_trail([r.model_dump(mode="json") for r in trail])
+            _dialogue_trail_dump = [r.model_dump(mode="json") for r in trail]
+            verdict, score = critic_from_trail(_dialogue_trail_dump)
+            dim = primary_dim_from_trail(_dialogue_trail_dump)  # IN-B1 M2
             result.review_item = self.review_queue.add_dialogue_tree(
                 tree.model_dump(mode="json", exclude_none=True),
                 critic_verdict=verdict,
                 critic_score=score,
+                critic_primary_dim=dim,  # IN-B1 M2
             )
         return result
 

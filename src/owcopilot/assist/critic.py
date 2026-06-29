@@ -20,7 +20,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from ..content.models import Quest
+from ..content.models import Quest, Term
 from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json_object
 from .industry import (
@@ -53,6 +53,15 @@ DETERMINISTIC_PROBLEMS_HEADER = "确定性检查发现以下问题"
 
 _VALID_SEVERITIES = {"blocker", "minor", "ok"}
 
+# Whitelist for dimension values — mirrors the rubric in every critic system prompt.
+# Anything the LLM invents that is not in this set gets silently normalised to "craft".
+# Symmetry with _VALID_SEVERITIES: same pattern, same guarantee.
+_VALID_DIMENSIONS = {
+    "intent", "grounding", "completeness", "craft", "voice",
+    "branching", "coherence", "function", "flavor", "style",
+    "variety", "topic",
+}
+
 
 class CritiqueDimension(BaseModel):
     dimension: str  # intent | grounding | completeness | craft
@@ -84,17 +93,47 @@ class CritiqueResult(BaseModel):
 
 
 def critique_with_retry(
-    gateway: LLMGateway, *, task: str, system: str, user: str
+    gateway: LLMGateway,
+    *,
+    task: str,
+    system: str,
+    user: str,
+    evaluator_gateway: LLMGateway | None = None,
 ) -> CritiqueResult:
     """One critique call + a single root-cause retry if the reply won't parse. Every critic shares
     this so the honest-failure rule lives in ONE place: the usual reason a critique won't parse is
     the model wrapping the JSON in prose, so we demand a bare object once before giving up — far
     better than faking a pass. If it still fails, the unparsable result flows out (parse_ok=False)
-    so the caller can flag the draft for human scrutiny instead of waving it through."""
-    result = parse_critique(gateway.complete(task=task, system=system, user=user))
-    if not result.parse_ok:
-        result = parse_critique(
-            gateway.complete(task=task, system=system + _JSON_ONLY_RETRY, user=user)
+    so the caller can flag the draft for human scrutiny instead of waving it through.
+
+    When evaluator_gateway is provided it is used in place of the main gateway. If the evaluator
+    raises LLMGatewayError, we fall back to the main gateway and mark the result with
+    '[evaluator-fallback]' in the summary (honest degradation, never silently drops the feature).
+    """
+    from ..llm.gateway import LLMGatewayError  # avoid circular import at module level
+
+    active = evaluator_gateway if evaluator_gateway is not None else gateway
+    used_fallback = False
+
+    def _call(gw: LLMGateway, sys_suffix: str = "") -> CritiqueResult:
+        return parse_critique(gw.complete(task=task, system=system + sys_suffix, user=user))
+
+    try:
+        result = _call(active)
+        if not result.parse_ok:
+            result = _call(active, _JSON_ONLY_RETRY)
+    except LLMGatewayError:
+        if evaluator_gateway is None:
+            raise
+        # evaluator failed -> fallback to main gateway
+        used_fallback = True
+        result = _call(gateway)
+        if not result.parse_ok:
+            result = _call(gateway, _JSON_ONLY_RETRY)
+
+    if used_fallback and result.parse_ok:
+        result = result.model_copy(
+            update={"summary": f"[evaluator-fallback] {result.summary}"}
         )
     return result
 
@@ -116,21 +155,44 @@ class QuestCritic:
         quest: Quest,
         context_lines: list[str],
         readiness_missing: list[str],
+        evaluator_gateway: LLMGateway | None = None,
+        terms: list[Term] | None = None,
+        inject_terms: bool = True,
+        lessons: list[dict] | None = None,      # IN-B3 M1: default None
+        inject_lessons: bool = False,            # IN-B3 M1: default False (guard: off by default)
     ) -> CritiqueResult:
         return critique_with_retry(
             self.gateway,
             task="quest_critique",
-            system=_critic_system_prompt(),
+            system=_critic_system_prompt(
+                terms=terms,
+                inject_terms=inject_terms,
+                lessons=lessons,
+                inject_lessons=inject_lessons,
+            ),
             user=_critic_user_message(
                 brief=brief,
                 quest=quest,
                 context_lines=context_lines,
                 readiness_missing=readiness_missing,
             ),
+            evaluator_gateway=evaluator_gateway,
         )
 
 
-def _critic_system_prompt() -> str:
+def _critic_system_prompt(
+    terms: list[Term] | None = None,
+    inject_terms: bool = True,
+    lessons: list[dict] | None = None,   # IN-B3 M1
+    inject_lessons: bool = False,        # IN-B3 M1: default False
+) -> str:
+    from .lessons import build_critic_lesson_block  # IN-B3 M1
+    from .term_injection import build_term_block_for_critic
+    term_block = build_term_block_for_critic(list(terms) if terms else []) if inject_terms else ""
+    term_section = f"\n\n{term_block}" if term_block else ""
+    # IN-B3 M1: build lesson block (empty string when inject_lessons=False or no lessons)
+    lesson_block = build_critic_lesson_block(lessons or [], inject_lessons=inject_lessons)
+    lesson_section = f"\n\n{lesson_block}" if lesson_block else ""
     return (
         f"You are a {_REVIEWER_SENTINEL}: a demanding senior quest designer reviewing a draft "
         "before it reaches a human approver. Judge it on four dimensions and return ONE JSON "
@@ -146,7 +208,7 @@ def _critic_system_prompt() -> str:
         "- craft: is it specific and evocative rather than generic boilerplate?\n"
         "Set verdict to 'revise' if ANY dimension is a blocker. Each non-ok dimension MUST give a "
         "concrete, actionable fix the writer can apply. Be strict but fair; do not rewrite the "
-        "quest yourself."
+        f"quest yourself.{term_section}{lesson_section}"  # IN-B3 M1: lesson appended at end
     )
 
 
@@ -184,6 +246,22 @@ def parse_critique(raw: str) -> CritiqueResult:
             summary="评审输出无法解析为合法 JSON（自动评审未完成）",
             parse_ok=False,
         )
+    # Item 1: empty JSON object or missing verdict → parse failure (fail-closed, never silent pass).
+    if not data:
+        return CritiqueResult(
+            verdict="revise",
+            score=0.0,
+            summary="评审输出为空对象（自动评审未完成）",
+            parse_ok=False,
+        )
+    raw_verdict = data.get("verdict")
+    if raw_verdict is None:
+        return CritiqueResult(
+            verdict="revise",
+            score=0.0,
+            summary="评审输出缺少 verdict 字段（自动评审未完成）",
+            parse_ok=False,
+        )
     dimensions = []
     for item in data.get("dimensions") or []:
         if not isinstance(item, dict):
@@ -191,15 +269,22 @@ def parse_critique(raw: str) -> CritiqueResult:
         severity = str(item.get("severity", "minor")).lower()
         if severity not in _VALID_SEVERITIES:
             severity = "minor"
+        # Item 3: dimension whitelist — any value outside the declared rubric is normalised to
+        # "craft". This is the same graceful-degradation pattern as the severity whitelist above,
+        # and closes the indirect-injection vector: a crafted dimension name can no longer
+        # propagate adversarial text into the lesson-text template.
+        dimension = str(item.get("dimension", "craft")).lower()
+        if dimension not in _VALID_DIMENSIONS:
+            dimension = "craft"
         dimensions.append(
             CritiqueDimension(
-                dimension=str(item.get("dimension", "craft")),
+                dimension=dimension,
                 severity=severity,
                 issue=str(item.get("issue", "")),
                 fix=str(item.get("fix", "")),
             )
         )
-    verdict = str(data.get("verdict", "")).lower()
+    verdict = str(raw_verdict).lower()
     has_blocker = any(d.severity == "blocker" for d in dimensions)
     if verdict not in {"pass", "revise"}:
         verdict = "revise" if has_blocker else "pass"
@@ -242,7 +327,13 @@ class CharacterCritic:
         summary: str,
         context_lines: list[str],
         missing_sections: list[str],
+        evaluator_gateway: LLMGateway | None = None,
+        lessons: list[dict] | None = None,   # IN-B3 M1
+        inject_lessons: bool = False,        # IN-B3 M1: default False (guard)
     ) -> CritiqueResult:
+        from .lessons import build_critic_lesson_block  # IN-B3 M1
+        lesson_block = build_critic_lesson_block(lessons or [], inject_lessons=inject_lessons)
+        lesson_section = f"\n\n{lesson_block}" if lesson_block else ""
         return critique_with_retry(
             self.gateway,
             task="character_profile",
@@ -257,6 +348,7 @@ class CharacterCritic:
                 + industry_source_block(*CHARACTER_RUBRIC_SOURCES)
                 + "\n"
                 + _VERDICT_SHAPE
+                + lesson_section  # IN-B3 M1: lesson appended after _VERDICT_SHAPE
             ),
             user=_character_user_message(
                 concept=concept,
@@ -265,6 +357,7 @@ class CharacterCritic:
                 context_lines=context_lines,
                 missing_sections=missing_sections,
             ),
+            evaluator_gateway=evaluator_gateway,
         )
 
 
@@ -303,7 +396,13 @@ class DialogueCritic:
         nodes: dict[str, Any],
         speaker_ids: list[str],
         structure_problems: list[str],
+        evaluator_gateway: LLMGateway | None = None,
+        lessons: list[dict] | None = None,   # IN-B3 M1
+        inject_lessons: bool = False,        # IN-B3 M1: default False (guard)
     ) -> CritiqueResult:
+        from .lessons import build_critic_lesson_block  # IN-B3 M1
+        lesson_block = build_critic_lesson_block(lessons or [], inject_lessons=inject_lessons)
+        lesson_section = f"\n\n{lesson_block}" if lesson_block else ""
         return critique_with_retry(
             self.gateway,
             task="dialogue_tree",
@@ -318,6 +417,7 @@ class DialogueCritic:
                 + industry_source_block(*DIALOGUE_RUBRIC_SOURCES)
                 + "\n"
                 + _VERDICT_SHAPE
+                + lesson_section  # IN-B3 M1
             ),
             user=_dialogue_user_message(
                 brief=brief,
@@ -325,6 +425,7 @@ class DialogueCritic:
                 speaker_ids=speaker_ids,
                 structure_problems=structure_problems,
             ),
+            evaluator_gateway=evaluator_gateway,
         )
 
 
@@ -373,7 +474,13 @@ class BarkCritic:
         voice_card_json: str,
         variants: list[str],
         lint_problems: list[str],
+        evaluator_gateway: LLMGateway | None = None,
+        lessons: list[dict] | None = None,   # IN-B3 M1
+        inject_lessons: bool = False,        # IN-B3 M1: default False (guard)
     ) -> CritiqueResult:
+        from .lessons import build_critic_lesson_block  # IN-B3 M1
+        lesson_block = build_critic_lesson_block(lessons or [], inject_lessons=inject_lessons)
+        lesson_section = f"\n\n{lesson_block}" if lesson_block else ""
         parts = [
             f"Topic the barks must address:\n{topic.strip()}",
             f"Voice card the lines must stay within:\n{voice_card_json}",
@@ -396,8 +503,10 @@ class BarkCritic:
                 + industry_source_block(*BARK_RUBRIC_SOURCES)
                 + "\n"
                 + _VERDICT_SHAPE
+                + lesson_section  # IN-B3 M1
             ),
             user="\n".join(parts),
+            evaluator_gateway=evaluator_gateway,
         )
 
 
@@ -415,7 +524,13 @@ class FlavorCritic:
         style_text: str,
         entries: list[dict[str, str]],
         lint_problems: list[str],
+        evaluator_gateway: LLMGateway | None = None,
+        lessons: list[dict] | None = None,   # IN-B3 M1
+        inject_lessons: bool = False,        # IN-B3 M1: default False (guard)
     ) -> CritiqueResult:
+        from .lessons import build_critic_lesson_block  # IN-B3 M1
+        lesson_block = build_critic_lesson_block(lessons or [], inject_lessons=inject_lessons)
+        lesson_section = f"\n\n{lesson_block}" if lesson_block else ""
         parts = [
             f"Category: {category}. Theme: {theme or '(none)'}.",
             f"Style guide the writing must respect:\n{style_text or '(none)'}",
@@ -437,6 +552,8 @@ class FlavorCritic:
                 + industry_source_block(*FLAVOR_RUBRIC_SOURCES)
                 + "\n"
                 + _VERDICT_SHAPE
+                + lesson_section  # IN-B3 M1
             ),
             user="\n".join(parts),
+            evaluator_gateway=evaluator_gateway,
         )

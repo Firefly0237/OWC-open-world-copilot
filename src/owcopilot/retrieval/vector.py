@@ -68,7 +68,6 @@ class VectorRetriever:
     ) -> None:
         self.store = store
         self.embedder = embedder or HashingEmbedder()
-        self.model_id = self.embedder.model_id
         self._rows_loader = rows_loader
         self._vectors_table = vectors_table
         self._rows: list[_Row] = []
@@ -77,8 +76,24 @@ class VectorRetriever:
         self._reindex()
 
     @property
+    def model_id(self) -> str:
+        """The embedder's *current* id — read live, never snapshotted at construction.
+
+        A lazy ``SemanticEmbedder`` reports ``st:bge-m3`` until its first embed; if that load
+        fails it degrades to the hashing stub and flips its ``model_id`` to ``hashing-*``. Reading
+        it live (rather than caching it in ``__init__``, before ``_reindex`` triggers the first
+        embed) keeps ``is_semantic`` and the persisted cache key honest about the backend actually
+        in use — so a degraded process never claims to be semantic, and its hashing vectors are
+        never persisted under an ``st:`` key (which would poison the cache for a later run where
+        the real model loads)."""
+        return self.embedder.model_id
+
+    @property
     def is_semantic(self) -> bool:
-        """True when the active embedder is a real semantic model (not the hashing stub)."""
+        """True when the active embedder is a real semantic model (not the hashing stub).
+
+        Reads the embedder's live ``model_id``, so a runtime degrade (semantic model failed to
+        load → hashing fallback) flips this to ``False`` instead of lying ``True``."""
         return self.model_id.startswith("st:")
 
     def similarities(self, query: str, refs: list[str]) -> dict[str, float]:
@@ -124,7 +139,16 @@ class VectorRetriever:
         return hits
 
     def _reindex(self) -> None:
-        """Load rows, (re)embed only what changed, persist, build the search matrix."""
+        """Load rows, (re)embed only what changed, persist, build the search matrix.
+
+        The persisted cache is keyed by the embedder's id. A lazy semantic embedder can *degrade*
+        mid-reindex (its first ``embed_many`` here fails to load the model and falls back to
+        hashing, flipping ``model_id`` from ``st:*`` to ``hashing-*``). When that happens the
+        vectors we just produced are hashing vectors, so they must be keyed/persisted under the
+        post-degrade id — never under the original ``st:*`` key, which would poison the cache for a
+        later run where the real model loads. We therefore re-read ``self.model_id`` *after*
+        embedding and, if the backend changed, discard the lookup done under the stale key and
+        re-key the whole index to the backend that actually produced the vectors."""
         self._rows = self._rows_loader(self.store)
         if not self._rows:
             self._matrix = np.empty((0, 0), dtype=np.float32)
@@ -132,12 +156,16 @@ class VectorRetriever:
             return
 
         table = self._vectors_table
-        cached = self.store.get_vectors(self.model_id, table=table)
+        # Key used for the *lookup*, captured before embedding can trigger a degrade.
+        lookup_model_id = self.model_id
+        cached = self.store.get_vectors(lookup_model_id, table=table)
         vectors: dict[str, np.ndarray] = {}
         to_embed: list[tuple[str, str, str]] = []  # (ref, text, text_hash)
+        text_hashes: dict[str, str] = {}
         for row in self._rows:
             text = f"{row.title} {row.body}".strip()
             text_hash = hashlib.sha1(text.encode("utf-8")).hexdigest()
+            text_hashes[row.ref] = text_hash
             hit = cached.get(row.ref)
             if hit is not None and hit[0] == text_hash:
                 vectors[row.ref] = np.frombuffer(hit[2], dtype=np.float32)
@@ -146,14 +174,40 @@ class VectorRetriever:
 
         if to_embed:
             embedded = self.embedder.embed_many([text for _ref, text, _h in to_embed])
-            upserts: list[tuple[str, str, int, bytes]] = []
-            for (ref, _text, text_hash), vector in zip(to_embed, embedded, strict=True):
-                arr = np.asarray(vector, dtype=np.float32)
-                vectors[ref] = arr
-                upserts.append((ref, text_hash, int(arr.shape[0]), arr.tobytes()))
-            self.store.upsert_vectors(self.model_id, upserts, table=table)
+            for (ref, _text, _h), vector in zip(to_embed, embedded, strict=True):
+                vectors[ref] = np.asarray(vector, dtype=np.float32)
 
-        self.store.prune_vectors(self.model_id, {row.ref for row in self._rows}, table=table)
+        # Re-read after embedding: if the embedder degraded mid-reindex, the backend (and the key)
+        # changed under us. The vectors looked up under the stale key belong to a different
+        # embedding space, so re-embed every row under the real backend rather than mixing spaces
+        # or persisting hashing vectors under the original ``st:*`` key.
+        persist_model_id = self.model_id
+        if persist_model_id != lookup_model_id:
+            cached = self.store.get_vectors(persist_model_id, table=table)
+            vectors = {}
+            to_embed = []
+            for row in self._rows:
+                hit = cached.get(row.ref)
+                if hit is not None and hit[0] == text_hashes[row.ref]:
+                    vectors[row.ref] = np.frombuffer(hit[2], dtype=np.float32)
+                else:
+                    text = f"{row.title} {row.body}".strip()
+                    to_embed.append((row.ref, text, text_hashes[row.ref]))
+            if to_embed:
+                embedded = self.embedder.embed_many([text for _ref, text, _h in to_embed])
+                for (ref, _text, _h), vector in zip(to_embed, embedded, strict=True):
+                    vectors[ref] = np.asarray(vector, dtype=np.float32)
+
+        if to_embed:
+            upserts: list[tuple[str, str, int, bytes]] = []
+            for ref, _text, text_hash in to_embed:
+                arr = vectors[ref]
+                upserts.append((ref, text_hash, int(arr.shape[0]), arr.tobytes()))
+            self.store.upsert_vectors(persist_model_id, upserts, table=table)
+
+        self.store.prune_vectors(
+            persist_model_id, {row.ref for row in self._rows}, table=table
+        )
         self._matrix = np.vstack([_normalise(vectors[row.ref]) for row in self._rows])
         self._row_index = {row.ref: index for index, row in enumerate(self._rows)}
 

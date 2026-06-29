@@ -74,6 +74,11 @@ class ContradictionReport:
 
 
 def _is_semantic(embedder: Embedder | None) -> bool:
+    """A real neural embedder (bge-m3) tags its model_id ``st:*``; the hashing stub does not.
+
+    Reads ``model_id`` live so a runtime degrade (semantic model failed to load → hashing
+    fallback) is seen as non-semantic — never snapshot this, or a degraded process would keep
+    claiming ``st:`` (same live-read rule as ``VectorRetriever.is_semantic``)."""
     return embedder is not None and embedder.model_id.startswith("st:")
 
 
@@ -108,7 +113,11 @@ class ContradictionDetector:
         candidates = self._relation_candidates() + self._semantic_candidates(semantic_threshold)
         report = ContradictionReport(
             candidate_count=len(candidates),
-            semantic_used=self.embedder is not None,
+            # Read the embedder's live backend AFTER the semantic layer has embedded: a model that
+            # degraded to the hashing stub mid-run now reads ``hashing-*`` and reports False — never
+            # the construction-time snapshot, so the report can't claim semantic when it ran on the
+            # stub (mirrors VectorRetriever.is_semantic).
+            semantic_used=_is_semantic(self.embedder),
             llm_used=bool(use_llm and self.gateway is not None),
         )
         if not candidates:

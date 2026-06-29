@@ -50,6 +50,13 @@ semantic = ["sentence-transformers>=3.0"]   # real multilingual embeddings (bge-
 serve = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]   # the deployable HTTP API (service/api.py)
 redis = ["redis>=5.0"]            # optional RedisCache backend for multi-instance stateless deploys
 mcp = ["mcp>=1.0"]                # optional MCP transport; core tool handlers do not require it
+# T4-C: accurate BPE token counting (cl100k_base; DeepSeek V4 compatible). ~1 MB, no torch.
+tokenizer = ["tiktoken>=0.7"]
+# T4-B: OTEL GenAI semantic-convention span trees. Exporters optional (OTLP needs grpc extra).
+observe = [
+    "opentelemetry-sdk>=1.24",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.24",
+]
 
 [project.scripts]
 owcopilot = "owcopilot.cli.main:main"

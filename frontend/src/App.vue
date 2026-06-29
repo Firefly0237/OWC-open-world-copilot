@@ -305,6 +305,7 @@ onUnmounted(() => {
         连不上 API 服务。请在项目根目录运行：
         <code>.venv\Scripts\python.exe -m uvicorn owcopilot.service.api:create_app --factory --port 8000</code>
         ——构建版前端与 API 同端口（8000），无需任何环境变量。
+        <span class="apidown-tip">如果你是策划同学，把这段截图发给技术支持即可。</span>
       </p>
       <main v-if="!booting">
         <RouterView v-slot="{ Component }">
@@ -419,19 +420,25 @@ onUnmounted(() => {
   --px: calc(var(--ow-px, 0) * 1);
   --py: calc(var(--ow-py, 0) * 1);
 }
+/* FE-1: aurora purple opacity pulled way down.
+   Old: l1 purple 0.30, l2 purple 0.20+0.16 (+ body bg 0.22+0.14) = five stacked purple radials
+   that scream "Notion AI / GitHub Copilot". Gold only at 0.14, cyan only at 0.14.
+   New: l1 purple 0.13, l2 purple 0.09+0.07; gold raised to 0.20, cyan to 0.18.
+   This lets the warm-gold + cool-cyan HSR contrast surface instead of a purple wash. */
 .aurora.l1 {
   background:
-    radial-gradient(40vmax 32vmax at 16% 10%, rgba(150, 120, 235, 0.3), transparent 60%),
-    radial-gradient(36vmax 30vmax at 86% 24%, rgba(143, 214, 232, 0.14), transparent 60%),
-    radial-gradient(44vmax 36vmax at 72% 92%, rgba(217, 181, 108, 0.14), transparent 64%);
+    radial-gradient(40vmax 32vmax at 16% 10%, rgba(150, 120, 235, 0.13), transparent 60%),
+    radial-gradient(36vmax 30vmax at 86% 24%, rgba(143, 214, 232, 0.18), transparent 60%),
+    radial-gradient(44vmax 36vmax at 72% 92%, rgba(217, 181, 108, 0.20), transparent 64%);
   filter: blur(10px) saturate(1.1);
   transform: translate3d(calc(var(--px) * 22px), calc(var(--py) * 16px), 0);
   animation: aurora-drift 46s ease-in-out infinite alternate;
 }
 .aurora.l2 {
   background:
-    radial-gradient(30vmax 26vmax at 60% 8%, rgba(120, 96, 220, 0.2), transparent 62%),
-    radial-gradient(26vmax 24vmax at 30% 80%, rgba(160, 138, 255, 0.16), transparent 64%);
+    radial-gradient(30vmax 26vmax at 60% 8%, rgba(120, 96, 220, 0.09), transparent 62%),
+    radial-gradient(26vmax 24vmax at 30% 80%, rgba(142, 128, 216, 0.07), transparent 64%),
+    radial-gradient(22vmax 20vmax at 88% 72%, rgba(217, 181, 108, 0.12), transparent 60%);
   filter: blur(16px) saturate(1.1);
   transform: translate3d(calc(var(--px) * -36px), calc(var(--py) * -26px), 0);
   animation: aurora-drift2 60s ease-in-out infinite alternate;
@@ -631,7 +638,8 @@ nav {
   text-decoration: none;
   font-size: 0.87rem;
   padding: 0.34rem 0.55rem;
-  border-radius: 0.45rem;
+  /* FE-2: was 0.45rem (SaaS roundness); 2px aligns with .pane border-radius for geometric consistency */
+  border-radius: 2px;
   position: relative;
   transition: color 0.15s ease, background 0.15s ease, transform 0.15s ease;
 }
@@ -689,7 +697,9 @@ nav {
   align-items: center;
   gap: 0.35rem;
   border: 1px solid var(--ow-gold-soft);
-  border-radius: 999px;
+  /* FE-2: was 999px pill; micro-cut-corner chip matches .pane + chip geometric language */
+  border-radius: 3px;
+  clip-path: polygon(4px 0, 100% 0, 100% calc(100% - 4px), calc(100% - 4px) 100%, 0 100%, 0 4px);
   color: var(--ow-gold-bright);
   font-size: 0.76rem;
   padding: 0.2rem 0.6rem;
@@ -732,7 +742,8 @@ nav {
 .side-footer select {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  /* FE-2: geometric border-radius to match panel language */
+  border-radius: 2px;
   color: var(--ow-ink);
   padding: 0.4rem 0.5rem;
   font: inherit;
@@ -753,7 +764,8 @@ nav {
   gap: 0.3rem;
   background: transparent;
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  /* FE-2: geometric to match panel language */
+  border-radius: 2px;
   color: var(--ow-muted);
   font: inherit;
   font-size: 0.78rem;
@@ -837,6 +849,16 @@ nav {
 .apidown code {
   color: var(--ow-cyan);
   font-size: 0.78rem;
+}
+
+.apidown-tip {
+  display: block;
+  margin-top: 0.45rem;
+  padding: 0.3rem 0.6rem;
+  border-left: 2px solid var(--ow-gold-soft);
+  color: var(--ow-gold-bright);
+  font-size: 0.8rem;
+  background: rgba(240, 210, 138, 0.06);
 }
 
 @media (max-width: 760px) {

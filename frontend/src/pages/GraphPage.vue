@@ -510,7 +510,7 @@ onMounted(async () => {
   right: 0.6rem;
   z-index: 2;
   border: 1px solid var(--ow-gold-soft);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   background: rgba(13, 18, 42, 0.7);
   color: var(--ow-gold-bright);
   font: inherit;
@@ -562,14 +562,14 @@ onMounted(async () => {
 .f textarea {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.45rem 0.6rem;
   font: inherit;
   font-size: 0.86rem;
 }
 button {
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   cursor: pointer;
   font: inherit;
   font-size: 0.84rem;
@@ -640,7 +640,7 @@ button:disabled {
 .add-rel input {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.45rem 0.6rem;
   font: inherit;

@@ -279,7 +279,7 @@ const flavorNameCount = computed(
           <div class="r-head"><b>对话树已生成</b><span v-if="lastCost.dialogue" class="cost">${{ lastCost.dialogue.toFixed(4) }}</span></div>
           <div class="chips static">
             <span class="chip">{{ dlgResult.nodes }} 节点</span>
-            <span class="chip" :class="{ amber: dlgResult.lint }">{{ dlgResult.lint }} lint</span>
+            <span class="chip" :class="{ amber: dlgResult.lint }">{{ dlgResult.lint }} 条待复核</span>
             <span class="chip" :class="{ red: dlgResult.problems }">{{ dlgResult.problems }} 结构问题</span>
           </div>
           <p v-if="dlgResult.autoReviewIncomplete" class="auto-review-warn">
@@ -363,7 +363,7 @@ const flavorNameCount = computed(
           <div class="cards">
             <div v-for="(e, i) in flavorResult.accepted" :key="i" class="fcard"><b>{{ e.name }}</b><span class="muted">{{ e.description }}</span></div>
           </div>
-          <p v-if="flavorResult.rejected" class="muted small">{{ flavorResult.rejected }} 条被 lint 拦下。</p>
+          <p v-if="flavorResult.rejected" class="muted small">{{ flavorResult.rejected }} 条因引用越界被拦下。</p>
         </div>
         <EmptyState
           v-else
@@ -413,7 +413,7 @@ const flavorNameCount = computed(
 
 .tab {
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem 0.5rem 0 0;
+  border-radius: var(--ow-control-radius) var(--ow-control-radius) 0 0;
   background: transparent;
   color: var(--ow-muted);
   font: inherit;
@@ -482,7 +482,7 @@ input,
 select {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.5rem 0.65rem;
   font: inherit;
@@ -510,7 +510,11 @@ select:focus {
 .chip {
   border: 1px solid var(--ow-line);
   background: rgba(16, 22, 48, 0.6);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   color: var(--ow-muted);
   font: inherit;
   font-size: 0.8rem;
@@ -541,7 +545,7 @@ select:focus {
 button.primary {
   background: linear-gradient(180deg, #f0d28a 0%, #b9924a 100%);
   border: 1px solid rgba(240, 210, 138, 0.65);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: #241a05;
   font-weight: 600;
   padding: 0.55rem 1rem;
@@ -577,7 +581,11 @@ button.primary:disabled {
   font-size: 0.74rem;
   color: var(--ow-cyan);
   border: 1px solid rgba(143, 214, 232, 0.35);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   padding: 0.1rem 0.5rem;
 }
 
@@ -649,7 +657,11 @@ button.primary:disabled {
 .refine-round .badge {
   font-size: 0.72rem;
   padding: 0.1rem 0.5rem;
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   border: 1px solid var(--ow-line);
 }
 .badge.ok {

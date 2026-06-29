@@ -48,6 +48,14 @@ def _texts(ctx: AuditContext) -> Iterable[tuple[str, str, str]]:
     for term in ctx.bundle.terms.values():
         if term.description:
             yield f"term:{term.id}", "description", term.description
+        # Item 4: also scan forbidden words and aliases — they are injected verbatim into the
+        # [vocabulary-constraints] block, so they carry the same injection risk as descriptions.
+        for i, w in enumerate(term.forbidden):
+            if w:
+                yield f"term:{term.id}", f"forbidden.{i}", w
+        for i, a in enumerate(term.aliases):
+            if a:
+                yield f"term:{term.id}", f"aliases.{i}", a
     for entity in ctx.bundle.entities.values():
         if entity.description:
             yield f"entity:{entity.id}", "description", entity.description

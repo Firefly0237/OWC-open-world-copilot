@@ -382,7 +382,7 @@ onMounted(async () => {
 .drawer-toggle {
   background: transparent;
   border: 1px solid var(--ow-gold-soft);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-gold-bright);
   font: inherit;
   font-size: 0.82rem;
@@ -436,7 +436,11 @@ onMounted(async () => {
 .mi-kind {
   border: 1px solid var(--ow-gold-soft);
   background: var(--ow-gold-faint);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   color: var(--ow-gold-bright);
   font-size: 0.72rem;
   padding: 0.04rem 0.5rem;
@@ -476,7 +480,7 @@ onMounted(async () => {
 
 .sk {
   display: block;
-  border-radius: 0.45rem;
+  border-radius: var(--ow-control-radius);
   background: linear-gradient(
     100deg,
     rgba(46, 54, 88, 0.45) 40%,

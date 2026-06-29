@@ -17,6 +17,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..assist.industry import WORLD_RUBRIC_SOURCES, industry_source_block
+from ..assist.term_injection import build_term_block
 from ..content.lang import detect_language, language_directive
 from ..content.models import (
     POI,
@@ -107,6 +108,10 @@ class WorldSeedService:
         # suffix and the grounding lines for "the world so far" change per call.
         prefix = _common_prefix(project_pack, inspiration_pack, brief)
         base_user = _brief_user_message(brief)
+        # IN-1 L1: existing-canon vocabulary constraints, injected into every later stage so the
+        # generated world stays consistent with established terminology. Empty for a blank project,
+        # in which case _vocab_block is a no-op and the prompts are unchanged.
+        canon_terms = list(self.bundle.terms.values())
         payload: dict[str, Any] = {}
         relations: list[Any] = []
         reference_rows: list[Any] = []
@@ -135,7 +140,9 @@ class WorldSeedService:
         if brief.faction_count > 0:
             emit(stages.FACTIONS)
             factions = self._stage(
-                stages.FACTIONS, prefix + _factions_suffix(brief, world_lines), base_user
+                stages.FACTIONS,
+                prefix + _factions_suffix(brief, world_lines, canon_terms),
+                base_user,
             )
             payload["factions"] = _list(factions.get("factions"))
             relations += _list(factions.get("relations"))
@@ -148,7 +155,9 @@ class WorldSeedService:
         if brief.region_count > 0:
             emit(stages.REGIONS)
             regions = self._stage(
-                stages.REGIONS, prefix + _regions_suffix(brief, world_lines), base_user
+                stages.REGIONS,
+                prefix + _regions_suffix(brief, world_lines, canon_terms),
+                base_user,
             )
             payload["regions"] = _list(regions.get("regions"))
             payload["locations"] = _list(regions.get("locations"))
@@ -162,7 +171,11 @@ class WorldSeedService:
         # --- stage 4: cast, grounded in factions + places (deepens creator key characters) ---
         if brief.npc_count > 0:
             emit(stages.CAST)
-            cast = self._stage(stages.CAST, prefix + _cast_suffix(brief, world_lines), base_user)
+            cast = self._stage(
+                stages.CAST,
+                prefix + _cast_suffix(brief, world_lines, canon_terms),
+                base_user,
+            )
             payload["npcs"] = _list(cast.get("npcs"))
             relations += _list(cast.get("relations"))
             reference_rows += _list(cast.get("reference_report"))
@@ -224,7 +237,7 @@ class WorldSeedService:
         prefix = _common_prefix(empty, empty, brief)
         base_user = _brief_user_message(brief)
         world_lines = _revise_world_lines(payload, stage)
-        suffix = _STAGE_SUFFIX[stage](brief, world_lines)
+        suffix = _STAGE_SUFFIX[stage](brief, world_lines, list(self.bundle.terms.values()))
         directive = (
             f"\n\n[REVISE] 只重做本阶段以满足审阅意见，保持与世界其余部分（上方"
             f"「已确立」）的接地不变，沿用其中的既有 id：{feedback.strip()}"
@@ -304,7 +317,8 @@ class WorldSeedService:
         """Generate the quests stage, then (if a critic is wired) run the SHARED critique→refine
         loop genesis and expansion both use (``critic.run_quest_refine_loop``)."""
         emit(stages.QUESTS)
-        system = prefix + _quests_suffix(brief, world_lines)
+        canon_terms = list(self.bundle.terms.values())
+        system = prefix + _quests_suffix(brief, world_lines, canon_terms)
         result = self._stage(stages.QUESTS, system, base_user)
         quests = _list(result.get("quests"))
         relations = _list(result.get("relations"))
@@ -335,6 +349,7 @@ class WorldSeedService:
             brief=brief.idea,
             regenerate=regenerate,
             emit=emit,
+            terms=canon_terms,  # BE-2: pass vocab constraints to critic
         )
 
 
@@ -504,7 +519,9 @@ def _premise_suffix(brief: WorldSeedBrief) -> str:
     )
 
 
-def _factions_suffix(brief: WorldSeedBrief, world_lines: list[str]) -> str:
+def _factions_suffix(
+    brief: WorldSeedBrief, world_lines: list[str], terms: list[Term] | None = None
+) -> str:
     return (
         _stage_header(stages.FACTIONS, "2/5", "FACTIONS")
         + f"Design exactly {brief.faction_count} factions that OCCUPY the conflict axes below. "
@@ -515,11 +532,13 @@ def _factions_suffix(brief: WorldSeedBrief, world_lines: list[str]) -> str:
         "want, WHO they oppose and why, and the pressure breaking on them right now}.\n"
         "- relations: faction↔faction ties among the ids you just defined {source, target, kind} "
         "(enemy_of / rival_of / allied_with / trades_with) — the web must show real push-and-pull, "
-        "not all-allies.\n" + _grounding_block(world_lines)
+        "not all-allies.\n" + _vocab_block(terms) + _grounding_block(world_lines)
     )
 
 
-def _regions_suffix(brief: WorldSeedBrief, world_lines: list[str]) -> str:
+def _regions_suffix(
+    brief: WorldSeedBrief, world_lines: list[str], terms: list[Term] | None = None
+) -> str:
     return (
         _stage_header(stages.REGIONS, "3/5", "REGIONS & LOCATIONS")
         + f"Design exactly {brief.region_count} regions and a handful of buildable locations, "
@@ -529,11 +548,13 @@ def _regions_suffix(brief: WorldSeedBrief, world_lines: list[str]) -> str:
         '- locations: each {id ("loc_*"), name, description, purpose, region_id (one of the '
         "region ids above), controlling_faction (one of the FACTION ids below), tags []}.\n"
         "Reference the faction ids EXACTLY as written below — do not rename or invent factions.\n"
-        + _grounding_block(world_lines)
+        + _vocab_block(terms) + _grounding_block(world_lines)
     )
 
 
-def _cast_suffix(brief: WorldSeedBrief, world_lines: list[str]) -> str:
+def _cast_suffix(
+    brief: WorldSeedBrief, world_lines: list[str], terms: list[Term] | None = None
+) -> str:
     key_cast = (
         "You MUST keep and deepen the creator's key characters (never replace them); weave them "
         "into the cast and into relations.\n"
@@ -552,11 +573,14 @@ def _cast_suffix(brief: WorldSeedBrief, world_lines: list[str]) -> str:
         + key_cast
         + "- relations: ties among the npcs and to factions, using the ids below {source, target, "
         "kind}.\n"
-        "Reference faction/location ids EXACTLY as written below.\n" + _grounding_block(world_lines)
+        "Reference faction/location ids EXACTLY as written below.\n"
+        + _vocab_block(terms) + _grounding_block(world_lines)
     )
 
 
-def _quests_suffix(brief: WorldSeedBrief, world_lines: list[str]) -> str:
+def _quests_suffix(
+    brief: WorldSeedBrief, world_lines: list[str], terms: list[Term] | None = None
+) -> str:
     return (
         _stage_header(stages.QUESTS, "5/5", "QUESTS")
         + f"Design exactly {brief.quest_count} quests grounded in the cast and places below. Each "
@@ -571,8 +595,28 @@ def _quests_suffix(brief: WorldSeedBrief, world_lines: list[str]) -> str:
         "outcomes INSIDE the climax stage, not as parallel ending stages), "
         "tags []}.\n"
         "Reference the cast and location ids EXACTLY as written below.\n"
-        + _grounding_block(world_lines)
+        + _vocab_block(terms) + _grounding_block(world_lines)
     )
+
+
+def _vocab_block(terms: list[Term] | None) -> str:
+    """L1 vocabulary-constraint injection (IN-1) for a worldgen stage suffix.
+
+    Injects the project's existing-canon term constraints (forbidden / prefer-canonical) so a
+    generated faction/region/cast/quest stays consistent with established terminology. Returns ""
+    (no extra newline) when there is nothing to inject, so a world with no terms is byte-identical
+    to the pre-IN-1 prompt.
+
+    BE-6: When there are >20 terms, use each term's own id and canonical form as seed_hits so the
+    relevance filter retains all terms that mention their own canonical name (i.e. all of them).
+    This avoids the prior silent no-op (context_hits=[] with >20 terms → inject nothing).
+    """
+    effective_terms = terms or []
+    # BE-6: for worldgen, there are no per-item retrieval hits; instead seed with each term's
+    # own id and canonical so the >20-terms relevance filter keeps every term.
+    seed_hits = [t.id for t in effective_terms] + [t.canonical for t in effective_terms]
+    block = build_term_block(effective_terms, context_hits=seed_hits, inject_terms=True)
+    return block + "\n" if block else ""
 
 
 def _grounding_block(world_lines: list[str]) -> str:

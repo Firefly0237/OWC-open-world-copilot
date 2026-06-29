@@ -7,6 +7,7 @@ filesystem project registry, network calls, or real LLM credentials.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -58,12 +59,85 @@ def _content_bundle() -> dict:
     }
 
 
+def _overview_bundle() -> dict:
+    return {
+        "entities": {
+            "fac_iron": {
+                "id": "fac_iron",
+                "name": "铁盟",
+                "type": "faction",
+                "description": "铁盟是一个势力。",
+            },
+            "fac_salt": {
+                "id": "fac_salt",
+                "name": "盐会",
+                "type": "faction",
+                "description": "盐会是一个势力。",
+            },
+            "fac_mist": {
+                "id": "fac_mist",
+                "name": "雾党",
+                "type": "faction",
+                "description": "雾党是一个势力。",
+            },
+            "npc_a": {
+                "id": "npc_a",
+                "name": "阿尔",
+                "type": "npc",
+                "description": "阿尔是一名角色。",
+            },
+            "npc_b": {
+                "id": "npc_b",
+                "name": "贝拉",
+                "type": "npc",
+                "description": "贝拉是一名角色。",
+            },
+            "npc_c": {
+                "id": "npc_c",
+                "name": "卡尔",
+                "type": "npc",
+                "description": "卡尔是一名角色。",
+            },
+            "npc_d": {
+                "id": "npc_d",
+                "name": "黛西",
+                "type": "npc",
+                "description": "黛西是一名角色。",
+            },
+            "npc_e": {
+                "id": "npc_e",
+                "name": "俄岚",
+                "type": "npc",
+                "description": "俄岚是一名角色。",
+            },
+        },
+        "relations": [
+            {"source": "npc_a", "target": "fac_iron", "kind": "member_of"},
+            {"source": "npc_b", "target": "fac_iron", "kind": "member_of"},
+            {"source": "npc_c", "target": "fac_salt", "kind": "member_of"},
+            {"source": "npc_d", "target": "fac_salt", "kind": "member_of"},
+            {"source": "npc_e", "target": "fac_mist", "kind": "member_of"},
+            {"source": "fac_iron", "target": "fac_salt", "kind": "enemy_of"},
+            {"source": "fac_salt", "target": "fac_mist", "kind": "rival_of"},
+        ],
+    }
+
+
 def _write_project(content_root, content: dict | None = None) -> None:
     ContentStore(content_root).save(ContentBundle.model_validate(content or _content_bundle()))
 
 
 def _register_project(monkeypatch, project: str, content_root) -> None:
     monkeypatch.setenv("OWCOPILOT_PROJECTS_JSON", json.dumps({project: str(content_root)}))
+
+
+def _wait_done(client: TestClient, job_id: str, *, attempts: int = 100) -> dict:
+    for _ in range(attempts):
+        body = client.get(f"/jobs/{job_id}").json()
+        if body["status"] in {"done", "failed"}:
+            return body
+        time.sleep(0.05)
+    raise AssertionError("job did not finish in time")
 
 
 def test_project_audit_runs_default_rules_and_persists_issues() -> None:
@@ -223,6 +297,34 @@ def test_registered_project_context_pack_and_ask_use_project_context(
     assert "entity:npc_aldric" in context_response.json()["refs"]
     assert ask_response.status_code == 200
     assert ask_response.json()["answer"]["citations"][0]["ref"] == "entity:npc_aldric"
+
+
+def test_registered_project_ask_uses_qa_overview_reports(tmp_path, monkeypatch) -> None:
+    content_root = tmp_path / "content"
+    _write_project(content_root, _overview_bundle())
+    _register_project(monkeypatch, "demo", content_root)
+    client = TestClient(create_app())
+
+    created = client.post(
+        "/projects/demo/jobs",
+        json={"kind": "build_overview", "params": {"llm_mode": "offline"}},
+    )
+    assert created.status_code == 202, created.text
+    job = _wait_done(client, created.json()["job_id"])
+    assert job["status"] == "done", job
+
+    ask_response = client.post(
+        "/projects/demo/ask",
+        json={
+            "query": "列出这个世界的主要势力以及它们之间的关系",
+            "budget_tokens": 800,
+        },
+    )
+
+    assert ask_response.status_code == 200
+    answer = ask_response.json()["answer"]
+    assert answer["refused"] is False
+    assert any(citation["ref"].startswith("community:") for citation in answer["citations"])
 
 
 def test_unregistered_project_without_inline_content_is_404() -> None:

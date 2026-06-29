@@ -154,7 +154,7 @@ async function instantiate(): Promise<void> {
   background: var(--ow-gold, #d8b46a);
   color: #1a1406;
   border: none;
-  border-radius: 0.45rem;
+  border-radius: var(--ow-control-radius);
   padding: 0.4rem 1rem;
   cursor: pointer;
 }

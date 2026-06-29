@@ -61,6 +61,7 @@ from ..app.actions import (
     delete_object_action,
     detect_contradictions_action,
     draft_quest_logic_action,
+    get_review_item_context_action,
     import_from_engine_action,
     instantiate_template_action,
     list_mapping_templates_action,
@@ -689,6 +690,38 @@ class ReviewItemsResponse(BaseModel):
 class ReviewDecideRequest(BaseModel):
     decision: str = Field(pattern="^(accepted|rejected)$")
     operator: str = Field(min_length=1, max_length=80)
+
+
+# IN-4: Response models for GET /projects/{p}/review_items/{id}:context
+class PayloadStageSummary(BaseModel):
+    id: str
+    description: str
+
+
+class PayloadSummary(BaseModel):
+    title: str | None = None
+    objective: str | None = None
+    stages: list[PayloadStageSummary] = []
+    summary: str | None = None
+
+
+class CalibrationContextResp(BaseModel):
+    item_type: str
+    false_pass_rate: float | None = None
+    sample_size: int
+    sufficient_sample: bool
+
+
+class ReviewItemContextResponse(BaseModel):
+    item_id: str
+    item_type: str
+    status: str
+    payload_summary: PayloadSummary
+    issue_refs: list[str] = []
+    critic_verdict: str | None = None
+    critic_score: float | None = None
+    refine_trail_last_reflection: str | None = None
+    calibration_context: CalibrationContextResp
 
 
 class ReviewDecideResponse(BaseModel):
@@ -2353,6 +2386,53 @@ def create_app() -> FastAPI:
     ) -> ReviewItemsResponse:
         result = list_review_items_action(_project_root_or_404(project))
         return ReviewItemsResponse(project=project, **result)
+
+    @app.get(
+        "/projects/{project}/review_items/{item_id}:context",
+        response_model=ReviewItemContextResponse,
+    )
+    def get_review_item_context(
+        project: str,
+        item_id: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> ReviewItemContextResponse:
+        """Read-only aggregated context for a single review item (IN-4).
+
+        Returns payload summary, issue refs, critic verdict/score, refine trail reflection
+        and calibration statistics. Pure GET; no writes, idempotent, no side effects.
+        """
+        try:
+            result = get_review_item_context_action(_project_root_or_404(project), item_id)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=f"review item not found: {e}") from e
+        # Coerce nested dicts into the response model
+        payload_summary_raw = result.get("payload_summary", {})
+        stages = [
+            PayloadStageSummary(**s) for s in payload_summary_raw.get("stages", [])
+        ]
+        cal_raw = result.get("calibration_context", {})
+        return ReviewItemContextResponse(
+            item_id=result["item_id"],
+            item_type=result["item_type"],
+            status=result["status"],
+            payload_summary=PayloadSummary(
+                title=payload_summary_raw.get("title"),
+                objective=payload_summary_raw.get("objective"),
+                stages=stages,
+                summary=payload_summary_raw.get("summary"),
+            ),
+            issue_refs=result.get("issue_refs", []),
+            critic_verdict=result.get("critic_verdict"),
+            critic_score=result.get("critic_score"),
+            refine_trail_last_reflection=result.get("refine_trail_last_reflection"),
+            calibration_context=CalibrationContextResp(
+                item_type=cal_raw["item_type"],
+                false_pass_rate=cal_raw.get("false_pass_rate"),
+                sample_size=cal_raw["sample_size"],
+                sufficient_sample=cal_raw["sufficient_sample"],
+            ),
+        )
 
     @app.get("/projects/{project}/review/calibration")
     def review_calibration(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from owcopilot.retrieval.models import RetrievalHit
-from owcopilot.retrieval.rerank import rerank_hits
+from owcopilot.retrieval.rerank import LexicalReScorer, rerank_hits
 
 
 def _hit(ref: str, title: str, body: str = "", *, score: float = 0.0) -> RetrievalHit:
@@ -93,3 +93,59 @@ def test_rerank_does_not_drop_or_invent_candidates() -> None:
 
     assert {hit.ref for hit in ranked} == {"entity:a", "entity:b", "entity:c"}
     assert len(ranked) == len(hits)
+
+
+# ---------------------------------------------------------------------------
+# Terminology / docstring regression tests (RT5)
+# ---------------------------------------------------------------------------
+
+
+def test_rerank_module_docstring_uses_lexical_re_scorer_not_reranker() -> None:
+    """RT5: rerank.py module docstring must say 'LexicalReScorer' not 'lexical reranker'."""
+    import inspect
+
+    import owcopilot.retrieval.rerank as rerank_mod
+
+    doc = rerank_mod.__doc__ or ""
+    # The old erroneous phrasing used 'reranker' to describe the lexical scorer
+    assert "lexical reranker" not in doc.lower(), (
+        "Module docstring should not use 'lexical reranker'. "
+        "The correct term is 'LexicalReScorer' or 'lexical re-scorer'."
+    )
+    # The correct name should appear somewhere in the module docstring or class
+    combined = doc + inspect.getsource(rerank_mod)
+    assert "LexicalReScorer" in combined, (
+        "LexicalReScorer class/name must appear in the rerank module."
+    )
+
+
+def test_rerank_module_has_no_duplicate_bullet_block() -> None:
+    """RT5: the module docstring must not contain the duplicated signals bullet block."""
+    import owcopilot.retrieval.rerank as rerank_mod
+
+    doc = rerank_mod.__doc__ or ""
+    # The first bullet item marker for the block appears exactly once
+    count = doc.count("* breadth  --")
+    assert count == 1, (
+        f"Module docstring contains the signals bullet block {count} time(s); expected exactly 1. "
+        "Remove the duplicate block introduced in the original source."
+    )
+
+
+def test_lexical_rescorer_class_is_importable_and_named_correctly() -> None:
+    """LexicalReScorer must be importable as the canonical class name."""
+    scorer = LexicalReScorer()
+    assert hasattr(scorer, "rerank"), "LexicalReScorer must have a .rerank() method."
+
+
+def test_lexical_rescorer_rerank_delegates_to_rerank_hits() -> None:
+    """LexicalReScorer.rerank must produce the same output as the standalone rerank_hits()."""
+    hits = [
+        _hit("entity:a", "Iron Ward", score=0.9),
+        _hit("entity:b", "Caravan Guild", score=0.4),
+    ]
+    scorer = LexicalReScorer()
+    via_class = scorer.rerank("iron ward patrol", hits)
+    via_fn = rerank_hits("iron ward patrol", hits)
+
+    assert [h.ref for h in via_class] == [h.ref for h in via_fn]

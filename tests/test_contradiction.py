@@ -87,3 +87,64 @@ def test_same_kind_relations_are_not_flagged() -> None:
     )
     report = ContradictionDetector(bundle=bundle).detect(use_llm=False)
     assert report.candidate_count == 0  # same kind twice is not a contradiction
+
+
+def _two_statement_world() -> ContentBundle:
+    """An entity with TWO statements about it (own description + a relation description naming it),
+    so the semantic layer actually runs `embed_many` and a degrading embedder trips mid-run."""
+    return ContentBundle(
+        entities={
+            "fac_a": Entity(
+                id="fac_a",
+                name="铁律盟",
+                type=EntityType.FACTION,
+                description="北境最强的军事同盟。",
+            ),
+            "fac_b": Entity(id="fac_b", name="怒潮帮", type=EntityType.FACTION),
+        },
+        relations=[
+            Relation(
+                source="fac_a",
+                target="fac_b",
+                kind="盟友",
+                metadata={"description": "铁律盟与怒潮帮缔结盟约共御外敌。"},
+            ),
+        ],
+    )
+
+
+class _StubSemanticEmbedder:
+    """Non-degrading semantic stand-in (model_id ``st:*``) for the healthy-path control."""
+
+    model_id = "st:stub"
+
+    def embed(self, text: str) -> list[float]:
+        return self.embed_many([text])[0]
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _ in texts]
+
+
+def test_contradiction_semantic_used_is_false_after_runtime_degrade() -> None:
+    # Same red line as sweep: the semantic model fails to load at first embed and degrades to the
+    # hashing stub mid-run. `semantic_used` must read the embedder's LIVE backend, not the
+    # construction-time `st:` snapshot, so the report never claims semantic when it ran on hashing.
+    # `SemanticEmbedder("bad/model")` triggers the real fallback at $0, no model download.
+    from owcopilot.retrieval.embedding import SemanticEmbedder
+
+    embedder = SemanticEmbedder("definitely-not-a-real/model")
+    assert embedder.model_id.startswith("st:")  # construction-time snapshot looks semantic
+    report = ContradictionDetector(bundle=_two_statement_world(), embedder=embedder).detect(
+        use_llm=False, semantic_threshold=0.6
+    )
+    assert embedder.degraded is True  # actually ran on the hashing stub
+    assert embedder.model_id.startswith("hashing-")
+    assert report.semantic_used is False  # honest: NOT semantic, despite the `st:` snapshot
+
+
+def test_contradiction_semantic_used_true_on_real_semantic_path() -> None:
+    # Control: a non-degrading semantic stub keeps reporting semantic_used=True.
+    report = ContradictionDetector(
+        bundle=_two_statement_world(), embedder=_StubSemanticEmbedder()
+    ).detect(use_llm=False)
+    assert report.semantic_used is True

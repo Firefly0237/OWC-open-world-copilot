@@ -44,6 +44,20 @@ class FailoverProvider:
         self.passthrough = passthrough
         self.failovers = 0
 
+    @property
+    def model(self) -> str:
+        """Real model id of the provider a call will hit first, for the gateway's cache key and
+        ``gen_ai.request.model``.
+
+        The gateway resolves this *before* the call, so it reflects the primary — the provider
+        actually tried first. Without it the gateway's ``getattr(provider, "model", None)`` would
+        miss (a wrapper has no own ``model``) and fall back to the tier label, collapsing the
+        primary's and secondary's distinct models onto one tier in both the cache key and OTEL —
+        the very ``gen_ai.request.model`` degradation the model-back-fill exists to prevent. Empty
+        if the inner provider exposes no ``model`` (e.g. an offline fake).
+        """
+        return getattr(self.primary, "model", "") or ""
+
     def complete(self, *, system: str, user: str, model: str) -> tuple:
         try:
             return self.primary.complete(system=system, user=user, model=model)
@@ -80,6 +94,14 @@ class CircuitBreakerProvider:
         self._failures = 0
         self._opened_at: float | None = None  # None = closed
         self.trips = 0
+
+    @property
+    def model(self) -> str:
+        """Real model id of the wrapped provider, transparently exposed for the gateway's cache
+        key and ``gen_ai.request.model``. Delegates to ``inner`` (which may itself be a
+        :class:`FailoverProvider`, so the passthrough chains down to the live model). Empty if the
+        inner provider exposes no ``model``."""
+        return getattr(self.inner, "model", "") or ""
 
     @property
     def is_open(self) -> bool:

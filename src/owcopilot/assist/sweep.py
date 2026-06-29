@@ -48,9 +48,13 @@ _JUDGE_TEXT_CHARS = 320
 _EMBED_TEXT_CHARS = 1200  # how much of an object's text the semantic layer embeds (speed cap)
 
 
-def _is_semantic(embedder: Embedder) -> bool:
-    """A real neural embedder (bge-m3) tags its model_id ``st:*``; the hashing stub does not."""
-    return embedder.model_id.startswith("st:")
+def _is_semantic(embedder: Embedder | None) -> bool:
+    """A real neural embedder (bge-m3) tags its model_id ``st:*``; the hashing stub does not.
+
+    Reads ``model_id`` live so a runtime degrade (semantic model failed to load → hashing
+    fallback) is seen as non-semantic — never snapshot this, or a degraded process would keep
+    claiming ``st:`` (same live-read rule as ``VectorRetriever.is_semantic``)."""
+    return embedder is not None and embedder.model_id.startswith("st:")
 
 
 def _normalise_rows(matrix: np.ndarray) -> np.ndarray:
@@ -250,6 +254,10 @@ class ThemeSweepService:
                     verdict="review",
                 )
                 semantic_flagged += 1
+        # Re-read the embedder's backend live now that the semantic layer has embedded — a model
+        # that degraded to hashing mid-run flips ``model_id`` to ``hashing-*``, so this reports the
+        # backend actually used, not the construction-time guess (mirrors VectorRetriever).
+        semantic_live = _is_semantic(self.embedder)
 
         # ---- layer 2: LLM judge on everything the lexical pass did not confirm, ordered by
         # semantic similarity so the cap is spent on the likeliest. A "related" verdict upgrades a
@@ -318,9 +326,13 @@ class ThemeSweepService:
             llm_used=bool(use_llm and self.gateway is not None),
             judged_count=judged_count,
             judge_skipped=judge_skipped,
-            semantic_used=self.embedder is not None,
+            # Read the embedder's live backend AFTER the semantic layer has embedded: if the
+            # model failed to load and degraded to the hashing stub mid-run, ``_is_semantic``
+            # now reads ``hashing-*`` and reports False — never the construction-time snapshot,
+            # so the work order can't claim "bge-m3 enabled" while running on the stub.
+            semantic_used=semantic_live,
             semantic_flagged=semantic_flagged,
-            semantic_threshold=semantic_threshold if self.embedder is not None else 0.0,
+            semantic_threshold=semantic_threshold if semantic_live else 0.0,
         )
 
     def _semantic_scores(self, terms: list[str], rows: list[dict[str, Any]]) -> dict[str, float]:

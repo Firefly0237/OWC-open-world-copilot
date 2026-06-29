@@ -17,7 +17,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from ..assist.barks import BarkBatchService
-from ..assist.calibration import build_calibration_report, critic_from_trail
+from ..assist.calibration import build_calibration_report, critic_from_trail, primary_dim_from_trail
 from ..assist.characters import (
     CharacterDraft,
     CharacterProfileService,
@@ -27,6 +27,7 @@ from ..assist.critic import BarkCritic, DialogueCritic, FlavorCritic, QuestCriti
 from ..assist.dialogue_trees import DialogueTreeService, OfflineDialogueTreeProvider
 from ..assist.drafts import QuestDraftService
 from ..assist.flavor import FlavorBatchService, OfflineFlavorProvider
+from ..assist.lessons import extract_lessons_from_report
 from ..assist.offline import OfflineBarksProvider, OfflineQuestDraftProvider
 from ..assist.prose_check import check_prose
 from ..assist.review_queue import ReviewItemType, ReviewQueue
@@ -56,7 +57,12 @@ from ..extraction import (
 )
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
 from ..llm.cache import CacheBackend, NoOpCache, build_cache_backend
-from ..llm.gateway import LLMGateway, OpenAICompatProvider, require_offline_llm_allowed
+from ..llm.gateway import (
+    LLMGateway,
+    OpenAICompatProvider,
+    lesson_injection_enabled,
+    require_offline_llm_allowed,
+)
 from ..llm.resilience import build_real_provider
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
@@ -69,7 +75,12 @@ from ..pipeline.patches import (
     rollback_patch_workflow,
     suggest_for_issue,
 )
-from ..pipeline.review import decide_review_item
+from ..pipeline.review import (
+    decide_review_item,
+)
+from ..pipeline.review import (
+    get_review_item_context_action as _get_review_item_context_action,
+)
 from ..qa.community_index import CommunityIndexService
 from ..qa.offline import OfflineCommunityReportProvider, OfflineQAProvider
 from ..qa.service import LoreQAService
@@ -348,7 +359,10 @@ def run_draft_action(
     llm_mode: str = "offline",
     llm_model: str = "deepseek-v4-flash",
     refine_rounds: int = 2,
+    inject_lessons: bool | None = None,  # Item 6: None = read OWCOPILOT_INJECT_LESSONS env
 ) -> dict[str, Any]:
+    # Item 6: resolve lesson injection flag — explicit arg wins, else consult env var.
+    _inject = lesson_injection_enabled() if inject_lessons is None else inject_lessons
     with _project(content_root, sqlite_path) as project:
         gateway, telemetry = _gateway(
             task="quest_draft",
@@ -356,6 +370,12 @@ def run_draft_action(
             llm_model=llm_model,
             offline_provider=OfflineQuestDraftProvider(),
         )
+        # IN-3 BE-1: fetch lessons from the cross-session archive so they can be injected
+        # into the generation system prompt. Returns [] (not None) when the archive is empty,
+        # so the service receives an explicit empty list rather than None, which means
+        # inject_lessons is still True — the prompt block just renders as "" (no-op).
+        # Item 6: skip DB read entirely when injection is disabled — no point fetching.
+        lessons = project.sqlite_store.get_lessons_for_type("quest_draft") if _inject else []
         # The critic + refine loop raises autonomous quality so the review queue gets near
         # production-ready drafts; deterministic audit stays the hard gate and review stays final.
         critic = QuestCritic(gateway=gateway) if refine_rounds > 0 else None
@@ -366,16 +386,23 @@ def run_draft_action(
             bundle=project.bundle,
             critic=critic,
             max_refine_rounds=refine_rounds,
+            lessons=lessons,  # IN-3 BE-1: cross-session lesson archive
         ).draft_quest(brief, budget_tokens=budget_tokens)
-        critic_verdict, critic_score = critic_from_trail(
-            [r.model_dump(mode="json") for r in result.refine_trail]
-        )
+        _trail_dump = [r.model_dump(mode="json") for r in result.refine_trail]
+        critic_verdict, critic_score = critic_from_trail(_trail_dump)
+        critic_primary_dim = primary_dim_from_trail(_trail_dump)  # IN-B1 M2
         item = ReviewQueue(project.sqlite_store).add_quest_draft(
             result.quest.model_dump(mode="json", exclude_none=True),
             issue_refs=[issue_fingerprint(issue) for issue in result.issues],
             critic_verdict=critic_verdict,
             critic_score=critic_score,
+            critic_primary_dim=critic_primary_dim,  # IN-B1 M2
         )
+        # Item 8: persist telemetry (non-fatal — observability must not break the primary flow).
+        try:
+            project.sqlite_store.record_telemetry(telemetry.records)
+        except Exception:  # noqa: BLE001
+            pass
         telemetry_summary = telemetry.summary()
         return {
             "quest": result.quest.model_dump(mode="json", exclude_none=True),
@@ -401,6 +428,7 @@ def run_barks_action(
     refine_rounds: int = 0,
     llm_mode: str = "offline",
     llm_model: str = "deepseek-v4-flash",
+    inject_lessons: bool | None = None,  # Item 6: None = read OWCOPILOT_INJECT_LESSONS env
 ) -> dict[str, Any]:
     with _project(content_root, sqlite_path) as project:
         unknown = [sid for sid in speaker_ids if sid not in project.bundle.entities]
@@ -425,6 +453,11 @@ def run_barks_action(
             max_chars=max_chars,
             allowed_entity_ids=set(speaker_ids),
         )
+        # Item 8: persist telemetry (non-fatal).
+        try:
+            project.sqlite_store.record_telemetry(telemetry.records)
+        except Exception:  # noqa: BLE001
+            pass
         telemetry_summary = telemetry.summary()
         return {
             "accepted": [
@@ -540,6 +573,9 @@ def run_world_seed_action(
             max_refine_rounds=refine_rounds,
         ).generate(parsed, budget_tokens=budget_tokens, progress=progress)
         issues = project.audit_runner.run(AuditContext.from_bundle(draft.bundle)).issues
+        _trail_dump = [r.model_dump(mode="json") for r in draft.refine_trail]
+        critic_verdict, critic_score = critic_from_trail(_trail_dump)
+        critic_primary_dim = primary_dim_from_trail(_trail_dump)  # IN-B1 M2
         item = ReviewQueue(project.sqlite_store).add_world_seed(
             {
                 "id": draft.id,
@@ -549,9 +585,12 @@ def run_world_seed_action(
                 "reference_report": [row.model_dump(mode="json") for row in draft.reference_report],
                 "project_context_refs": draft.project_context_refs,
                 "inspiration_context_refs": draft.inspiration_context_refs,
-                "refine_trail": [r.model_dump(mode="json") for r in draft.refine_trail],
+                "refine_trail": _trail_dump,
             },
             issue_refs=[issue_fingerprint(issue) for issue in issues],
+            critic_verdict=critic_verdict,
+            critic_score=critic_score,
+            critic_primary_dim=critic_primary_dim,  # IN-B1 M2
         )
         telemetry_summary = telemetry.summary()
         return {
@@ -617,6 +656,9 @@ def run_world_expand_action(
             for issue in project.audit_runner.run(AuditContext.from_bundle(merged)).issues
             if issue_fingerprint(issue) not in baseline
         ]
+        _trail_dump = [r.model_dump(mode="json") for r in draft.refine_trail]
+        critic_verdict, critic_score = critic_from_trail(_trail_dump)
+        critic_primary_dim = primary_dim_from_trail(_trail_dump)  # IN-B1 M2
         item = ReviewQueue(project.sqlite_store).add_world_seed(
             {
                 "id": draft.id,
@@ -631,9 +673,12 @@ def run_world_expand_action(
                 "reference_report": [row.model_dump(mode="json") for row in draft.reference_report],
                 "project_context_refs": draft.project_context_refs,
                 "inspiration_context_refs": draft.inspiration_context_refs,
-                "refine_trail": [r.model_dump(mode="json") for r in draft.refine_trail],
+                "refine_trail": _trail_dump,
             },
             issue_refs=[issue_fingerprint(issue) for issue in new_issues],
+            critic_verdict=critic_verdict,
+            critic_score=critic_score,
+            critic_primary_dim=critic_primary_dim,  # IN-B1 M2
         )
         telemetry_summary = telemetry.summary()
         return {
@@ -706,6 +751,20 @@ def decide_review_action(
         }
 
 
+def get_review_item_context_action(
+    content_root: str | Path,
+    item_id: str,
+    *,
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    """Aggregated read-only context for a single review item (IN-4).
+
+    Raises KeyError when item_id does not exist. Never writes to the store.
+    """
+    with _project(content_root, sqlite_path) as project:
+        return _get_review_item_context_action(project, item_id)
+
+
 def reviewer_calibration_action(
     content_root: str | Path,
     *,
@@ -716,8 +775,12 @@ def reviewer_calibration_action(
     with _project(content_root, sqlite_path) as project:
         resolved = ReviewQueue(project.sqlite_store).list_resolved()
         report = build_calibration_report(resolved)
+        # IN-3 BE-1: extract and persist lessons from false-pass data so they can be
+        # injected into future drafts. This is the write trigger for the lesson archive.
+        lessons_written = extract_lessons_from_report(report, project.sqlite_store)
         return {
             **report.model_dump(mode="json"),
+            "lessons_written": lessons_written,
             "cost_budget": _deterministic_cost_budget("review_calibration"),
         }
 
@@ -1249,6 +1312,7 @@ def run_character_action(
     llm_model: str = "deepseek-v4-flash",
     refine_rounds: int = 1,
     progress: Callable[[str, dict[str, Any]], None] | None = None,
+    inject_lessons: bool | None = None,  # Item 6: None = read OWCOPILOT_INJECT_LESSONS env
 ) -> dict[str, Any]:
     """Generate one detailed character sheet grounded in the world; queue it for review."""
     from ..assist.characters import (
@@ -1282,9 +1346,9 @@ def run_character_action(
         emit("generating")
         draft = service.generate(parsed, budget_tokens=budget_tokens)
         emit("parsing")
-        critic_verdict, critic_score = critic_from_trail(
-            [r.model_dump(mode="json") for r in draft.refine_trail]
-        )
+        _char_trail_dump = [r.model_dump(mode="json") for r in draft.refine_trail]
+        critic_verdict, critic_score = critic_from_trail(_char_trail_dump)
+        critic_primary_dim = primary_dim_from_trail(_char_trail_dump)  # IN-B1 M2
         item = ReviewQueue(project.sqlite_store).add_character_profile(
             {
                 "entity": draft.entity.model_dump(mode="json", exclude_none=True),
@@ -1294,7 +1358,13 @@ def run_character_action(
             },
             critic_verdict=critic_verdict,
             critic_score=critic_score,
+            critic_primary_dim=critic_primary_dim,  # IN-B1 M2
         )
+        # Item 8: persist telemetry (non-fatal).
+        try:
+            project.sqlite_store.record_telemetry(telemetry.records)
+        except Exception:  # noqa: BLE001
+            pass
         telemetry_summary = telemetry.summary()
         return {
             "entity": draft.entity.model_dump(mode="json", exclude_none=True),
@@ -2281,16 +2351,20 @@ def recognize_import_action(
     (see ``_recognize_finish``). Recognition never auto-lands; new/changed go to human review."""
     import json
 
+    from ..content.encoding import decode_bytes
+
     with _project(content_root, sqlite_path) as project:
         source_name = Path(input_path).name
         rows = _read_table_rows(input_path) if source_format == "table" else None
+        # Use decode_bytes (not read_text(encoding="utf-8")) so GB18030 / UTF-16-BOM files
+        # work correctly on Chinese Windows machines — fixes the P2 hardcoded-utf-8 bug.
         text = (
-            Path(input_path).read_text(encoding="utf-8")
+            decode_bytes(Path(input_path).read_bytes())
             if source_format in {"ink", "yarn"}
             else None
         )
         data = (
-            json.loads(Path(input_path).read_text(encoding="utf-8"))
+            json.loads(decode_bytes(Path(input_path).read_bytes()))
             if source_format in {"articy", "ue", "unity"}
             else None
         )
@@ -2546,9 +2620,9 @@ def draft_quest_logic_action(
         result = draft_quest_logic(
             gateway=gateway, quest=quest, intent=intent, max_rounds=max(0, refine_rounds) + 1
         )
-        critic_verdict, critic_score = critic_from_trail(
-            [r.model_dump(mode="json") for r in result.trail]
-        )
+        _logic_trail_dump = [r.model_dump(mode="json") for r in result.trail]
+        critic_verdict, critic_score = critic_from_trail(_logic_trail_dump)
+        critic_primary_dim = primary_dim_from_trail(_logic_trail_dump)  # IN-B1 M2
         issue_refs = [f"{i.code}:{i.ref}" for i in result.issues]
         item = ReviewQueue(project.sqlite_store).add_quest_logic_draft(
             {
@@ -2559,6 +2633,7 @@ def draft_quest_logic_action(
             issue_refs=issue_refs,
             critic_verdict=critic_verdict,
             critic_score=critic_score,
+            critic_primary_dim=critic_primary_dim,  # IN-B1 M2
         )
         telemetry_summary = telemetry.summary()
         return {

@@ -199,7 +199,7 @@ const sortedCases = computed(() =>
 .bar input {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.45rem 0.7rem;
   width: 12rem;
@@ -208,7 +208,7 @@ const sortedCases = computed(() =>
   background: var(--ow-gold, #d8b46a);
   color: #1a1406;
   border: none;
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   padding: 0.45rem 1rem;
   cursor: pointer;
 }

@@ -258,7 +258,7 @@ const canApply = computed(() => plan.value !== null && plan.value.conflicts.leng
   width: 100%;
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.6rem 0.8rem;
   font-size: 0.95rem;

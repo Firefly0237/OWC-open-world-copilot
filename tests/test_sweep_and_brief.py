@@ -9,6 +9,7 @@ from owcopilot.app.actions import run_theme_sweep_action
 from owcopilot.assist.sweep import (
     OfflineSweepJudgeProvider,
     ThemeSweepService,
+    render_sweep_markdown,
 )
 from owcopilot.content.models import (
     ContentBundle,
@@ -239,6 +240,37 @@ def test_sweep_semantic_layer_catches_real_euphemism_with_bge_m3() -> None:
     semantic = {f.ref for f in report.findings if f.layer == "semantic"}
     assert "entity:npc_a" in semantic  # the euphemism is caught by meaning
     assert "entity:npc_b" not in semantic  # the doctor is left alone
+
+
+def test_sweep_semantic_used_is_false_after_runtime_degrade() -> None:
+    # The semantic model fails to load at first embed and degrades to the hashing stub mid-run
+    # (offline first run / bad model name / gated / OOM). The report must read the embedder's LIVE
+    # backend, not the construction-time `st:` snapshot — otherwise the work order lies "bge-m3
+    # enabled" while actually running on hashing (the project's "no silent downgrade" red line).
+    # `SemanticEmbedder("bad/model")` triggers the real fallback path at $0, no model download.
+    from owcopilot.retrieval.embedding import SemanticEmbedder
+
+    embedder = SemanticEmbedder("definitely-not-a-real/model")
+    assert embedder.model_id.startswith("st:")  # construction-time snapshot looks semantic
+    bundle = _sweep_bundle()
+    # The theme hits nothing lexically, so the semantic layer runs `embed_many` → trips the degrade.
+    report = ThemeSweepService(bundle=bundle, embedder=embedder).sweep("禁忌话题")
+    assert embedder.degraded is True  # actually ran on the hashing stub
+    assert embedder.model_id.startswith("hashing-")
+    assert report.semantic_used is False  # honest: NOT semantic, despite the `st:` snapshot
+    md = render_sweep_markdown(report)
+    assert "bge-m3" not in md  # work order must not claim the model that never ran
+    assert "未启用" in md
+
+
+def test_sweep_semantic_used_true_on_real_semantic_path() -> None:
+    # Control: a non-degrading semantic stub keeps reporting semantic_used=True (the live read
+    # only flips to False on an actual runtime degrade, never on a healthy semantic backend).
+    report = ThemeSweepService(bundle=_sweep_bundle(), embedder=_StubSemanticEmbedder()).sweep(
+        "博彩", semantic_threshold=0.5
+    )
+    assert report.semantic_used is True
+    assert "bge-m3" in render_sweep_markdown(report)
 
 
 def test_sweep_work_order_markdown_and_action(tmp_path) -> None:

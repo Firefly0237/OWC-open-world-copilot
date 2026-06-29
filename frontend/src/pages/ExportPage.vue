@@ -27,6 +27,8 @@ const importText = ref("");
 const importing = ref(false);
 const importError = ref("");
 const importPlan = ref<ImportPlan | null>(null);
+const showRoundtrip = ref(false);
+const showHash = ref(false);
 
 async function runExport(): Promise<void> {
   running.value = true;
@@ -44,6 +46,10 @@ async function runExport(): Promise<void> {
   } finally {
     running.value = false;
   }
+}
+
+function copyPath(): void {
+  void navigator.clipboard.writeText(outputDir.value);
 }
 
 async function runImport(): Promise<void> {
@@ -100,7 +106,7 @@ async function runImport(): Promise<void> {
       <div class="pane block">
         <div class="section"><span class="t">数据包导出</span></div>
         <p class="muted small">
-          结构化 JSON（content_bundle）+ 本地化 XLIFF / CSV + sha256 校验清单，写入项目目录，供任意引擎管线读取。
+          将世界数据导出为标准格式，包含给程序员用的数据文件和给本地化团队用的翻译文件。
         </p>
         <div class="row">
           <button class="primary" :disabled="running" @click="runExport">
@@ -113,39 +119,53 @@ async function runImport(): Promise<void> {
     <p v-if="error" class="error">{{ error }}</p>
 
     <div class="pane block roundtrip">
-      <div class="section"><span class="t">从引擎回拉</span></div>
-      <p class="muted small">
-        把引擎侧改过的任务行（JSON 数组）粘进来，系统按内容指纹比对正典，新增/改动的任务进审阅队列等人审，
-        正典不会被直接覆盖。
-      </p>
-      <textarea
-        v-model="importText"
-        class="import"
-        rows="5"
-        placeholder='[{"id": "quest_x", "title": "…", "objective": "引擎侧改过的目标"}]'
-      ></textarea>
-      <div class="row">
-        <button class="primary" :disabled="importing || !importText.trim()" @click="runImport">
-          {{ importing ? "比对中…" : "回拉并送审" }}
-        </button>
-      </div>
-      <p v-if="importError" class="error">{{ importError }}</p>
-      <div v-if="importPlan" class="plan">
-        <span class="tag new">新增 {{ importPlan.new.length }}</span>
-        <span class="tag changed">改动 {{ importPlan.changed.length }}</span>
-        <span class="tag unchanged">未变 {{ importPlan.unchanged.length }}</span>
-        <span v-if="importPlan.review_item_id" class="muted small">已送审阅台，去「审阅」页处理。</span>
-        <span v-else class="muted small">没有需要送审的变更。</span>
-      </div>
+      <button class="roundtrip-toggle" @click="showRoundtrip = !showRoundtrip">
+        <span class="roundtrip-label">从引擎回拉（需要程序员配合）</span>
+        <span class="roundtrip-caret" :class="{ open: showRoundtrip }">▾</span>
+      </button>
+      <template v-if="showRoundtrip">
+        <p class="muted small">
+          这个功能用于游戏引擎修改了任务内容后，把改动同步回来。通常需要程序员从引擎导出数据。如果不确定，可以跳过。
+        </p>
+        <textarea
+          v-model="importText"
+          class="import"
+          rows="5"
+          placeholder='[{"id": "quest_x", "title": "…", "objective": "引擎侧改过的目标"}]'
+        ></textarea>
+        <div class="row">
+          <button class="primary" :disabled="importing || !importText.trim()" @click="runImport">
+            {{ importing ? "比对中…" : "回拉并送审" }}
+          </button>
+        </div>
+        <p v-if="importError" class="error">{{ importError }}</p>
+        <div v-if="importPlan" class="plan">
+          <span class="tag new">新增 {{ importPlan.new.length }}</span>
+          <span class="tag changed">改动 {{ importPlan.changed.length }}</span>
+          <span class="tag unchanged">未变 {{ importPlan.unchanged.length }}</span>
+          <span v-if="importPlan.review_item_id" class="muted small">已送审阅台，去「审阅」页处理。</span>
+          <span v-else class="muted small">没有需要送审的变更。</span>
+        </div>
+      </template>
     </div>
 
     <RecognizePanel />
 
     <div v-if="manifest" class="pane done">
       <div class="section"><span class="t">导出完成</span></div>
-      <p class="muted small">
-        写入 <span class="mono">{{ outputDir }}</span> · 内容指纹
-        <span class="mono">{{ manifest.content_hash.slice(0, 12) }}</span>
+      <div class="export-path-block">
+        <span class="export-path-label">文件已写入本机路径：</span>
+        <code class="export-path mono">{{ outputDir }}</code>
+        <button class="copy-btn" title="复制路径" @click="copyPath">复制路径</button>
+      </div>
+      <p class="muted small export-hint">
+        ⓘ 文件保存在服务器本机，不支持直接浏览器下载。在资源管理器中粘贴上方路径即可访问，或将整个文件夹拷贝给程序员 / 本地化团队。
+        <button class="hash-toggle" @click="showHash = !showHash">
+          文件校验码 <span :class="{ open: showHash }">▾</span>
+        </button>
+      </p>
+      <p v-if="showHash" class="muted small hash-detail">
+        sha256 指纹：<span class="mono">{{ manifest.content_hash }}</span>
       </p>
       <TransitionGroup name="list" tag="div" class="files">
         <div v-for="f in manifest.files" :key="f.path" class="file">
@@ -190,7 +210,7 @@ select {
   flex: 1;
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.45rem 0.6rem;
   font: inherit;
@@ -199,7 +219,7 @@ select {
 
 button,
 a.link {
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   cursor: pointer;
   font: inherit;
   font-size: 0.85rem;
@@ -278,11 +298,105 @@ button:disabled {
   margin-top: 0.9rem;
 }
 
+.roundtrip-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--ow-ink);
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.9rem;
+  text-align: left;
+}
+
+.roundtrip-label {
+  font-weight: 600;
+  color: var(--ow-gold-bright);
+}
+
+.roundtrip-caret {
+  margin-left: auto;
+  color: var(--ow-muted);
+  transition: transform 0.2s ease;
+}
+
+.roundtrip-caret.open {
+  transform: rotate(180deg);
+}
+
+.hash-toggle {
+  background: transparent;
+  border: none;
+  color: var(--ow-muted);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  padding: 0 0.3rem;
+  text-decoration: underline dotted;
+}
+
+.hash-detail {
+  margin-top: 0.2rem;
+  word-break: break-all;
+}
+
+.export-path-block {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.45rem;
+  padding: 0.55rem 0.8rem;
+  background: rgba(16, 22, 48, 0.6);
+  border: 1px solid var(--ow-gold-soft);
+  border-radius: var(--ow-control-radius);
+}
+
+.export-path-label {
+  font-size: 0.8rem;
+  color: var(--ow-gold-bright);
+  white-space: nowrap;
+}
+
+.export-path {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+  font-size: 0.82rem;
+}
+
+.copy-btn {
+  background: var(--ow-gold-faint);
+  border: 1px solid var(--ow-gold-soft);
+  border-radius: var(--ow-control-radius);
+  color: var(--ow-gold-bright);
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.25rem 0.65rem;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: none;
+}
+
+.copy-btn:hover {
+  box-shadow: 0 0 8px rgba(240, 210, 138, 0.25);
+}
+
+.export-hint {
+  margin-bottom: 0.4rem;
+  line-height: 1.6;
+}
+
 textarea.import {
   width: 100%;
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.55rem 0.7rem;
   font-family: ui-monospace, Consolas, monospace;
@@ -299,7 +413,7 @@ textarea.import {
 }
 
 .tag {
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   padding: 0.2rem 0.55rem;
   font-size: 0.78rem;
   border: 1px solid var(--ow-line);

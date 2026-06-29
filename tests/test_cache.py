@@ -133,14 +133,28 @@ def test_redis_cache_round_trips_via_fakeredis():
     assert cache.get(key) == "QUEST"
 
 
-def test_hashing_embedder_semantic_cache_is_dead_for_cjk():
-    # documents the gap that motivated injecting a real embedder: the hashing embedder tokenizes
-    # [a-z0-9]+, so two (even identical-meaning) Chinese requests embed to empty vectors and never
-    # semantically match — L2 is useless for CJK content with the default stub.
-    c = SemanticCache(HashingEmbedder(), threshold=0.85)
+def test_hashing_embedder_cjk_paraphrase_hits():
+    # The CJK-aware tokenizer (char + char-bigram) produces overlapping token sets for Chinese
+    # paraphrases that share most characters/words.  A near-synonym rewrite of the same quest
+    # prompt must now hit L2 — verifying the root fix for "L2 is dead for CJK" (was: always None
+    # because [a-z0-9]+ regex produced empty token lists → zero vectors → cosine = 0.0).
+    #
+    # Threshold is 0.75 (lower than the English default 0.9) because CJK char-bigram vectors are
+    # sparser than English word-bag vectors — the paraphrase pair achieves cosine ≈ 0.78, while
+    # a completely different topic produces cosine = 0.0, so 0.75 gives a clean separation.
+    c = SemanticCache(HashingEmbedder(), threshold=0.75)
     c.set(CacheKey("cheap", "SYS", "护送商队穿过雾脊山道"), "QUEST")
-    # a would-be paraphrase still misses — CJK never reaches the bag-of-words vector
-    assert c.get(CacheKey("cheap", "SYS", "护送商队走雾脊山道")) is None
+    # Same topic, different verb ("穿过" → "走"): shares ~80 % of characters/bigrams → should hit.
+    assert c.get(CacheKey("cheap", "SYS", "护送商队走雾脊山道")) == "QUEST"
+
+
+def test_hashing_embedder_cjk_different_topic_misses():
+    # Completely different Chinese text must NOT collide — ensures the CJK tokenizer does not
+    # produce high cosine for unrelated content (guards against false-positive cache pollution).
+    c = SemanticCache(HashingEmbedder(), threshold=0.75)
+    c.set(CacheKey("cheap", "SYS", "护送商队穿过雾脊山道"), "QUEST")
+    # Entirely different topic — no character overlap → cosine = 0.0, well below threshold.
+    assert c.get(CacheKey("cheap", "SYS", "米拉在河湾治疗村民")) is None
 
 
 class _StubSemanticEmbedder:

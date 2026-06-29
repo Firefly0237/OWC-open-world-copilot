@@ -110,10 +110,14 @@ def test_openai_provider_retries_with_max_completion_tokens(monkeypatch):
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
 
     provider = OpenAICompatProvider(model="gpt-current", max_output_tokens=16)
-    text, in_tok, out_tok, cached = provider.complete(system="s", user="u", model="cheap")
+    text, in_tok, out_tok, cached, resp_model = provider.complete(
+        system="s", user="u", model="cheap"
+    )
 
     assert text == "pong"
     assert (in_tok, out_tok, cached) == (4, 1, 0)
+    # The fake response has no `model` attribute → response_model degrades to "" (not a crash).
+    assert resp_model == ""
     assert "max_tokens" in calls[0]
     assert calls[1]["max_completion_tokens"] == 16
 
@@ -148,3 +152,47 @@ def test_gateway_classifies_provider_error_after_retries_exhausted():
         assert e.attempts == 2
     else:
         raise AssertionError("expected LLMGatewayError")
+
+
+# ---------------------------------------------------------------------------
+# R3-Team-C ③: unregistered tier → guided LLMGatewayError, not a raw KeyError
+# ---------------------------------------------------------------------------
+
+def test_gateway_unregistered_tier_raises_guided_error():
+    """Router selects a tier with no provider → friendly LLMGatewayError listing what's available
+    (memory red line: 'guided errors, not raw'), never a bare KeyError."""
+    # Default StaticRouter maps "generate" -> "frontier", which is not registered here.
+    gw = LLMGateway(providers={"cheap": MockProvider()})
+    with pytest.raises(LLMGatewayError) as ei:
+        gw.complete(task="generate", system="s", user="u")
+    err = ei.value
+    assert err.category == "config"
+    assert err.tier == "frontier"
+    msg = str(err)
+    # Names the offending tier and lists what IS registered, so the fix is obvious.
+    assert "frontier" in msg
+    assert "cheap" in msg
+    # And it is NOT a raw KeyError surfacing to the caller.
+    assert not isinstance(err, KeyError)
+
+
+def test_gateway_records_real_model_id_on_callrecord():
+    """R3-C①: CallRecord.model carries the resolved real model id (from provider.model)."""
+    class _ModelProvider:
+        model = "deepseek-v4-pro"
+
+        def complete(self, *, system, user, model):
+            return "ok", 4, 2
+
+    tel = TelemetryCollector()
+    gw = LLMGateway(providers={"frontier": _ModelProvider()}, telemetry=tel)
+    gw.complete(task="generate", system="s", user="u")  # generate -> frontier
+    assert tel.records[0].model == "deepseek-v4-pro"
+
+
+def test_gateway_callrecord_model_falls_back_to_tier_for_modelless_provider():
+    """A provider with no .model attribute → CallRecord.model falls back to the tier label."""
+    tel = TelemetryCollector()
+    gw = LLMGateway(providers={"cheap": MockProvider()}, telemetry=tel)
+    gw.complete(task="plan", system="s", user="u", tier="cheap")
+    assert tel.records[0].model == "cheap"

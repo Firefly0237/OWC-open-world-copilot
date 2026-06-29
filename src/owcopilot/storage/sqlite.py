@@ -17,6 +17,7 @@ from ..audit.models import AuditRun, Issue
 from ..content.hash import content_hash
 from ..content.models import ContentBundle
 from ..graph.index import ContentGraph
+from ..llm.telemetry import CallRecord
 
 
 class SQLiteStore:
@@ -193,6 +194,39 @@ class SQLiteStore:
                 fingerprint TEXT NOT NULL,       -- cache key (members + their content hash)
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS lessons (
+                id TEXT PRIMARY KEY,
+                item_type TEXT NOT NULL,
+                dimension TEXT NOT NULL DEFAULT 'general',
+                lesson_text TEXT NOT NULL,
+                false_pass_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_lessons_item_type_dim
+                ON lessons(item_type, dimension);
+            CREATE INDEX IF NOT EXISTS idx_lessons_last_seen_at ON lessons(last_seen_at);
+
+            CREATE TABLE IF NOT EXISTS agent_messages (
+                id           TEXT PRIMARY KEY,
+                session_id   TEXT NOT NULL,
+                from_agent   TEXT NOT NULL,
+                to_agent     TEXT NOT NULL,
+                msg_type     TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'pending'
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_messages_session
+                ON agent_messages(session_id, to_agent, status);
+
+            CREATE INDEX IF NOT EXISTS idx_agent_messages_type
+                ON agent_messages(session_id, msg_type);
+
+            CREATE INDEX IF NOT EXISTS idx_agent_messages_created
+                ON agent_messages(created_at);
             """
         )
         # Older runtime DBs predate the rollback column; content files are the source of truth,
@@ -204,6 +238,8 @@ class SQLiteStore:
         # it with the human decision later. Older runtime DBs upgrade in place.
         self._ensure_column("review_items", "critic_verdict", "TEXT")
         self._ensure_column("review_items", "critic_score", "REAL")
+        # IN-B1 M2: primary failing dimension from last critique (dimension-aware lessons).
+        self._ensure_column("review_items", "critic_primary_dim", "TEXT")
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, column_type: str) -> None:
@@ -407,8 +443,8 @@ class SQLiteStore:
             """
             INSERT OR REPLACE INTO review_items (
                 id, item_type, object_ref, payload_json, issue_refs_json, status,
-                decided_by, decided_at, critic_verdict, critic_score
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                decided_by, decided_at, critic_verdict, critic_score, critic_primary_dim
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item["id"],
@@ -421,6 +457,7 @@ class SQLiteStore:
                 item.get("decided_at"),
                 item.get("critic_verdict"),
                 item.get("critic_score"),
+                item.get("critic_primary_dim"),  # IN-B1 M2
             ),
         )
         self.conn.commit()
@@ -473,6 +510,148 @@ class SQLiteStore:
         updated = self.get_review_item(item_id)
         assert updated is not None
         return updated
+
+    # --- lesson archive (IN-3) ----------------------------------------------------------------
+
+    def save_lesson(
+        self,
+        item_type: str,
+        lesson_text: str,
+        *,
+        dimension: str = "general",  # IN-B1 M2: keyword-only; default "general" for compat
+    ) -> None:
+        """Upsert a lesson for (item_type, dimension). Increments false_pass_count on repeat writes.
+
+        IN-B1 M2: added dimension parameter. Callers that omit it get dimension='general',
+        preserving exact backward-compatible behaviour.
+        """
+        import uuid
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            """
+            INSERT INTO lessons (id, item_type, dimension, lesson_text, false_pass_count,
+                                 created_at, last_seen_at)
+            VALUES (?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(item_type, dimension) DO UPDATE SET
+                false_pass_count = false_pass_count + 1,
+                lesson_text = excluded.lesson_text,
+                last_seen_at = excluded.last_seen_at
+            """,
+            (str(uuid.uuid4()), item_type, dimension, lesson_text, now, now),
+        )
+        self.conn.commit()
+
+    def get_lessons_for_type(
+        self,
+        item_type: str,
+        *,
+        dimension: str | None = None,  # IN-B1 M2: None = all dimensions (backward compat)
+        max_count: int = 3,
+        cutoff_days: int = 90,
+    ) -> list[dict[str, Any]]:
+        """Return lessons for item_type, most-recent first.
+
+        IN-B1 M2: added dimension parameter.
+        dimension=None (default): return all dimensions — preserves backward-compatible behaviour.
+        dimension=<str>: filter to that specific dimension only.
+
+        Lessons newer than cutoff_days are sorted before older ones. Both groups are sorted by
+        last_seen_at DESC within their tier. The hard limit is max_count rows returned.
+        """
+        from datetime import timedelta
+        cutoff = (datetime.now(UTC) - timedelta(days=cutoff_days)).isoformat()
+        if dimension is not None:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM lessons
+                WHERE item_type = ? AND dimension = ?
+                ORDER BY
+                    CASE WHEN last_seen_at >= ? THEN 0 ELSE 1 END ASC,
+                    last_seen_at DESC
+                LIMIT ?
+                """,
+                (item_type, dimension, cutoff, max_count),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM lessons
+                WHERE item_type = ?
+                ORDER BY
+                    CASE WHEN last_seen_at >= ? THEN 0 ELSE 1 END ASC,
+                    last_seen_at DESC
+                LIMIT ?
+                """,
+                (item_type, cutoff, max_count),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # --- telemetry persistence (Item 8) -------------------------------------------------------
+
+    def record_telemetry(self, records: list[CallRecord]) -> None:
+        """Persist a batch of CallRecords into the telemetry table.
+
+        Item 8: closes the gap between TelemetryCollector (in-memory) and the telemetry SQLite
+        table (which has existed since the schema was created but was never written to). Callers
+        (actions) invoke this at the end of each action; failures are non-fatal by design — the
+        action already succeeded, and observability should never break the primary flow.
+
+        Column mapping: CallRecord fields → table columns (all required by the NOT NULL schema).
+        """
+        if not records:
+            return
+        self.conn.executemany(
+            """
+            INSERT INTO telemetry (
+                task_type, tier, input_tokens, output_tokens,
+                cached_input_tokens, cache_hit, latency_ms, cost_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    r.task,
+                    r.tier,
+                    r.input_tokens,
+                    r.output_tokens,
+                    r.cached_input_tokens,
+                    int(r.cache_hit),
+                    r.latency_ms,
+                    r.cost_usd,
+                )
+                for r in records
+            ],
+        )
+        self.conn.commit()
+
+    def query_telemetry(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return the most-recent telemetry rows (newest first), for debugging / admin UI."""
+        rows = self.conn.execute(
+            """
+            SELECT id, task_type, tier, input_tokens, output_tokens,
+                   cached_input_tokens, cache_hit, latency_ms, cost_usd, created_at
+            FROM telemetry
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "task_type": str(row["task_type"]),
+                "tier": str(row["tier"]),
+                "input_tokens": int(row["input_tokens"]),
+                "output_tokens": int(row["output_tokens"]),
+                "cached_input_tokens": int(row["cached_input_tokens"]),
+                "cache_hit": bool(row["cache_hit"]),
+                "latency_ms": float(row["latency_ms"]),
+                "cost_usd": float(row["cost_usd"]),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    # ------------------------------------------------------------------------------------------
 
     def replace_content_index(self, bundle: ContentBundle) -> None:
         self.conn.execute("DELETE FROM content_index")
@@ -876,7 +1055,8 @@ def _patch_from_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _review_item_from_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    keys = {desc[0] for desc in row.description} if hasattr(row, "description") else set(row.keys())
+    result: dict[str, Any] = {
         "id": str(row["id"]),
         "item_type": str(row["item_type"]),
         "object_ref": str(row["object_ref"]),
@@ -889,6 +1069,10 @@ def _review_item_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "critic_verdict": row["critic_verdict"],
         "critic_score": row["critic_score"],
     }
+    # IN-B1 M2: critic_primary_dim may not exist on older DBs (added via _ensure_column)
+    if "critic_primary_dim" in keys:
+        result["critic_primary_dim"] = row["critic_primary_dim"]
+    return result
 
 
 def _issue_from_row(row: sqlite3.Row) -> Issue:

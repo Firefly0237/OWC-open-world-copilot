@@ -144,7 +144,7 @@ async function remove(name: string): Promise<void> {
     <TransitionGroup name="list" tag="div" class="worlds">
       <div v-for="w in workspaces" :key="w.name" class="pane world" :class="{ on: w.name === active }">
         <b>{{ w.name }}</b>
-        <span class="mono path">{{ w.path }}</span>
+        <span class="mono path" :title="w.path">本机存储</span>
         <span class="spacer"></span>
         <span v-if="w.name === active" class="badge">当前</span>
         <button v-else class="ghost" @click="switchTo(w.name)">切换</button>
@@ -200,7 +200,7 @@ input {
   flex: 1;
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.5rem 0.65rem;
   font: inherit;
@@ -214,7 +214,7 @@ input:focus {
 
 button,
 a.link {
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   cursor: pointer;
   font: inherit;
   font-size: 0.85rem;
@@ -287,7 +287,11 @@ button.danger:hover {
 
 .badge {
   border: 1px solid var(--ow-gold-soft);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   color: var(--ow-gold-bright);
   font-size: 0.74rem;
   padding: 0.1rem 0.6rem;

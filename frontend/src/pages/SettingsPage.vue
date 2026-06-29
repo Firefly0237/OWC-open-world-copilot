@@ -3,6 +3,64 @@ import { onMounted, reactive, ref } from "vue";
 import { humanizeError, apiGet, apiPost, llmConfig, setLlmConfig } from "../api";
 import PageHead from "../components/PageHead.vue";
 
+/** Per-provider API key registration guide. */
+const PROVIDER_GUIDE: Record<string, { url: string; hint: string }> = {
+  DeepSeek: {
+    url: "https://platform.deepseek.com/api_keys",
+    hint: "在 DeepSeek 平台注册账号，进入控制台生成一个 Key，复制粘贴进来。通常每次生成消耗几分到几毛钱。Key 只保存在本机，不上传。",
+  },
+  OpenAI: {
+    url: "https://platform.openai.com/api-keys",
+    hint: "在 OpenAI 平台注册账号，进入 API Keys 页面生成一个 Key，复制粘贴进来。通常每次生成消耗几分到几毛钱。Key 只保存在本机，不上传。",
+  },
+  "Anthropic Claude": {
+    url: "https://console.anthropic.com/settings/keys",
+    hint: "在 Anthropic Console 注册账号，进入 API Keys 生成一个 Key，复制粘贴进来。通常每次生成消耗几分到几毛钱。Key 只保存在本机，不上传。",
+  },
+  "Moonshot Kimi": {
+    url: "https://platform.moonshot.cn/console/api-keys",
+    hint: "在 Moonshot 平台注册账号，进入控制台生成 API Key，复制粘贴进来。通常每次生成消耗几分到几毛钱。Key 只保存在本机，不上传。",
+  },
+  "智谱 GLM": {
+    url: "https://open.bigmodel.cn/usercenter/apikeys",
+    hint: "在智谱开放平台注册账号，进入 API Keys 页面生成 Key，复制粘贴进来。通常每次生成消耗几分到几毛钱。Key 只保存在本机，不上传。",
+  },
+  通义千问: {
+    url: "https://bailian.console.aliyun.com/",
+    hint: "在阿里云百炼平台开通服务，获取 API Key，复制粘贴进来。通常每次生成消耗几分到几毛钱。Key 只保存在本机，不上传。",
+  },
+  "豆包（火山方舟）": {
+    url: "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+    hint: "在火山方舟控制台注册并开通服务，获取 API Key，复制粘贴进来。通常每次生成消耗几分到几毛钱。Key 只保存在本机，不上传。",
+  },
+};
+
+/** Speed/price hints for known model names (display-only, does not affect form.modelPick value). */
+const MODEL_HINTS: Record<string, string> = {
+  "deepseek-v4-flash": "（快速·便宜，适合日常生成）",
+  "deepseek-v4-pro": "（更强·较贵，适合复杂任务）",
+  "gpt-5.5": "（旗舰，贵）",
+  "gpt-5.4-mini": "（快速，便宜）",
+  "gpt-5.4-nano": "（极速，最便宜）",
+  "gpt-5.2": "（均衡）",
+  "gpt-5.2-chat-latest": "（均衡，最新）",
+  "claude-fable-5": "（旗舰，贵）",
+  "claude-opus-4-8": "（旗舰，贵）",
+  "claude-sonnet-4-6": "（均衡，中价）",
+  "claude-haiku-4-5-20251001": "（快速，便宜）",
+  "kimi-k2.6": "（旗舰）",
+  "kimi-k2.5": "（均衡）",
+  "glm-5.1": "（旗舰）",
+  "glm-5": "（均衡）",
+  "glm-4.7": "（快速，便宜）",
+  "qwen3.7-max": "（旗舰，贵）",
+  "qwen3.5-plus": "（均衡，中价）",
+  "qwen3.5-flash": "（快速，便宜）",
+  "doubao-seed-1.8": "（旗舰）",
+  "doubao-seed-1.6": "（均衡）",
+  "doubao-seed-1.6-flash": "（快速，便宜）",
+};
+
 /** Vendor presets verified 2026-06 (same table as the legacy UI); the model dropdown
  * always offers a custom escape hatch. */
 const PRESETS: Record<string, { base_url: string; models: string[] }> = {
@@ -143,7 +201,13 @@ onMounted(refreshStatus);
         </label>
         <label class="field">
           <span class="label">Base URL</span>
-          <input v-model="form.baseUrl" />
+          <input
+            v-model="form.baseUrl"
+            :readonly="form.provider !== '自定义'"
+            :class="{ readonly: form.provider !== '自定义' }"
+            :title="form.provider !== '自定义' ? '预设服务商的地址已自动填写，通常无需修改' : ''"
+          />
+          <span v-if="form.provider !== '自定义'" class="field-hint">预设服务商的地址已自动填写，通常无需修改</span>
         </label>
         <label class="field">
           <span class="label">API Key</span>
@@ -152,7 +216,7 @@ onMounted(refreshStatus);
         <label class="field">
           <span class="label">模型</span>
           <select v-model="form.modelPick">
-            <option v-for="m in PRESETS[form.provider].models" :key="m" :value="m">{{ m }}</option>
+            <option v-for="m in PRESETS[form.provider].models" :key="m" :value="m">{{ m }}{{ MODEL_HINTS[m] ? ' ' + MODEL_HINTS[m] : '' }}</option>
             <option :value="CUSTOM_MODEL">{{ CUSTOM_MODEL }}</option>
           </select>
           <input
@@ -161,6 +225,13 @@ onMounted(refreshStatus);
             placeholder="填入该服务商的模型名称"
           />
         </label>
+      </div>
+      <div v-if="PROVIDER_GUIDE[form.provider]" class="guide-box">
+        <span class="guide-text">
+          API Key 是 {{ form.provider }} 给你账号的访问凭证。
+          <a :href="PROVIDER_GUIDE[form.provider].url" target="_blank" rel="noopener" class="guide-link">前往 {{ form.provider }} 获取 API Key ↗</a>
+        </span>
+        <span class="guide-hint">{{ PROVIDER_GUIDE[form.provider].hint }}</span>
       </div>
       <div class="actions">
         <button :disabled="busy || !currentModel()" @click="probe">测试连接</button>
@@ -226,7 +297,11 @@ onMounted(refreshStatus);
 .conn {
   font-size: 0.74rem;
   letter-spacing: 0.06em;
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   padding: 0.16rem 0.66rem;
   border: 1px solid var(--ow-line);
 }
@@ -257,11 +332,57 @@ onMounted(refreshStatus);
   color: var(--ow-muted);
 }
 
+.field-hint {
+  font-size: 0.75rem;
+  color: var(--ow-muted);
+  opacity: 0.75;
+}
+
+input.readonly {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.guide-box {
+  border-left: 2px solid var(--ow-gold-soft);
+  background: var(--ow-gold-faint);
+  padding: 0.6rem 0.8rem;
+  border-radius: 0 3px 3px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.guide-text {
+  font-size: 0.83rem;
+  color: var(--ow-ink);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.guide-link {
+  color: var(--ow-gold-bright);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.guide-link:hover {
+  text-decoration: underline;
+}
+
+.guide-hint {
+  font-size: 0.78rem;
+  color: var(--ow-muted);
+  line-height: 1.5;
+}
+
 input,
 select {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.5rem 0.65rem;
   font: inherit;
@@ -286,7 +407,7 @@ select:focus {
 }
 
 button {
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   cursor: pointer;
   font: inherit;
   font-size: 0.88rem;

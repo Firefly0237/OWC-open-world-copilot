@@ -23,6 +23,7 @@ from .rules import (
     POIWithoutNarrativePurposeRule,
     PrerequisiteCycleRule,
     PromptInjectionRule,
+    QuestGlobalReachabilityRule,
     QuestLogicRule,
     QuestMissingObjectiveRule,
     RegionBannedContentRule,
@@ -64,6 +65,7 @@ def build_default_rule_registry() -> RuleRegistry:
             DialogueTreeUnreachableNodeRule(),
             DialogueChoiceConditionRule(),
             QuestLogicRule(),
+            QuestGlobalReachabilityRule(),
             PromptInjectionRule(),
             UnreviewedAIContentRule(),
         ]

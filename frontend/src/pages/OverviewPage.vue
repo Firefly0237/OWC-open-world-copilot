@@ -360,7 +360,7 @@ onMounted(async () => {
   border: 1px solid var(--ow-gold-soft);
   background: var(--ow-gold-faint);
   color: var(--ow-gold-bright);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   padding: 0.45rem 1rem;
   font-size: 0.85rem;
   text-decoration: none;
@@ -488,7 +488,11 @@ onMounted(async () => {
 .chip {
   border: 1px solid var(--ow-gold-soft);
   background: var(--ow-gold-faint);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   color: var(--ow-gold-bright);
   font-size: 0.78rem;
   padding: 0.14rem 0.62rem;
@@ -561,7 +565,7 @@ onMounted(async () => {
 .wv-f textarea {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.55rem 0.7rem;
   font: inherit;
@@ -646,7 +650,11 @@ onMounted(async () => {
   font-size: 0.72rem;
   color: var(--ow-gold-bright);
   border: 1px solid var(--ow-gold-soft);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   padding: 0.06rem 0.5rem;
 }
 .dr-id {

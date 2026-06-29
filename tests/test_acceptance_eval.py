@@ -59,7 +59,42 @@ def test_acceptance_evaluation_passes_all_gates(tmp_path: Path) -> None:
     assert by_name["clean_world_zero_false_positives"].passed
     assert by_name["impact_recall_100"].passed
     assert by_name["retrieval_tight_hit_rate_gate"].passed
-    assert by_name["qa_grounded_or_refuse"].passed
+    assert by_name["qa_citation_existence_or_refuse"].passed
+
+
+def test_faithfulness_gate_coexists_and_skips_by_default(tmp_path: Path) -> None:
+    """The opt-in entailment gate must coexist with the existence gate and, with no judge,
+    skip ($0, deterministic) without dragging the overall report down."""
+    report = run_acceptance_evaluation(tmp_path)
+    by_name = {check.name: check for check in report.checks}
+    # both QA gates present — the new one does NOT replace the existing one
+    assert "qa_citation_existence_or_refuse" in by_name
+    assert "qa_faithfulness_entailment" in by_name
+    faith = by_name["qa_faithfulness_entailment"]
+    # default (no judge) → skipped, passes vacuously, report still green
+    assert faith.details["skipped"] is True
+    assert faith.passed is True
+    assert report.passed is True
+
+
+def test_detection_rate_denominator_is_disclosed_as_a_rule_subset(tmp_path: Path) -> None:
+    """detection_rate=1.0 must not be read as "all rules validated": the metrics disclose that the
+    seeded errors cover only a subset of the registry, and name the uncovered rules explicitly."""
+    from owcopilot.audit.default_rules import build_default_rule_registry
+
+    report = run_acceptance_evaluation(tmp_path)
+    total = len(build_default_rule_registry().codes())
+    assert report.metrics["rules_total"] == total
+    # the seeded world covers a strict subset of the registry — this is the honest part
+    assert report.metrics["rules_covered"] < total
+    uncovered = report.metrics["rules_uncovered"]
+    assert len(uncovered) == total - report.metrics["rules_covered"]
+    # security-relevant + dialogue-tree rules are the known-uncovered ones (covered by unit tests)
+    assert "PROMPT_INJECTION" in uncovered
+    assert any(code.startswith("DIALOGUE_TREE_") for code in uncovered)
+    # and the gate itself carries the scope disclosure for a reader of the check
+    detection_check = next(c for c in report.checks if c.name == "seeded_error_detection_gate")
+    assert detection_check.details["rules_covered"] == f"{report.metrics['rules_covered']}/{total}"
 
 
 def test_cli_eval_acceptance(tmp_path: Path, capsys) -> None:

@@ -1,4 +1,27 @@
-"""Deterministic QA post-checks."""
+"""Deterministic QA post-checks.
+
+**Grounding scope — citation *existence*, NOT entailment (honest limitation).**
+
+``verify_qa_answer`` is a *citation-existence* grounding check, not a *support* (entailment / NLI)
+check. It verifies three things and only these three:
+
+1. a non-refusal answer cites at least one ref,
+2. every cited ref is actually in the retrieved context pack (no fabricated/hallucinated refs), and
+3. every mentioned entity resolves to a real canon object.
+
+What it deliberately does **not** do: judge whether the cited text *actually supports the answer to
+the question*. So if the model cites a real, retrieved ref whose text does not in fact answer the
+question (e.g. "铁卫军团的军歌歌词" cites the faction's real description, which says nothing about a
+song), this check passes — ``valid=True`` — even though the answer is unsupported. The classic
+"entity is in canon, but this specific fact is not in canon" hallucination is therefore *out of
+scope* here and is not caught.
+
+This is an honest, deliberate boundary, not an oversight: real entailment checking needs an NLI
+model (or an LLM judge), which would break the $0-offline / deterministic constraint this layer
+lives under. ``test_qa_verify.py`` pins this limitation with an explicit reproduction so the gap
+stays documented rather than silently over-claimed. If an entailment backend is ever added, it
+belongs in a separate, opt-in verifier — do not quietly upgrade this function's promise.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +33,12 @@ from .models import QAAnswer, QAVerification
 def verify_qa_answer(
     answer: QAAnswer, *, pack: ContextPack, bundle: ContentBundle
 ) -> QAVerification:
+    """Citation-*existence* grounding check (NOT entailment — see module docstring).
+
+    Returns a :class:`QAVerification` that is ``valid`` when the answer refuses, or cites only refs
+    present in ``pack`` and mentions only resolvable entities. It does **not** verify that the cited
+    text supports the answer, so an answer that cites a real-but-irrelevant ref still passes.
+    """
     errors: list[str] = []
     if not answer.refused and not answer.citations:
         errors.append("non-refusal answer must cite at least one retrieved lore ref")

@@ -48,7 +48,10 @@ def _wait_done(client: TestClient, job_id: str, *, attempts: int = 100) -> dict:
 def test_extraction_job_runs_async_with_chunk_progress(client: TestClient) -> None:
     created = client.post(
         "/projects/demo/jobs",
-        json={"kind": "extraction", "params": {"title": "第一章", "text": _MANUSCRIPT}},
+        json={
+            "kind": "extraction",
+            "params": {"title": "第一章", "text": _MANUSCRIPT, "glean_rounds": 0},
+        },
     )
     assert created.status_code == 202, created.text
     job_id = created.json()["job_id"]
@@ -56,6 +59,7 @@ def test_extraction_job_runs_async_with_chunk_progress(client: TestClient) -> No
     body = _wait_done(client, job_id)
     assert body["status"] == "done", body
     assert body["result"]["stats"]["entities"] >= 2
+    assert body["result"]["telemetry"]["calls"] == 1
     event_types = [event["type"] for event in body["events"]]
     assert "chunk" in event_types  # progress callback reached the job buffer
     assert event_types[-1] == "done"

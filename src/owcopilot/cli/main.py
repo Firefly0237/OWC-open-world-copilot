@@ -148,26 +148,53 @@ def build_parser() -> argparse.ArgumentParser:
     _add_project_args(agent)
     agent.add_argument("--goal", required=True, help="What the agent should achieve / investigate.")
     agent.add_argument("--max-steps", type=int, default=6, help="Tool-call budget for the loop.")
+    agent.add_argument(
+        "--skills",
+        nargs="*",
+        metavar="SKILL",
+        default=None,
+        help=(
+            "Whitelist of skill names the agent may use (BE-9). "
+            "Omit to allow all built-in skills. "
+            "Example: --skills audit_project list_issues"
+        ),
+    )
     _add_llm_args(agent)
     agent.set_defaults(handler=_cmd_agent)
 
+    multi_agent = subparsers.add_parser(
+        "multi-agent",
+        help=(
+            "Run the runtime multi-agent system (Orchestrator-Worker + SQLite blackboard) on a "
+            "real world: an orchestrator decomposes the goal, diag/repair workers run "
+            "independently, and a verifier re-audits — all communicating through the blackboard. "
+            "Never writes canon (propose-only). Offline $0 with the deterministic double."
+        ),
+    )
+    _add_project_args(multi_agent)
+    multi_agent.add_argument(
+        "--goal", required=True, help="High-level goal for the orchestrator to decompose."
+    )
+    _add_llm_args(multi_agent)
+    multi_agent.set_defaults(handler=_cmd_multi_agent)
+
     issues = subparsers.add_parser("issues", help="List persisted audit issues.")
     _add_project_args(issues)
-    issues.add_argument("--severity")
+    issues.add_argument("--severity", choices=["error", "warning", "info"])
     issues.add_argument("--rule-code")
-    issues.add_argument("--status")
+    issues.add_argument("--status", choices=["open", "suppressed", "fixed"])
     issues.set_defaults(handler=_cmd_issues)
 
     context = subparsers.add_parser("context-pack", help="Build a retrieval context pack.")
     _add_project_args(context)
     context.add_argument("--query", required=True)
-    context.add_argument("--budget-tokens", type=int, default=800)
+    context.add_argument("--budget-tokens", type=_nonneg_int, default=800)
     context.set_defaults(handler=_cmd_context_pack)
 
     ask = subparsers.add_parser("ask", help="Answer a lore question with grounded citations.")
     _add_project_args(ask)
     ask.add_argument("--query", required=True)
-    ask.add_argument("--budget-tokens", type=int, default=800)
+    ask.add_argument("--budget-tokens", type=_nonneg_int, default=800)
     _add_llm_args(ask)
     ask.set_defaults(handler=_cmd_ask)
 
@@ -193,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
             f"Change types: {', '.join(item.value for item in ChangeType)}."
         ),
     )
-    impact.add_argument("--max-depth", type=int, default=2)
+    impact.add_argument("--max-depth", type=_nonneg_int, default=2)  # BUG-7: was bare int
     impact.set_defaults(handler=_cmd_impact)
 
     suggest = subparsers.add_parser(
@@ -203,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_project_args(suggest)
     suggest.add_argument("--issue-id", required=True, help="Issue id from `owcopilot issues`.")
     suggest.add_argument("--max-candidates", type=int, default=3)
-    suggest.add_argument("--budget-tokens", type=int, default=600)
+    suggest.add_argument("--budget-tokens", type=_nonneg_int, default=600)
     _add_llm_args(suggest)
     suggest.set_defaults(handler=_cmd_suggest)
 
@@ -248,7 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_project_args(draft)
     draft.add_argument("--brief", required=True)
-    draft.add_argument("--budget-tokens", type=int, default=800)
+    draft.add_argument("--budget-tokens", type=_nonneg_int, default=800)
     _add_llm_args(draft)
     draft.set_defaults(handler=_cmd_draft)
 
@@ -269,7 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
     expand.add_argument("--pois", type=int, default=3, help="New locations to add.")
     expand.add_argument("--npcs", type=int, default=4, help="New secondary NPCs to add.")
     expand.add_argument("--quests", type=int, default=3, help="New side quests to add.")
-    expand.add_argument("--budget-tokens", type=int, default=1800)
+    expand.add_argument("--budget-tokens", type=_nonneg_int, default=1800)
     expand.add_argument(
         "--refine-rounds",
         type=int,
@@ -416,6 +443,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _nonneg_float(value: str) -> float:
+    """argparse type= helper: reject negative floats with a friendly message (P8)."""
+    try:
+        f = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a valid number") from exc
+    if f < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0 (got {f})")
+    return f
+
+
+def _nonneg_int(value: str) -> int:
+    """argparse type= helper: reject negative ints with a friendly message (P9)."""
+    try:
+        i = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a valid integer") from exc
+    if i < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0 (got {i})")
+    return i
+
+
 def _add_project_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--content-root", required=True, help="Path to the v2 content root.")
     parser.add_argument(
@@ -443,7 +492,7 @@ def _add_llm_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--max-cost-usd",
-        type=float,
+        type=_nonneg_float,
         help="Soft budget: the cost_budget output flags over_budget when exceeded.",
     )
 
@@ -623,6 +672,11 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     from ..agent.offline import OfflineReactProvider
     from ..core.skills import default_skill_registry
 
+    if not args.goal.strip():
+        raise ValueError(
+            "--goal 不能为空字符串，请描述 agent 需要完成的目标。"
+            "例如: --goal 'check quest consistency'"
+        )
     content_root = Path(args.content_root)
     if not content_root.exists():
         raise FileNotFoundError(f"content root does not exist: {content_root}")
@@ -634,7 +688,29 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         args, task="agent_react", offline_provider=OfflineReactProvider(), real_json_mode=False
     )
     registry = default_skill_registry(content_root=str(content_root), sqlite_path=sqlite_path)
-    result = ReActAgent(gateway=gateway, registry=registry, max_steps=args.max_steps).run(args.goal)
+    # BE-9: wire --skills allowlist into ReActAgent so users can restrict tool access.
+    # None means "all skills"; an empty list would restrict to none.
+    allowed_skills: set[str] | None = set(args.skills) if args.skills is not None else None
+    # BUG-8: cross-validate --skills against the registry; warn (not fail) on unknown names
+    # so the user knows the typo/stale skill name is silently excluded from the manifest.
+    if allowed_skills is not None:
+        unknown_skills = sorted(allowed_skills - set(registry.names()))
+        if unknown_skills:
+            print(
+                json.dumps(
+                    {
+                        "warning": "unknown skill(s) in --skills allowlist (will be ignored)",
+                        "unknown_skills": unknown_skills,
+                        "known_skills": registry.names(),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+    result = ReActAgent(
+        gateway=gateway, registry=registry, max_steps=args.max_steps, allowed_skills=allowed_skills
+    ).run(args.goal)
     telemetry_summary = telemetry.summary()
     cost_budget = summarize_workflow(
         [llm_step("agent_react", telemetry_summary)], budget_usd=args.max_cost_usd
@@ -643,6 +719,68 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         {
             **result.model_dump(mode="json"),
             "skills": registry.names(),
+            "llm_mode": args.llm_mode,
+            "telemetry": telemetry_summary,
+            "cost_budget": cost_budget.model_dump(mode="json"),
+        },
+        args,
+    )
+
+
+def _cmd_multi_agent(args: argparse.Namespace) -> int:
+    from ..agent.offline import OfflineReactProvider
+    from ..core.skills import default_skill_registry
+    from ..multi_agent import MultiAgentSession
+
+    if not args.goal.strip():
+        raise ValueError(
+            "--goal 不能为空字符串，请描述多 agent 系统要达成的目标。"
+            "例如: --goal '让世界达到可导出状态'"
+        )
+    content_root = Path(args.content_root)
+    if not content_root.exists():
+        raise FileNotFoundError(f"content root does not exist: {content_root}")
+    sqlite_path = str(args.sqlite_path or _default_sqlite_path(content_root))
+    if sqlite_path != ":memory:":
+        Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
+    # Agents reason in free-form ReAct text, so disable JSON mode on the real provider.
+    # The orchestrator's decompose task expects JSON but degrades gracefully to the
+    # built-in subtasks when the response is not parseable (e.g. the offline double).
+    gateway, telemetry = _llm_gateway(
+        args, task="agent_react", offline_provider=OfflineReactProvider(), real_json_mode=False
+    )
+    registry = default_skill_registry(content_root=str(content_root), sqlite_path=sqlite_path)
+    session = MultiAgentSession(gateway=gateway, registry=registry)
+    try:
+        report = session.run(args.goal)
+        # The blackboard message flow is the product-facing proof of true multi-agent
+        # collaboration: each row is attributed (from→to) and ordered.
+        flow = [
+            {
+                "msg_type": msg.msg_type,
+                "from_agent": msg.from_agent,
+                "to_agent": msg.to_agent,
+                "status": msg.status,
+            }
+            for msg in session.blackboard.session_flow(report.session_id)
+        ]
+    finally:
+        session.close()
+    telemetry_summary = telemetry.summary()
+    cost_budget = summarize_workflow(
+        [llm_step("multi_agent", telemetry_summary)], budget_usd=args.max_cost_usd
+    ).budget
+    return _emit(
+        {
+            "session_id": report.session_id,
+            "goal": report.goal,
+            "participants": report.participants,
+            "blackboard_flow": flow,
+            "worker_summaries": report.worker_summaries,
+            "verifier_verdicts": report.verifier_verdicts,
+            "synthesis": report.synthesis,
+            # ② Surface decomposition degradation to CLI consumers — no silent downgrade
+            "decomposition_degraded": report.decomposition_degraded,
             "llm_mode": args.llm_mode,
             "telemetry": telemetry_summary,
             "cost_budget": cost_budget.model_dump(mode="json"),
@@ -1084,6 +1222,11 @@ def _cmd_expand(args: argparse.Namespace) -> int:
 def _cmd_barks(args: argparse.Namespace) -> int:
     with _project(args) as project:
         speakers = [item.strip() for item in args.speakers.split(",") if item.strip()]
+        if not speakers:
+            raise ValueError(
+                "--speakers 不能为空：请提供至少一个 speaker 实体 ID（逗号分隔）。"
+                "例如: --speakers npc_alice,npc_bob"
+            )
         unknown = [speaker for speaker in speakers if speaker not in project.bundle.entities]
         if unknown:
             raise ValueError(f"unknown speaker entities: {', '.join(unknown)}")
@@ -1199,9 +1342,15 @@ def _load_baseline(path: Path) -> AuditBaseline:
 
 
 def _load_mapping_doc(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"field mapping 文件不是合法 JSON（{path.name}）："
+            f"{exc.msg} 在第 {exc.lineno} 行第 {exc.colno} 列"
+        ) from exc
     if not isinstance(data, dict):
-        raise ValueError("field mapping file must contain a JSON object")
+        raise ValueError("field mapping 文件必须是 JSON 对象（{...}）")
     return data
 
 

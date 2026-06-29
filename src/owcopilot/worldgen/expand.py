@@ -295,6 +295,7 @@ class WorldExpandService:
             brief=f"{focus.label}｜{angle}".strip("｜"),
             regenerate=regenerate,
             emit=emit,
+            terms=list(self.bundle.terms.values()),  # BE-2: pass vocab constraints to critic
         )
 
 

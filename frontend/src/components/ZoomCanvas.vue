@@ -203,7 +203,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
   height: 28px;
   padding: 0 0.5rem;
   border: 1px solid var(--ow-line);
-  border-radius: 0.45rem;
+  border-radius: var(--ow-control-radius);
   background: var(--ow-panel-2);
   color: var(--ow-ink);
   font: inherit;

@@ -100,7 +100,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
   width: 30px;
   height: 30px;
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   background: transparent;
   cursor: pointer;
 }

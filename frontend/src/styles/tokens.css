@@ -11,11 +11,12 @@
   --ow-gold-deep: #a8853f;
   --ow-gold-soft: rgba(217, 181, 108, 0.34);
   --ow-gold-faint: rgba(217, 181, 108, 0.08);
-  /* violet accent — the space-station / Herta theme (gold's cool counterpart) */
-  --ow-violet: #b9a7ff;
-  --ow-violet-deep: #6f5fd0;
-  --ow-violet-soft: rgba(160, 138, 255, 0.32);
-  --ow-violet-faint: rgba(160, 138, 255, 0.1);
+  /* violet accent — the space-station / Herta theme (gold's cool counterpart).
+     Shifted deeper/bluer (#8e80d8) to read as "deep-space star nebula" rather than "cyber pink-purple". */
+  --ow-violet: #8e80d8;
+  --ow-violet-deep: #5a4fc0;
+  --ow-violet-soft: rgba(142, 128, 216, 0.32);
+  --ow-violet-faint: rgba(142, 128, 216, 0.1);
   --ow-night: #0f1530;
   --ow-night-deep: #0a0e24;
   --ow-panel: rgba(20, 27, 56, 0.72);
@@ -28,6 +29,13 @@
   --ow-cyan: #8fd6e8;
   /* cut-corner size for HSR panels; kept a token so panels stay consistent */
   --ow-cut: 14px;
+  /* FE-2: shared geometry for interactive controls so the whole control layer speaks the
+     cut-corner language instead of SaaS pills/roundness. Buttons, inputs, selects, textareas
+     use --ow-control-radius (a near-square 2px). Chips/badges/tabs use the .ow-cut-chip
+     clip-path mixin (a 4px diagonal nip) echoing .pane's larger cut. --ow-chip-nip controls
+     the chip cut size so it can be tuned globally. */
+  --ow-control-radius: 2px;
+  --ow-chip-nip: 4px;
   --ow-overline: "Cinzel", Georgia, serif;
   --ow-serif: "Noto Serif SC", Georgia, "Songti SC", serif;
   --ow-display: "Noto Sans SC", system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -47,13 +55,20 @@ body,
 
 body {
   color: var(--ow-ink);
-  font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* FE-3: bind body to the design-system font so every page inherits Noto Sans SC.
+     Noto Sans SC brings the "data-terminal / star-rail scan readout" feel HSR's UI uses
+     for body text; system-ui (PingFang/Yahei) had no controlled typographic character. */
+  font-family: var(--ow-display);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* FE-1: body background purples reduced — was 0.22 + 0.14 = two heavy purple radials.
+     Now 0.10 + 0.06 so the body layer alone stops dominating; aurora layers adjusted below.
+     Gold radial added here to give the space a warm anchor. */
   background:
-    radial-gradient(1200px 600px at 84% -14%, rgba(150, 120, 230, 0.22), transparent 62%),
-    radial-gradient(820px 520px at 12% 110%, rgba(120, 96, 210, 0.14), transparent 60%),
+    radial-gradient(1200px 600px at 84% -14%, rgba(150, 120, 230, 0.10), transparent 62%),
+    radial-gradient(820px 520px at 12% 110%, rgba(120, 96, 210, 0.06), transparent 60%),
     radial-gradient(900px 480px at -6% 4%, rgba(143, 214, 232, 0.09), transparent 55%),
+    radial-gradient(700px 380px at 60% 90%, rgba(217, 181, 108, 0.08), transparent 58%),
     linear-gradient(168deg, #161d44 0%, var(--ow-night) 46%, var(--ow-night-deep) 100%);
   background-attachment: fixed;
   isolation: isolate;
@@ -72,7 +87,8 @@ body {
 
 *::-webkit-scrollbar-thumb {
   background: linear-gradient(180deg, rgba(217, 181, 108, 0.5), rgba(168, 133, 63, 0.4));
-  border-radius: 999px;
+  /* FE-6: 999px pill inconsistent with the cut-corner panel language; 2px aligns with .pane border-radius */
+  border-radius: 2px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
@@ -401,6 +417,18 @@ select:focus {
     0 0 14px rgba(240, 210, 138, 0.16);
 }
 
+/* FE-2: global control geometry — the interactive layer (buttons, inputs, selects, textareas)
+   defaults to the near-square HSR radius instead of the SaaS 0.5rem roundness. Per-component
+   styles that don't re-set border-radius now inherit this; the few that hardcoded 0.5rem were
+   converted to var(--ow-control-radius). Round-by-design elements (avatars, progress bars,
+   spinners, rings) override locally and are intentionally left round. */
+button,
+input,
+select,
+textarea {
+  border-radius: var(--ow-control-radius);
+}
+
 /* every button gets a brief press feedback; primary keeps its own hover glow */
 button {
   transition:
@@ -423,8 +451,25 @@ button.secondary:not(:disabled):hover {
   box-shadow: 0 0 12px rgba(240, 210, 138, 0.14);
 }
 
-/* chips: a touch of life on hover */
+/* FE-2: .ow-cut-chip — shared cut-corner chip/badge geometry (a 4px diagonal nip echoing
+   .pane's larger cut). Apply to any chip/tag/badge/pill via the class, or replicate the two
+   declarations in a component selector when adding the class isn't convenient. This replaces
+   the Notion/Linear 999px pill across the app. */
+.ow-cut-chip {
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
+}
+
+/* chips — adopt the shared cut-corner geometry instead of a 999px pill */
 .chip {
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   transition:
     transform 0.12s ease,
     box-shadow 0.12s ease;

@@ -15,6 +15,9 @@ class VoiceCard(BaseModel):
     tags: list[str] = Field(default_factory=list)
     tone: str | None = None
     taboo: list[str] = Field(default_factory=list)
+    # C4: voice style description from entity.metadata["profile"]["voice"].
+    # Empty string when the field is absent — backward-compatible default.
+    profile_voice: str = ""
 
 
 def build_voice_card(entity: Entity, bundle: ContentBundle) -> VoiceCard:
@@ -23,6 +26,11 @@ def build_voice_card(entity: Entity, bundle: ContentBundle) -> VoiceCard:
         for relation in bundle.relations
         if relation.source == entity.id and relation.kind == "member_of"
     ]
+    # C4: read voice style description from nested profile dict.
+    # Falls back to "" if "profile" key is absent, "voice" key is absent,
+    # or the value is None/empty — guards against KeyError and None.
+    profile = entity.metadata.get("profile")
+    profile_voice = str(profile.get("voice", "") or "").strip() if isinstance(profile, dict) else ""
     return VoiceCard(
         entity_id=entity.id,
         name=entity.name,
@@ -31,6 +39,7 @@ def build_voice_card(entity: Entity, bundle: ContentBundle) -> VoiceCard:
         tags=list(entity.tags),
         tone=_optional_str(entity.metadata.get("tone")),
         taboo=_list(entity.metadata.get("taboo")),
+        profile_voice=profile_voice,
     )
 
 

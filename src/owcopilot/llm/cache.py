@@ -121,8 +121,50 @@ class Embedder(Protocol):
         ...
 
 
+# Pre-compiled regex: Latin/digit words OR individual CJK characters.
+# CJK blocks covered:
+#   [一-鿿]  — CJK Unified Ideographs (U+4E00–U+9FFF) + Ext A (U+3400–U+4DBF)
+#   [㐀-䶿]  — CJK Extension A overflow range (U+3400–U+4DBF; kept for clarity)
+#   [豈-﫿]  — CJK Compatibility Ideographs and other CJK-adjacent blocks (U+F900–U+FAFF)
+#   [𠀀-𯨟]  — CJK Extension B (supplementary plane U+20000–U+2A6DF); written as surrogate pair
+# All supplementary-plane CJK characters beyond U+FFFF are intentionally omitted here because
+# Python str iterates over codepoints and re already handles them correctly with the \U escape,
+# but keeping the regex ASCII-safe makes it easier to read/audit. The main Unified block
+# (U+4E00–U+9FFF) covers the vast majority of simplified & traditional Chinese usage.
+_TOKEN_RE = re.compile(r"[a-z0-9]+|[一-鿿㐀-䶿豈-﫿]")
+
+
 def _tokenize(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", text.lower())
+    """Unicode-aware tokenizer for the hashing embedder.
+
+    * **Latin / digit tokens** — same as before: ``[a-z0-9]+`` substrings of the lowercased
+      text (e.g. ``"escort the caravan"`` → ``["escort", "the", "caravan"]``).
+    * **CJK characters** — each CJK character is emitted as an individual token *and* each pair
+      of adjacent CJK characters is emitted as a bigram (sliding-window, step 1).  The bigrams
+      add an order-sensitive signal so that Chinese paraphrases that share most characters land
+      close to each other in the hashed vector space, while completely different topics don't.
+
+    Example::
+
+        _tokenize("护送商队穿过雾脊山道")
+        # → ['护', '送', '商', '队', '穿', '过', '雾', '脊', '山', '道',
+        #     '护送', '送商', '商队', '队穿', '穿过', '过雾', '雾脊', '脊山', '山道']
+
+        _tokenize("escort the caravan")
+        # → ['escort', 'the', 'caravan']   (unchanged Latin behaviour)
+
+    Mixed text (e.g. ``"护送商队 escort"`` ) produces tokens from both CJK and Latin branches.
+    English path is fully backward-compatible: the extra branch fires only on CJK codepoints.
+    """
+    chars = _TOKEN_RE.findall(text.lower())
+    result = list(chars)
+    for i in range(len(chars) - 1):
+        # Both adjacent tokens must be single-character CJK to form a bigram.
+        # Latin/digit tokens have length > 1 (words), so len(...) == 1 uniquely identifies
+        # single CJK chars without an extra character-class check.
+        if len(chars[i]) == 1 and len(chars[i + 1]) == 1:
+            result.append(chars[i] + chars[i + 1])
+    return result
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -133,11 +175,15 @@ def cosine(a: list[float], b: list[float]) -> float:
 
 
 class HashingEmbedder:
-    """Deterministic, offline, dependency-free embedder: a hashed bag-of-words vector.
+    """Deterministic, offline, dependency-free embedder: a hashed bag-of-characters/words vector.
 
-    Prompts that share most words land near each other (high cosine); unrelated prompts
-    don't. Good enough to exercise L2 in tests at $0. In production, inject a real
-    sentence-transformer / provider embedding instead — the interface is identical.
+    Prompts that share most tokens land near each other (high cosine); unrelated prompts don't.
+    The underlying ``_tokenize`` function is CJK-aware: CJK characters are emitted as individual
+    character tokens plus adjacent-pair bigrams, so Chinese paraphrases produce overlapping token
+    sets and land close in the vector space.  Latin/digit text is tokenized as whole words
+    (``[a-z0-9]+``), same as before.  Good enough to exercise L2 in tests at $0 — no model or
+    network needed.  In production, inject a real sentence-transformer / provider embedding
+    instead — the interface is identical.
     """
 
     def __init__(self, dim: int = 1024) -> None:
@@ -267,9 +313,11 @@ def build_cache_backend(
 ) -> CacheBackend:
     """Factory for the cache backends the service hangs off the gateway.
 
-    ``embedder`` backs the L2 semantic layer. Pass a real multilingual model (bge-m3) so the
-    paraphrase cache works for non-Latin content — the default ``HashingEmbedder`` tokenizes
-    ``[a-z0-9]+`` and so produces an empty vector (never a hit) for CJK text."""
+    ``embedder`` backs the L2 semantic layer.  The default ``HashingEmbedder`` is CJK-aware
+    (char + char-bigram tokenization), so L2 also works for Chinese/Japanese/Korean text out of
+    the box at $0.  For higher semantic accuracy, pass a real multilingual model (e.g. bge-m3
+    via ``SemanticEmbedder``) — the interface is identical and the model path takes priority when
+    ``[semantic]`` extras are installed."""
     if mode == "off":
         return NoOpCache()
     if mode == "exact":

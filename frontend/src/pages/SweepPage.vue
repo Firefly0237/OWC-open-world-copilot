@@ -185,7 +185,7 @@ input[type="text"],
 input:not([type]) {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.5rem 0.65rem;
   font: inherit;
@@ -212,7 +212,7 @@ input:focus {
 button.primary {
   background: linear-gradient(180deg, #f0d28a 0%, #b9924a 100%);
   border: 1px solid rgba(240, 210, 138, 0.65);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: #241a05;
   font-weight: 600;
   padding: 0.55rem 1rem;
@@ -228,7 +228,7 @@ button.primary:disabled {
 button.ghost {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   font: inherit;
   font-size: 0.85rem;
@@ -259,7 +259,11 @@ button.ghost {
 
 .chip {
   border: 1px solid var(--ow-line);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   background: rgba(16, 22, 48, 0.6);
   color: var(--ow-muted);
   font-size: 0.78rem;
@@ -314,7 +318,11 @@ button.ghost {
 
 .badge {
   border: 1px solid rgba(224, 133, 133, 0.45);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   color: #e89a9a;
   font-size: 0.72rem;
   padding: 0.08rem 0.5rem;

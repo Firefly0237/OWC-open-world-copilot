@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .critic import CritiqueResult  # noqa: TC001 (used at runtime in primary_failing_dimension)
 from .review_queue import ReviewItem
 
 _HUMAN_ACCEPT = "accepted"
@@ -36,6 +37,26 @@ def _wilson_interval(successes: int, total: int, *, z: float = 1.96) -> list[flo
     return [round(max(0.0, center - margin), 4), round(min(1.0, center + margin), 4)]
 
 
+def primary_failing_dimension(result: CritiqueResult) -> str:
+    """Extract the most critical failing dimension from a CritiqueResult.
+
+    Returns 'general' when parse_ok=False or no dimensions present.
+    Priority: first blocker > first minor > first non-ok > 'general'.
+
+    IN-B1 M2: used by the refine loop to stamp critic_primary_dim on ReviewItem.
+    """
+    if not result.parse_ok or not result.dimensions:
+        return "general"
+    blockers = [d for d in result.dimensions if d.severity == "blocker"]
+    if blockers:
+        return blockers[0].dimension
+    minors = [d for d in result.dimensions if d.severity == "minor"]
+    if minors:
+        return minors[0].dimension
+    non_ok = [d for d in result.dimensions if d.severity != "ok"]
+    return non_ok[0].dimension if non_ok else "general"
+
+
 class CalibrationMatrix(BaseModel):
     critic_pass_human_accept: int = 0  # agreement: critic & human both liked it
     critic_pass_human_reject: int = 0  # FALSE PASS — critic missed what the human caught
@@ -50,6 +71,7 @@ class FalsePassItem(BaseModel):
     item_type: str
     object_ref: str
     critic_score: float | None = None
+    dimension: str = "general"  # IN-B1 M2: primary failing dimension; default "general" for compat
 
 
 class CalibrationReport(BaseModel):
@@ -68,6 +90,24 @@ class CalibrationReport(BaseModel):
     by_type: dict[str, CalibrationMatrix] = Field(default_factory=dict)
     false_pass_items: list[FalsePassItem] = Field(default_factory=list)
     skipped_no_verdict: int = 0  # resolved single-shot / unparsable-critique items (no signal)
+
+
+def primary_dim_from_trail(
+    refine_trail: list[dict[str, Any]],
+) -> str | None:
+    """Extract the primary failing dimension from the last round of a refine trail.
+
+    IN-B1 M2: Returns the 'primary_dim' field from the last trail step when the critique was
+    parseable (auto_review_ok=True). Returns None when no trail or critique was unparseable.
+    Callers use None to mean "unknown" and fall back to 'general' when stamping ReviewItem.
+    """
+    if not refine_trail:
+        return None
+    last = refine_trail[-1]
+    if not isinstance(last, dict) or last.get("auto_review_ok") is False:
+        return None
+    dim = last.get("primary_dim")
+    return str(dim) if isinstance(dim, str) else None
 
 
 def critic_from_trail(
@@ -117,12 +157,15 @@ def build_calibration_report(resolved: list[ReviewItem]) -> CalibrationReport:
         if score is not None:
             (accepted_scores if human_accept else rejected_scores).append(score)
         if verdict == "pass" and not human_accept:
+            # IN-B1 M2: read primary dimension from ReviewItem (written by refine loop)
+            primary_dim = getattr(item, "critic_primary_dim", None) or "general"
             report.false_pass_items.append(
                 FalsePassItem(
                     item_id=item.id,
                     item_type=item.item_type.value,
                     object_ref=item.object_ref,
                     critic_score=score,
+                    dimension=primary_dim,  # IN-B1 M2
                 )
             )
     _finalize_rates(report, accepted_scores, rejected_scores)

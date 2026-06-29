@@ -8,7 +8,15 @@ honest degradation on a bad model reply; and the rerank-driven routing (holistic
 
 from __future__ import annotations
 
-from owcopilot.content.models import ContentBundle, Entity, EntityType, Relation
+from owcopilot.content.models import (
+    ContentBundle,
+    Entity,
+    EntityType,
+    Quest,
+    QuestEventReference,
+    QuestEventRefKind,
+    Relation,
+)
 from owcopilot.graph.community import cross_community_relations, detect_communities
 from owcopilot.llm.gateway import LLMGateway
 from owcopilot.llm.router import StaticRouter
@@ -68,6 +76,47 @@ def test_detection_clusters_factions_with_members_and_is_reproducible() -> None:
     again = detect_communities(bundle)
     assert [c.id for c in communities] == [c.id for c in again]
     assert [c.member_refs for c in communities] == [c.member_refs for c in again]
+
+
+def test_event_entity_joins_its_quest_community_through_the_relay_node() -> None:
+    """Regression: an event entity reaches its quest only via a ``quest_event_ref`` relay node.
+
+    The relay is non-substantive, so a naive substantive-only projection severs the
+    ``event ↔ ref ↔ quest`` path and the event drops to degree 0 — a permanent singleton excluded
+    from every community report. The projection now bridges through the relay, so the event lands in
+    the same community as the quest that references it.
+    """
+    bundle = ContentBundle(
+        entities={
+            "fac_iron": Entity(
+                id="fac_iron", name="铁盟", type=EntityType.FACTION, description="势力"
+            ),
+            "npc_a": Entity(id="npc_a", name="阿尔", type=EntityType.NPC, description="角色"),
+            "evt_siege": Entity(
+                id="evt_siege", name="铁壁围城", type=EntityType.EVENT, description="一场战争"
+            ),
+        },
+        quests={
+            "quest_war": Quest(id="quest_war", title="围城余烬", giver_npc="npc_a"),
+        },
+        quest_event_refs={
+            "qer_1": QuestEventReference(
+                id="qer_1",
+                quest_id="quest_war",
+                event_id="evt_siege",
+                ref_kind=QuestEventRefKind.MENTIONS_EVENT,
+            ),
+        },
+        relations=[Relation(source="npc_a", target="fac_iron", kind="member_of")],
+    )
+    communities = detect_communities(bundle)
+    # the event is no longer a singleton...
+    home = {ref: c for c in communities for ref in c.member_refs}
+    assert "entity:evt_siege" in home, "event entity must be assigned to a community, not dropped"
+    event_community = home["entity:evt_siege"]
+    assert len(event_community.member_refs) > 1, "event must not be a degree-0 singleton community"
+    # ...and it sits with the quest that references it (the relay bridge worked)
+    assert "quest:quest_war" in event_community.member_refs
 
 
 def test_build_produces_reports_with_provenance_and_a_global_layer() -> None:

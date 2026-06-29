@@ -386,6 +386,17 @@ async function run(): Promise<void> {
           <select v-model="form.referenceMode">
             <option v-for="mode in REFERENCE_MODES" :key="mode" :value="mode">{{ mode }}</option>
           </select>
+          <p class="ref-mode-hint muted">
+            <template v-if="form.referenceMode === '灵感参考'">
+              <b>灵感参考</b>——仅借用素材的氛围、意象与关键词，不照搬结构，产出与原作差异大。适合风格借鉴。
+            </template>
+            <template v-else-if="form.referenceMode === '结构借鉴'">
+              <b>结构借鉴</b>——参照素材的叙事结构与阵营/区域布局，填入全新内容。产出与原作骨架相似但内容不同。
+            </template>
+            <template v-else>
+              <b>改编重构</b>——在素材原有设定基础上深度重写，保留核心人物/世界观并大幅改造。适合已有IP的二次创作。
+            </template>
+          </p>
         </div>
         <label class="ground-row">
           <input v-model="form.useProjectFacts" type="checkbox" />
@@ -517,7 +528,7 @@ input,
 select {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.5rem 0.65rem;
   font: inherit;
@@ -551,7 +562,11 @@ textarea:focus {
 .chip {
   border: 1px solid var(--ow-line);
   background: rgba(16, 22, 48, 0.6);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   color: var(--ow-muted);
   font-size: 0.8rem;
   padding: 0.22rem 0.7rem;
@@ -581,7 +596,11 @@ textarea:focus {
 }
 
 .chip-input {
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   font-size: 0.8rem;
   padding: 0.22rem 0.7rem;
   width: 7rem;
@@ -597,7 +616,7 @@ textarea:focus {
 button.ghost {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-muted);
   font: inherit;
   font-size: 0.82rem;
@@ -655,6 +674,21 @@ button.add {
   min-width: 12rem;
 }
 
+.ref-mode-hint {
+  margin: 0.3rem 0 0;
+  font-size: 0.76rem;
+  line-height: 1.55;
+  padding: 0.35rem 0.6rem;
+  border-left: 2px solid var(--ow-gold-soft);
+  background: rgba(16, 22, 48, 0.4);
+  border-radius: 0 var(--ow-control-radius) var(--ow-control-radius) 0;
+}
+
+.ref-mode-hint b {
+  color: var(--ow-gold-bright);
+  font-style: normal;
+}
+
 .scales {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -671,7 +705,7 @@ button.add {
 button.primary {
   background: linear-gradient(180deg, #f0d28a 0%, #b9924a 100%);
   border: 1px solid rgba(240, 210, 138, 0.65);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: #241a05;
   font-weight: 600;
   padding: 0.6rem 1rem;
@@ -728,7 +762,7 @@ button.primary:disabled {
   border: 1px solid var(--ow-gold-soft);
   background: var(--ow-gold-faint);
   color: var(--ow-gold-bright);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   padding: 0.4rem 0.85rem;
   font: inherit;
   font-size: 0.84rem;
@@ -780,7 +814,11 @@ button.primary:disabled {
 
 .rel {
   border: 1px solid var(--ow-line);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   background: rgba(16, 22, 48, 0.6);
   font-size: 0.78rem;
   padding: 0.18rem 0.65rem;

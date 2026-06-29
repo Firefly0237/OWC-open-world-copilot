@@ -54,6 +54,74 @@ def _write_clean_project(content_root) -> None:
     )
 
 
+def _write_overview_project(content_root) -> None:
+    ContentStore(content_root).save(
+        ContentBundle.model_validate(
+            {
+                "entities": {
+                    "fac_iron": {
+                        "id": "fac_iron",
+                        "name": "铁盟",
+                        "type": "faction",
+                        "description": "铁盟是一个势力。",
+                    },
+                    "fac_salt": {
+                        "id": "fac_salt",
+                        "name": "盐会",
+                        "type": "faction",
+                        "description": "盐会是一个势力。",
+                    },
+                    "fac_mist": {
+                        "id": "fac_mist",
+                        "name": "雾党",
+                        "type": "faction",
+                        "description": "雾党是一个势力。",
+                    },
+                    "npc_a": {
+                        "id": "npc_a",
+                        "name": "阿尔",
+                        "type": "npc",
+                        "description": "阿尔是一名角色。",
+                    },
+                    "npc_b": {
+                        "id": "npc_b",
+                        "name": "贝拉",
+                        "type": "npc",
+                        "description": "贝拉是一名角色。",
+                    },
+                    "npc_c": {
+                        "id": "npc_c",
+                        "name": "卡尔",
+                        "type": "npc",
+                        "description": "卡尔是一名角色。",
+                    },
+                    "npc_d": {
+                        "id": "npc_d",
+                        "name": "黛西",
+                        "type": "npc",
+                        "description": "黛西是一名角色。",
+                    },
+                    "npc_e": {
+                        "id": "npc_e",
+                        "name": "俄岚",
+                        "type": "npc",
+                        "description": "俄岚是一名角色。",
+                    },
+                },
+                "relations": [
+                    {"source": "npc_a", "target": "fac_iron", "kind": "member_of"},
+                    {"source": "npc_b", "target": "fac_iron", "kind": "member_of"},
+                    {"source": "npc_c", "target": "fac_salt", "kind": "member_of"},
+                    {"source": "npc_d", "target": "fac_salt", "kind": "member_of"},
+                    {"source": "npc_e", "target": "fac_mist", "kind": "member_of"},
+                    {"source": "fac_iron", "target": "fac_salt", "kind": "enemy_of"},
+                    {"source": "fac_salt", "target": "fac_mist", "kind": "rival_of"},
+                ],
+            }
+        )
+    )
+
+
 def test_mcp_audit_project_persists_and_lists_issues(tmp_path) -> None:
     content_root = tmp_path / "content"
     _write_project(content_root)
@@ -96,6 +164,28 @@ def test_mcp_context_pack_and_ask_lore(tmp_path) -> None:
     assert answer["answer"]["citations"][0]["ref"] == "entity:npc_aldric"
     assert answer["telemetry"]["calls"] == 1
     assert answer["cost_budget"]["over_budget"] is True
+
+
+def test_mcp_ask_lore_uses_qa_overview_reports(tmp_path) -> None:
+    from owcopilot.app.actions import run_build_overview_action
+
+    content_root = tmp_path / "content"
+    sqlite_path = str(tmp_path / "runtime.sqlite")
+    _write_overview_project(content_root)
+    run_build_overview_action(content_root, sqlite_path=sqlite_path, llm_mode="offline")
+
+    answer = ask_lore(
+        content_root=str(content_root),
+        sqlite_path=sqlite_path,
+        query="列出这个世界的主要势力以及它们之间的关系",
+        budget_tokens=800,
+    )
+
+    assert answer["answer"]["refused"] is False
+    assert any(
+        citation["ref"].startswith("community:")
+        for citation in answer["answer"]["citations"]
+    )
 
 
 def test_mcp_quality_harness_returns_loop_state_and_proposals(tmp_path) -> None:

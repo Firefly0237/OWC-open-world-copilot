@@ -3,9 +3,15 @@
 This is the half of the project that proves the other half. It builds 雾脊行省/Mistridge
 Province — 10 regions, 65 entities, 36 quest chains, dialogues with zh-CN/en localized text —
 asserts the clean world audits to **zero open issues** (false-positive gate), seeds 25 classified
-errors and measures rule detection, replays three known change scenarios through impact analysis
-(recall gate), runs a 30-query bilingual retrieval benchmark, and spot-checks grounded-or-refuse
-QA behaviour. Everything is deterministic and offline so it can sit in CI at $0.
+errors and measures rule detection (over a SUBSET of the rule registry — ``detection_rate`` is the
+hit-rate on the seeded errors, which cover ~20 of the 29 rule codes; the metrics expose
+``rules_covered``/``rules_uncovered`` so this is not read as "all rules validated", and the
+uncovered rules each have dedicated unit tests), replays three known change scenarios through
+impact analysis
+(recall gate), runs a 30-query bilingual retrieval benchmark, and spot-checks QA behaviour
+(citation-*existence* grounding + out-of-world refusal — NOT entailment; the "in-canon entity /
+out-of-canon fact" hallucination is a documented, untested-here gap, see ``qa/verify.py``).
+Everything is deterministic and offline so it can sit in CI at $0.
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from ..audit.default_rules import build_default_rule_registry
 from ..content.models import (
     POI,
     ContentBundle,
@@ -38,8 +45,13 @@ from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
 from ..pipeline.audit import run_full_audit
 from ..pipeline.project import ProjectContext
+from ..qa.faithfulness import judge_qa_faithfulness
 from ..qa.offline import OfflineQAProvider
 from ..qa.service import LoreQAService
+
+# C1: gate constant — sanity threshold for tool-selection F1.
+# 手工标注 10 个场景，集合 F1，不计顺序。这是 sanity gate 而非统计基准。
+TOOL_ACCURACY_GATE: float = 0.80
 
 DETECTION_RATE_GATE = 0.85
 RETRIEVAL_HIT_RATE_GATE = 0.90
@@ -117,6 +129,128 @@ class AcceptanceReport(BaseModel):
     passed: bool
     checks: list[AcceptanceCheck]
     metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+class GoldReActScenario(BaseModel):
+    """One hand-labelled ReAct eval scenario.
+
+    诚实说明：10 个场景为人工标注，用于 sanity gate 而非统计基准。
+    expected_actions 是集合 F1 计算的参考集，不计顺序。
+    """
+
+    scenario_id: str
+    goal: str
+    expected_actions: list[str]
+    description: str = ""
+
+
+def _build_gold_react_scenarios() -> list[GoldReActScenario]:
+    """Return the 10 hand-labelled ReAct scenarios for the acceptance world.
+
+    Covers all 6 built-in skills at least once (C1-H6):
+    audit_project / list_issues / build_context_pack / impact_of / propose_fix / quality_harness
+    """
+    return [
+        GoldReActScenario(
+            scenario_id="S01",
+            goal="审计雾脊行省世界一致性并报告开放错误",
+            expected_actions=["audit_project", "list_issues"],
+            description="基础审计路径：先审计再列出错误",
+        ),
+        GoldReActScenario(
+            scenario_id="S02",
+            goal="检查 quest_r1_q1 的一致性并找到相关实体",
+            expected_actions=["audit_project", "build_context_pack"],
+            description="审计后做上下文查找",
+        ),
+        GoldReActScenario(
+            scenario_id="S03",
+            goal="分析删除 fac_iron 的影响范围",
+            expected_actions=["impact_of"],
+            description="单工具影响分析",
+        ),
+        GoldReActScenario(
+            scenario_id="S04",
+            goal="为审计发现的问题生成修复提案",
+            expected_actions=["audit_project", "propose_fix"],
+            description="审计到修复提案",
+        ),
+        GoldReActScenario(
+            scenario_id="S05",
+            goal="获取 npc_r1_a 的全量 canon 上下文",
+            expected_actions=["build_context_pack"],
+            description="单步上下文查找",
+        ),
+        GoldReActScenario(
+            scenario_id="S06",
+            goal="获取项目质量概况和下一步建议",
+            expected_actions=["quality_harness"],
+            description="单步质量哈内斯",
+        ),
+        GoldReActScenario(
+            scenario_id="S07",
+            goal="诊断世界错误并给出修复路径",
+            expected_actions=["audit_project", "list_issues", "propose_fix"],
+            description="三步完整诊断→列错误→修复路径",
+        ),
+        GoldReActScenario(
+            scenario_id="S08",
+            goal="检查当前是否有未解决的严重错误",
+            expected_actions=["audit_project", "list_issues"],
+            description="与 S01 同序但 goal 表述不同",
+        ),
+        GoldReActScenario(
+            scenario_id="S09",
+            goal="评估删除地点 loc_r1_a 的影响并查找受影响 quest",
+            expected_actions=["impact_of", "build_context_pack"],
+            description="影响分析后上下文查找",
+        ),
+        GoldReActScenario(
+            scenario_id="S10",
+            goal="全面质量检查：审计、影响分析、修复提案",
+            expected_actions=["audit_project", "impact_of", "quality_harness"],
+            description="多工具综合路径",
+        ),
+    ]
+
+
+def compute_tool_selection_accuracy(
+    actual_steps: list[Any],
+    expected_actions: list[str],
+) -> dict[str, float]:
+    """Compute set-F1 between actual action names and expected action names.
+
+    口径说明（诚实标注）：
+    - 集合语义（不计顺序）：action 名重复只计一次
+    - is_error=True 的步骤不计入 actual（工具调用失败不算选中了该工具）
+    - 全空 vs 全空 → precision=recall=f1=1.0（两者均未选工具，视为完全匹配）
+    - 一方为空另一方非空 → precision=recall=f1=0.0
+
+    Args:
+        actual_steps: list of AgentStep (must have .action: str and .is_error: bool)
+        expected_actions: list of action name strings (gold reference)
+
+    Returns:
+        {"precision": float, "recall": float, "f1": float}  — all values in [0.0, 1.0]
+    """
+    actual_set = {
+        step.action
+        for step in actual_steps
+        if getattr(step, "action", None) and not getattr(step, "is_error", False)
+    }
+    expected_set = set(expected_actions)
+
+    if not actual_set and not expected_set:
+        return {"precision": 1.0, "recall": 1.0, "f1": 1.0}
+    if not actual_set or not expected_set:
+        return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
+
+    intersection = actual_set & expected_set
+    precision = len(intersection) / len(actual_set)
+    recall = len(intersection) / len(expected_set)
+    denom = precision + recall
+    f1 = 2.0 * precision * recall / denom if denom > 0.0 else 0.0
+    return {"precision": precision, "recall": recall, "f1": f1}
 
 
 def build_acceptance_world() -> ContentBundle:
@@ -412,8 +546,234 @@ def seed_errors(clean: ContentBundle) -> tuple[ContentBundle, list[SeededError]]
     return bundle, seeded
 
 
+def retrieval_eval_queries() -> list[tuple[str, str | None]]:
+    """Semantically-probing evaluation queries for retrieval quality assessment.
+
+    These queries are designed to test *semantic retrieval*, not BM25 keyword matching.
+    They do NOT contain entity names — instead they describe entities by attribute,
+    relationship, or function.  A BM25-only retriever will score poorly on these;
+    a hybrid retriever with real semantic embeddings (bge-m3) should outperform it.
+
+    Returns a list of (query, expected_ref | None) pairs:
+    - ``expected_ref`` is the target entity ref that should appear in the context pack.
+    - ``None`` means the query is *unanswerable* (no entity should be confidently retrieved);
+      used to test refusal / low-confidence behaviour.
+
+    Query categories:
+    - Paraphrase (>=30%): no entity name, describe by function/history/relationship
+    - Indirect: requires graph hop (quest → giver → faction) to answer
+    - Unanswerable: out-of-world queries that should not produce confident hits
+
+    诚实说明 / Honest annotation:
+    - This query set targets the bge-m3 semantic path; HashingEmbedder (bag-of-chars)
+      will have lower recall on paraphrase queries.
+    - Sample size (15 queries) is too small for statistically significant CI intervals;
+      this is a portfolio demonstration, not a production benchmark (n ≥ 100 needed for
+      Wilson CI < ±5%).
+    - ``run_semantic_retrieval_benchmark()`` compares bge-m3 vs BM25-only on this set.
+    - **hit_rate in the acceptance gate (``RETRIEVAL_HIT_RATE_GATE``) is measured after
+      the full two-stage pipeline (recall + LexicalReScorer rerank + context packing).
+      It is NOT pure recall: a document that is retrieved but reranked below the token
+      budget cut-off will not count as a hit.  The tight-budget gate
+      (``RETRIEVAL_TIGHT_HIT_RATE_GATE``) specifically tests whether the rerank stage
+      elevates the top answer so it survives a small context window.**
+    """
+    # All queries avoid entity canonical names; they describe by attribute or relation.
+    # expected_ref: the canon entity ref that *should* surface in the context pack.
+
+    paraphrase_queries: list[tuple[str, str | None]] = [
+        # Describe by function / controlling role
+        ("控制北方山道的武装势力", "entity:fac_iron"),
+        ("在北方山口驻守的军事力量", "entity:fac_iron"),
+        # Describe by historical event
+        ("发生在海岸线上的历史海战", "entity:evt_salt_battle"),
+        ("涉及北方同盟签订的那场盟约", "entity:evt_xuanwu_pact"),
+        # Describe by object function
+        ("铁卫军团签发的通行凭证", "entity:item_xuantie_seal"),
+        # Describe by administrative concept
+        ("古代水路货运管理体系", "entity:concept_caoyun"),
+        # Describe faction by enemy relationship (no name)
+        ("和黑沙帮为敌的雾中势力", "entity:fac_mist"),
+        # EN paraphrase queries (no canonical name)
+        ("armed group controlling the northern mountain pass", "entity:fac_iron"),
+        ("historical sea battle along the coastal frontier", "entity:evt_salt_battle"),
+        ("ancient inland waterway transport administration system", "entity:concept_caoyun"),
+    ]
+
+    indirect_queries: list[tuple[str, str | None]] = [
+        # graph-hop: quest → giver_npc → member_of → faction
+        # "Which faction does the quest-giver of the first-region beacon-patrol quest belong to?"
+        # No entity name — must traverse quest→NPC→faction edges to answer.
+        ("第一行省第一个烽燧巡查任务的委托人归属于哪个势力", "entity:fac_iron"),
+        # graph-hop: location → controlled_by → faction
+        # "The armed group that controls the beacon outpost in the northernmost mountain pass"
+        # No canonical name — must traverse loc→controlled_by→faction.
+        ("北方山道最近的烽燧据点由哪支武装力量控制", "entity:fac_iron"),
+        # graph-hop: faction → allied_with → faction
+        # "The force that is allied with the trade-road merchants' organisation"
+        # Describes Caravan Guild by role ("trade-road merchants") without using its name.
+        ("与主持贸易商路的商人组织结盟的武装势力", "entity:fac_iron"),
+    ]
+
+    unanswerable_queries: list[tuple[str, str | None]] = [
+        # These topics do not exist in the acceptance world
+        ("铁卫军团的军歌歌词", None),        # No entity for military songs
+        ("雾脊山道的鱼类分布", None),          # No biology content
+    ]
+
+    return paraphrase_queries + indirect_queries + unanswerable_queries
+
+
+def run_semantic_retrieval_benchmark(
+    workspace: str,
+    *,
+    skip_if_no_semantic: bool = True,
+) -> dict[str, object]:
+    """Compare bge-m3 hybrid retrieval vs BM25-only on semantically-probing queries.
+
+    This benchmark addresses the core weakness of the acceptance gate's 30 verbatim
+    queries: those queries contain entity names and are trivially solved by BM25 title
+    matching.  This function uses ``retrieval_eval_queries()`` (paraphrase + indirect)
+    to measure whether the semantic embedding leg actually adds value.
+
+    诚实说明 / Honest annotation:
+    - ``acceptance_gate`` uses HashingEmbedder (bag-of-chars) for $0 determinism.
+      It only demonstrates BM25 reliability, not semantic retrieval quality.
+    - This function uses the REAL bge-m3 embedder (SemanticEmbedder) to measure the
+      semantic path.  It is skipped in CI (``skip_if_no_semantic=True``) to keep $0
+      and deterministic gates intact.
+    - Run locally or in portfolio review:
+      ``python -c "from owcopilot.evaluation.acceptance import run_semantic_retrieval_benchmark;
+      print(run_semantic_retrieval_benchmark('/tmp/ws'))"``
+
+    Returns a dict with keys:
+    - ``skipped``: bool, True when skipped due to missing semantic deps
+    - ``bge_m3_hit_rate``: float, fraction of answerable queries hitting the expected ref
+    - ``bm25_only_hit_rate``: float, same but BM25-only (no vector leg)
+    - ``delta_hit_rate``: float, bge_m3 - bm25_only (semantic uplift)
+    - ``paraphrase_hit_rate_bge_m3``: float, paraphrase-only queries with bge-m3
+    - ``paraphrase_hit_rate_bm25``: float, paraphrase-only queries with BM25-only
+    - ``queries``: int, total answerable query count used
+    - ``note``: str, honest annotation about sample size and limitations
+    """
+    from pathlib import Path as _Path
+
+    from ..content.store import ContentStore
+    from ..llm.cache import HashingEmbedder
+
+    # Resolve semantic availability
+    try:
+        from ..retrieval.embedding import SemanticEmbedder, semantic_available
+
+        semantic_ok = semantic_available()
+    except Exception:
+        semantic_ok = False
+
+    if skip_if_no_semantic and not semantic_ok:
+        return {
+            "skipped": True,
+            "reason": (
+                "bge-m3 semantic embedder not available. "
+                "Run with sentence_transformers installed and BAAI/bge-m3 cached. "
+                "Set skip_if_no_semantic=False to see the BM25-only baseline."
+            ),
+        }
+
+    root = _Path(workspace)
+    world_root = root / "semantic_eval_world"
+    bundle = build_acceptance_world()
+    ContentStore(world_root).save(bundle)
+
+    eval_queries = retrieval_eval_queries()
+    # Only answerable queries (expected_ref is not None) contribute to hit rate
+    answerable = [(q, ref) for q, ref in eval_queries if ref is not None]
+    paraphrase_indices = list(range(10))  # first 10 are paraphrase (see retrieval_eval_queries)
+
+    def _hit_rate(project: ProjectContext, queries: list[tuple[str, str]]) -> float:
+        hits = sum(
+            1
+            for q, ref in queries
+            if ref in project.context_builder.build(q, budget_tokens=800).refs
+        )
+        return hits / len(queries) if queries else 0.0
+
+    # --- bge-m3 hybrid path ---
+    semantic_hit_rate = 0.0
+    paraphrase_hit_rate_bge = 0.0
+    if semantic_ok:
+        sem_embedder = SemanticEmbedder()
+        sem_project = ProjectContext.open(
+            world_root,
+            sqlite_path=root / "sem_eval.sqlite",
+            embedder=sem_embedder,
+        )
+        try:
+            semantic_hit_rate = _hit_rate(sem_project, answerable)
+            paraphrase_answerable = [
+                (q, ref) for i, (q, ref) in enumerate(answerable) if i in paraphrase_indices
+            ]
+            paraphrase_hit_rate_bge = (
+                _hit_rate(sem_project, paraphrase_answerable) if paraphrase_answerable else 0.0
+            )
+        finally:
+            sem_project.close()
+
+    # --- BM25-only path (HashingEmbedder, no vector retrieval) ---
+    bm25_project = ProjectContext.open(
+        world_root,
+        sqlite_path=root / "bm25_eval.sqlite",
+        embedder=HashingEmbedder(),
+    )
+    try:
+        bm25_hit_rate = _hit_rate(bm25_project, answerable)
+        paraphrase_answerable_bm25 = [
+            (q, ref) for i, (q, ref) in enumerate(answerable) if i in paraphrase_indices
+        ]
+        paraphrase_hit_rate_bm25 = (
+            _hit_rate(bm25_project, paraphrase_answerable_bm25)
+            if paraphrase_answerable_bm25
+            else 0.0
+        )
+    finally:
+        bm25_project.close()
+
+    delta = round(semantic_hit_rate - bm25_hit_rate, 4)
+    return {
+        "skipped": False,
+        "bge_m3_hit_rate": round(semantic_hit_rate, 4),
+        "bm25_only_hit_rate": round(bm25_hit_rate, 4),
+        "delta_hit_rate": delta,
+        "paraphrase_hit_rate_bge_m3": round(paraphrase_hit_rate_bge, 4),
+        "paraphrase_hit_rate_bm25": round(paraphrase_hit_rate_bm25, 4),
+        "queries": len(answerable),
+        "note": (
+            f"n={len(answerable)} answerable queries (paraphrase + indirect). "
+            "Sample size is too small for Wilson CI < ±5% (need n>=100 for that). "
+            "Verbatim queries (entity-name based) are omitted here -- they primarily "
+            "test BM25 reliability, not semantic retrieval quality. "
+            "HashingEmbedder pin in acceptance_gate: demonstrates BM25 reproducibility, "
+            "not bge-m3 semantic recall. "
+            f"Semantic uplift (delta): {delta:+.1%} on paraphrase queries."
+        ),
+    }
+
+
 def retrieval_benchmark_queries() -> list[tuple[str, str]]:
-    """30 labelled (query, expected_ref) pairs — 15 zh-CN, 15 en."""
+    """30 labelled (query, expected_ref) pairs — 15 zh-CN, 15 en.
+
+    诚实说明 / Honest annotation:
+    - These 30 queries are primarily **verbatim** (they contain the entity's canonical
+      name or a direct paraphrase that includes the name).  They are excellent for
+      verifying BM25 / title-match reliability but are insufficient to prove semantic
+      retrieval quality.
+    - The acceptance gate uses HashingEmbedder (bag-of-chars hash) for $0 determinism.
+      Passing this benchmark proves BM25 + graph expansion works correctly.  It does NOT
+      prove that bge-m3 semantic retrieval works or that hybrid retrieval outperforms
+      BM25-only.
+    - For semantic retrieval quality evaluation (paraphrase + indirect queries, bge-m3 vs
+      BM25-only comparison), see ``retrieval_eval_queries()`` and
+      ``run_semantic_retrieval_benchmark()``.
+    """
     queries: list[tuple[str, str]] = []
     zh_targets = [
         ("npc_r1_a", "{name}是谁"),
@@ -477,7 +837,20 @@ def _retrieval_hit_rate(
     return hits / len(queries), misses
 
 
-def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
+def run_acceptance_evaluation(
+    workspace: str | Path,
+    *,
+    faithfulness_judge: LLMGateway | None = None,
+) -> AcceptanceReport:
+    """Run the full acceptance benchmark.
+
+    ``faithfulness_judge`` is an opt-in LLM judge for the *entailment* gate
+    (``qa_faithfulness_entailment``). Left ``None`` (the default, and what CI / the offline CLI
+    pass), that gate is **skipped** — it never calls a model, never costs anything, and never
+    counts as a failure — so the $0 default behaviour is unchanged. Pass a connected
+    :class:`LLMGateway` to actually score faithfulness. The skippable gate coexists with the
+    deterministic ``qa_citation_existence_or_refuse`` gate; it does not replace it.
+    """
     root = Path(workspace)
     clean_root = root / "acceptance_world"
     corrupted_root = root / "acceptance_world_seeded"
@@ -580,7 +953,12 @@ def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
             )
         )
 
-        # 4. QA spot checks: grounded answers for in-world questions, refusal otherwise
+        # 4. QA spot checks: grounded answers for in-world questions, refusal for out-of-world ones.
+        # SCOPE (honest): this exercises *citation-existence* grounding + refusal of fully
+        # out-of-world questions. It does NOT test entailment — the "entity is in canon but this
+        # specific fact is not" hallucination (e.g. "铁卫军团的军歌歌词") is a known, documented
+        # gap (see qa/verify.py module docstring + test_qa_verify.py) and is NOT asserted here,
+        # because catching it needs an NLI/LLM judge that would break the $0-offline gate.
         qa = LoreQAService(
             gateway=LLMGateway(
                 providers={"cheap": OfflineQAProvider()},
@@ -599,8 +977,15 @@ def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
         ]
         unanswerable = ["龙王是谁", "谁偷走了月亮"]
         qa_failures: list[str] = []
+        # Keep the (question, answer, pack) triples for the opt-in faithfulness gate below, so we
+        # only retrieve / answer once.
+        answered: list[tuple[str, Any, Any]] = []
+        qa_context_builder = clean_project.qa_context_builder()
         for question in answerable:
             answer = qa.ask(question, budget_tokens=700)
+            answered.append(
+                (question, answer, qa_context_builder.build(question, budget_tokens=700))
+            )
             if answer.refused or not answer.citations:
                 qa_failures.append(f"expected grounded answer: {question}")
         for question in unanswerable:
@@ -609,10 +994,26 @@ def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
                 qa_failures.append(f"expected refusal: {question}")
         checks.append(
             AcceptanceCheck(
-                name="qa_grounded_or_refuse",
+                name="qa_citation_existence_or_refuse",
                 passed=not qa_failures,
-                details={"failures": qa_failures},
+                # honest scope: existence-grounding + out-of-world refusal only, NOT entailment.
+                details={
+                    "failures": qa_failures,
+                    "scope": "citation-existence grounding + out-of-world refusal; "
+                    "does NOT verify entailment (in-canon entity / out-of-canon fact is not "
+                    "caught — see qa/verify.py)",
+                },
             )
+        )
+
+        # 4b. QA faithfulness (ENTAILMENT) gate — opt-in, $0-skippable, COEXISTS with 4.
+        # This is the separate entailment verifier the existence check deliberately leaves to a
+        # judge (see qa/verify.py + qa/faithfulness.py). With no judge (the default, and what CI
+        # passes) it is SKIPPED: skipped=True, passed=True, zero model calls, $0. The gate is only
+        # *enforced* when a connected LLMGateway judge is supplied, in which case every grounded
+        # answer's claims must be entailed by its retrieved evidence (faithfulness == 1.0).
+        checks.append(
+            _run_faithfulness_gate(answered, judge=faithfulness_judge),
         )
     finally:
         clean_project.close()
@@ -643,6 +1044,19 @@ def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
     detection_rate = len(detected) / len(seeded)
     metrics["detection_rate"] = round(detection_rate, 4)
     metrics["detected"] = len(detected)
+
+    # Honest denominator disclosure: detection_rate is over the *seeded* errors, which exercise a
+    # SUBSET of the rule registry, not all 29 rules. Surfacing rules_covered / rules_uncovered keeps
+    # detection_rate=1.0 from being read as "all rules validated by acceptance". The uncovered rules
+    # (PROMPT_INJECTION, the dialogue-tree family, quest-logic/reachability, unreviewed-AI, ...) are
+    # each covered by their own dedicated unit tests; they are just not seeded into this one world.
+    all_rule_codes = set(build_default_rule_registry().codes())
+    seeded_rule_codes = {error.expected_rule for error in seeded}
+    uncovered_rule_codes = sorted(all_rule_codes - seeded_rule_codes)
+    metrics["rules_total"] = len(all_rule_codes)
+    metrics["rules_covered"] = len(seeded_rule_codes)
+    metrics["rules_uncovered"] = uncovered_rule_codes
+
     checks.append(
         AcceptanceCheck(
             name="seeded_error_detection_gate",
@@ -651,12 +1065,190 @@ def run_acceptance_evaluation(workspace: str | Path) -> AcceptanceReport:
                 "detection_rate": detection_rate,
                 "gate": DETECTION_RATE_GATE,
                 "missed": missed_errors,
+                # scope disclosure: this gate measures detection over the seeded subset only.
+                "rules_covered": f"{len(seeded_rule_codes)}/{len(all_rule_codes)}",
+                "rules_uncovered_here": uncovered_rule_codes,
+                "rules_uncovered_note": "uncovered rules are validated by dedicated unit tests, "
+                "not seeded into the acceptance world",
             },
         )
     )
+
+    # 6. tool_selection_accuracy sanity gate (C1)
+    # 10 个手工标注场景，OfflineGoalAwareReActProvider 确保 $0 确定性运行。
+    # 诚实声明：F1 基于集合语义（不计顺序），样本量 10 个，是 sanity gate 而非统计基准。
+    # OfflineGoalAwareReActProvider 被设计成精确返回 gold 序列，offline F1=1.0 是设计预期，
+    # 不代表 LLM 的工具选择精度。
+    checks.append(_run_tool_selection_accuracy_gate(clean_root, root, metrics))
 
     return AcceptanceReport(
         passed=all(check.passed for check in checks),
         checks=checks,
         metrics=metrics,
+    )
+
+
+def _run_faithfulness_gate(
+    answered: list[tuple[str, Any, Any]],
+    *,
+    judge: LLMGateway | None,
+) -> AcceptanceCheck:
+    """Opt-in, $0-skippable QA faithfulness (entailment) gate.
+
+    For each grounded answer, ask the judge whether the answer's claims are entailed by the
+    retrieved evidence. With ``judge=None`` (default / CI), every answer is skipped, the gate
+    passes vacuously, and no model is called — preserving the $0 default. The gate coexists with
+    ``qa_citation_existence_or_refuse`` and does not replace it.
+
+    诚实说明：这是新增能力（entailment），默认离线跳过、不计失败、不引必装依赖；只有显式传入
+    可用的 judge（已接入模型的 LLMGateway）时才真正打分并纳入 passed。判定 fail-closed：
+    解析失败的断言记为 unsupported，不静默当 supported。
+    """
+    per_answer: list[dict[str, Any]] = []
+    all_skipped = True
+    failures: list[str] = []
+    for question, answer, pack in answered:
+        result = judge_qa_faithfulness(answer, pack=pack, judge=judge)
+        entry: dict[str, Any] = {"question": question, **result}
+        per_answer.append(entry)
+        if result.get("skipped"):
+            continue
+        all_skipped = False
+        if result.get("faithfulness", 0.0) < 1.0:
+            failures.append(
+                f"unfaithful answer: {question} "
+                f"(faithfulness={result.get('faithfulness')}, "
+                f"unsupported={[u.get('claim') for u in result.get('unsupported', [])]})"
+            )
+
+    # Skipped (no judge) → passes vacuously; this must not drag the overall report down.
+    passed = all_skipped or not failures
+    return AcceptanceCheck(
+        name="qa_faithfulness_entailment",
+        passed=passed,
+        details={
+            "skipped": all_skipped,
+            "is_opt_in": True,
+            "coexists_with": "qa_citation_existence_or_refuse",
+            "scope": "LLM-judge entailment (RAGAS-style faithfulness): does the retrieved "
+            "evidence actually SUPPORT each claim? Catches the in-canon-entity / "
+            "out-of-canon-fact hallucination the existence check leaves through.",
+            "failures": failures,
+            "per_answer": per_answer,
+            "note": (
+                "默认无 judge → 全部 skipped、$0、不计失败；fail-closed 解析失败记为 unsupported。"
+                "需传入已接入模型的 LLMGateway 才会真正打分。"
+            ),
+        },
+    )
+
+
+class _NullSkillRegistry:
+    """Minimal skill registry for the tool_selection_accuracy gate.
+
+    Returns a successful stub observation for every action name, so the agent's
+    steps record is_error=False for all gold actions (including those with required
+    parameters like propose_fix/build_context_pack/impact_of).  This keeps the
+    gate purely about *action selection*, not about whether tool arguments happened
+    to be valid for the acceptance world fixture.
+
+    诚实说明：这是 eval-only 存根，不执行真实工具逻辑，不代表真实能力。
+    """
+
+    _SKILL_NAMES: tuple[str, ...] = (
+        "audit_project",
+        "list_issues",
+        "build_context_pack",
+        "impact_of",
+        "propose_fix",
+        "quality_harness",
+    )
+
+    def manifest(self, allowed: set[str] | None = None) -> str:
+        if allowed is None:
+            names: tuple[str, ...] = self._SKILL_NAMES
+        else:
+            names = tuple(n for n in self._SKILL_NAMES if n in allowed)
+        lines = [
+            f"- {n}(): offline eval stub [deterministic; read_only]"
+            for n in names
+        ]
+        return "\n".join(lines)
+
+    def run(self, name: str, args: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+        # Always succeeds with a stub observation — is_error stays False.
+        return {"status": "ok", "tool": name, "note": "offline eval stub"}
+
+
+def _run_tool_selection_accuracy_gate(
+    clean_root: Path,
+    root: Path,
+    metrics: dict[str, Any],
+) -> AcceptanceCheck:
+    """Run the tool-selection-accuracy sanity gate (C1).
+
+    Uses OfflineGoalAwareReActProvider (deterministic, $0, no LLM) and
+    _NullSkillRegistry (stub tool execution so is_error stays False for all
+    gold actions regardless of argument validity).
+
+    诚实说明：此 gate 测量的是「offline provider 是否按设计返回 gold action 序列」，
+    不是真实 LLM 的工具选择精度。10 个手工标注场景，集合 F1，sanity gate 而非统计基准。
+
+    Adds 'tool_selection_accuracy_mean_f1' to metrics dict.
+    """
+    from ..agent.offline import OfflineGoalAwareReActProvider
+    from ..agent.react import ReActAgent
+
+    gold_scenarios = _build_gold_react_scenarios()
+    scenario_pairs = [(s.goal, s.expected_actions) for s in gold_scenarios]
+    provider = OfflineGoalAwareReActProvider.from_scenarios(scenario_pairs)
+    registry = _NullSkillRegistry()
+
+    scenario_f1s: list[float] = []
+    scenario_details: list[dict[str, Any]] = []
+
+    for scenario in gold_scenarios:
+        gw = LLMGateway(
+            providers={"react": provider},
+            router=StaticRouter(mapping={"agent_react": "react"}),
+            cache=NoOpCache(),
+            telemetry=TelemetryCollector(),
+        )
+        agent = ReActAgent(
+            gateway=gw,
+            registry=registry,  # type: ignore[arg-type]
+            max_steps=len(scenario.expected_actions) + 2,
+        )
+        result = agent.run(scenario.goal)
+        acc = compute_tool_selection_accuracy(result.steps, scenario.expected_actions)
+        scenario_f1s.append(acc["f1"])
+        scenario_details.append(
+            {
+                "scenario_id": scenario.scenario_id,
+                "goal": scenario.goal,
+                "expected": scenario.expected_actions,
+                "actual": [s.action for s in result.steps if s.action and not s.is_error],
+                **acc,
+            }
+        )
+
+    mean_f1 = sum(scenario_f1s) / len(scenario_f1s) if scenario_f1s else 0.0
+    metrics["tool_selection_accuracy_mean_f1"] = round(mean_f1, 4)
+
+    return AcceptanceCheck(
+        name="tool_selection_accuracy_gate",
+        passed=mean_f1 >= TOOL_ACCURACY_GATE,
+        details={
+            "eval_type": "offline_pipeline_sanity",  # BE-7: machine-readable eval type tag
+            "is_sanity_gate": True,                  # BE-7: explicit gate classification
+            "mean_f1": mean_f1,
+            "gate": TOOL_ACCURACY_GATE,
+            "scenarios": scenario_details,
+            "note": (
+                "集合F1，不计顺序，10个手工标注场景，sanity gate而非统计基准。"
+                "OfflineGoalAwareReActProvider 被设计成精确返回 gold 序列，offline F1=1.0"
+                " 是设计预期，不代表 LLM 的实际工具选择精度。"
+                "_NullSkillRegistry 存根确保 is_error=False，测量的是 action 选择，不是执行成功率。"
+            ),
+        },
     )

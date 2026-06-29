@@ -130,6 +130,10 @@ class WorldRefineRound(BaseModel):
     auto_review_ok: bool = True  # False when this round's critique could not be parsed
     # Verbal self-reflection distilled from this round (Reflexion memory), carried forward.
     reflection: str = ""
+    # IN-B1 M2: primary failing dimension of this round's critique (blocker>minor>non-ok), so the
+    # worldgen genesis/expand path feeds real dimensions into calibration like the assist paths do.
+    # "general" when the critique was unparsable or had no failing dimension.
+    primary_dim: str = "general"
 
 
 class WorldSeedDraft(BaseModel):

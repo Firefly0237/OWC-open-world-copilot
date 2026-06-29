@@ -533,7 +533,7 @@ onMounted(async () => {
 
 /* ---- buttons / fields (matches GraphPage) ---- */
 button {
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   cursor: pointer;
   font: inherit;
   font-size: 0.84rem;
@@ -565,7 +565,7 @@ input,
 textarea {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.45rem 0.6rem;
   font: inherit;

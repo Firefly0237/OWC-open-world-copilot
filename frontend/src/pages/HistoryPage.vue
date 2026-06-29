@@ -232,7 +232,7 @@ onMounted(async () => {
   flex: 1;
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.5rem 0.65rem;
   font: inherit;
@@ -247,7 +247,7 @@ onMounted(async () => {
 button.primary {
   background: linear-gradient(180deg, #f0d28a 0%, #b9924a 100%);
   border: 1px solid rgba(240, 210, 138, 0.65);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: #241a05;
   font-weight: 600;
   padding: 0.5rem 1rem;
@@ -326,7 +326,11 @@ button.primary:disabled {
 }
 
 .chip {
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   font-size: 0.76rem;
   padding: 0.1rem 0.55rem;
   border: 1px solid var(--ow-line);
@@ -375,7 +379,7 @@ button.primary:disabled {
   align-items: baseline;
   gap: 0.5rem;
   padding: 0.35rem 0.6rem;
-  border-radius: 0.45rem;
+  border-radius: var(--ow-control-radius);
   border-left: 2px solid transparent;
   background: rgba(16, 22, 48, 0.5);
   font-size: 0.84rem;
@@ -409,7 +413,11 @@ button.primary:disabled {
   color: var(--ow-muted);
   font-size: 0.74rem;
   border: 1px solid var(--ow-line);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   padding: 0.02rem 0.4rem;
 }
 

@@ -415,7 +415,7 @@ onMounted(loadTemplates);
 select {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.4rem 0.55rem;
   font: inherit;
@@ -433,7 +433,7 @@ select {
   width: 100%;
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.5rem 0.6rem;
   font-family: ui-monospace, Consolas, monospace;
@@ -450,7 +450,7 @@ select {
   gap: 0.5rem;
 }
 button {
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   cursor: pointer;
   font: inherit;
   font-size: 0.85rem;
@@ -488,7 +488,7 @@ button:disabled {
   align-items: center;
 }
 .tag {
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   padding: 0.2rem 0.55rem;
   font-size: 0.78rem;
   border: 1px solid var(--ow-line);
@@ -546,7 +546,7 @@ summary {
   align-items: center;
   gap: 0.25rem;
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   padding: 0.1rem 0.3rem 0.1rem 0.5rem;
 }
 .chip .link {

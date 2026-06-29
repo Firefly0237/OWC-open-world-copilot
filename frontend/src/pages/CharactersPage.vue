@@ -471,7 +471,7 @@ input,
 select {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.5rem 0.65rem;
   font: inherit;
@@ -499,7 +499,7 @@ textarea:focus {
 }
 
 button {
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   cursor: pointer;
   font: inherit;
   font-size: 0.85rem;
@@ -546,7 +546,11 @@ button.primary:disabled {
   font-size: 0.74rem;
   color: var(--ow-cyan);
   border: 1px solid rgba(143, 214, 232, 0.35);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   padding: 0.12rem 0.5rem;
   margin-left: 0.5rem;
   vertical-align: middle;
@@ -588,7 +592,7 @@ button.primary:disabled {
   border: 1px solid var(--ow-gold-soft);
   background: var(--ow-gold-faint);
   color: var(--ow-gold-bright);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   padding: 0.4rem 0.85rem;
   font: inherit;
   font-size: 0.84rem;
@@ -626,7 +630,11 @@ button.primary:disabled {
 
 .chip.static {
   border: 1px solid var(--ow-line);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   background: rgba(16, 22, 48, 0.6);
   font-size: 0.78rem;
   padding: 0.18rem 0.65rem;

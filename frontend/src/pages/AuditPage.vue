@@ -134,10 +134,10 @@ async function suggest(issue: Issue): Promise<void> {
     }>(`/projects/${currentProject()}/issues/${encodeURIComponent(issue.id)}/suggestions`, llm);
     addSessionCost(costOf(body));
     const note = body.candidates.length
-      ? `${body.used_llm ? "模型+确定性" : "确定性修复器"}给出 ${body.candidates.length} 个候选${
-          body.rejected_count ? `（影子校验淘汰 ${body.rejected_count} 个）` : ""
+      ? `${body.used_llm ? "模型+确定性" : "确定性修复器"}给出 ${body.candidates.length} 个修复候选${
+          body.rejected_count ? `（另有 ${body.rejected_count} 个经测试会引入新问题，已排除）` : ""
         }`
-      : `没有可用候选${body.rejected_count ? `（${body.rejected_count} 个被影子校验淘汰）` : "——可能需要人工处理"}`;
+      : `${body.rejected_count ? `给出了修复候选，但 ${body.rejected_count} 个经测试会引入新问题已排除——` : ""}暂无可用修复候选，可能需要手动处理`;
     suggestState.value = {
       ...suggestState.value,
       [issue.id]: { busy: false, candidates: body.candidates, note },
@@ -152,7 +152,7 @@ async function suggest(issue: Issue): Promise<void> {
 
 async function applyPatch(candidate: Candidate): Promise<void> {
   if (!operator.value.trim()) {
-    pushToast("先填署名再应用修复。", "error");
+    pushToast("先填上你的名字（用于记录谁批准了修复）。", "error");
     return;
   }
   setCurrentOperator(operator.value.trim());
@@ -178,7 +178,7 @@ async function applyPatch(candidate: Candidate): Promise<void> {
 
 async function rollback(candidate: Candidate): Promise<void> {
   if (!operator.value.trim()) {
-    pushToast("先填署名再回滚。", "error");
+    pushToast("先填上你的名字（用于记录谁批准了回滚）。", "error");
     return;
   }
   setCurrentOperator(operator.value.trim());
@@ -200,6 +200,17 @@ function opSummary(ops: Record<string, unknown>[]): string {
   const kinds = ops.map((o) => String(o.op ?? o.action ?? o.kind ?? o.type ?? "op"));
   return kinds.join("、") || `${ops.length} 步`;
 }
+
+// per-issue tech-detail panel open state
+const detailOpen = ref<Record<string, boolean>>({});
+function toggleDetail(id: string): void {
+  detailOpen.value = { ...detailOpen.value, [id]: !detailOpen.value[id] };
+}
+
+// Strip entity:/quest:/etc prefix for cleaner display; full value available in tooltip
+function formatRef(ref: string): string {
+  return ref.replace(/^[a-z_]+:/, "");
+}
 </script>
 
 <template>
@@ -207,7 +218,7 @@ function opSummary(ops: Record<string, unknown>[]): string {
     <PageHead overline="AUDIT" title="校勘修复" purpose="检查一致性问题，每条给出可回滚的修复。" />
 
     <div class="bar">
-      <input v-model="operator" class="op" placeholder="署名（应用/回滚时必填）" />
+      <input v-model="operator" class="op" placeholder="你的名字（记录谁批准了这次修复）" title="这不是密码，只是记录操作员的名字，方便日后溯源。填你的名字或昵称即可。" />
       <button class="primary" :disabled="running" @click="runAudit">
         {{ running ? "审计中…" : ran ? "重新审计" : "运行审计" }}
       </button>
@@ -226,7 +237,7 @@ function opSummary(ops: Record<string, unknown>[]): string {
         </button>
       </div>
       <p class="muted small">
-        结构审计看不出"语义矛盾"——同一对势力这里写盟友、那里写死敌。先语义召回可疑对，模型判官确认真矛盾，人工消解。
+        规则审计看不出「语义矛盾」——比如同一对势力在不同地方分别写成盟友和死敌。这里用 AI 扫描可疑的矛盾对，标出来让你来判断是否真的有问题，有问题的手动修正。
       </p>
       <div v-if="contraRan">
         <p v-if="!contra.contradictions.length && !contra.review_suggested.length" class="ok-text">
@@ -257,10 +268,16 @@ function opSummary(ops: Record<string, unknown>[]): string {
       <div v-for="issue in filtered" :key="issue.id" class="pane issue" :class="issue.severity">
         <div class="head">
           <span class="sev" :class="issue.severity">{{ SEV_LABEL[issue.severity] ?? issue.severity }}</span>
-          <span class="rule mono">{{ issue.rule_code }}</span>
-          <span class="ref mono">{{ issue.target_ref }}</span>
+          <span class="ref mono" :title="issue.target_ref">{{ formatRef(issue.target_ref) }}</span>
+          <button class="detail-toggle" @click="toggleDetail(issue.id)">
+            技术详情 <span class="detail-caret" :class="{ open: detailOpen[issue.id] }">▾</span>
+          </button>
         </div>
         <p class="msg">{{ issue.message }}</p>
+        <div v-if="detailOpen[issue.id]" class="detail-panel">
+          <span class="detail-row"><span class="detail-k">规则代码</span><span class="rule mono">{{ issue.rule_code }}</span></span>
+          <span class="detail-row"><span class="detail-k">引用对象</span><span class="ref mono">{{ issue.target_ref }}</span></span>
+        </div>
         <div class="issue-actions">
           <button class="ghost" :disabled="suggestState[issue.id]?.busy" @click="suggest(issue)">
             {{ suggestState[issue.id]?.busy ? "生成中…" : "生成修复建议" }}
@@ -311,7 +328,7 @@ function opSummary(ops: Record<string, unknown>[]): string {
 .op {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-ink);
   padding: 0.45rem 0.7rem;
   font: inherit;
@@ -327,7 +344,7 @@ function opSummary(ops: Record<string, unknown>[]): string {
 button.primary {
   background: linear-gradient(180deg, #f0d28a 0%, #b9924a 100%);
   border: 1px solid rgba(240, 210, 138, 0.65);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: #241a05;
   font-weight: 600;
   padding: 0.5rem 1rem;
@@ -347,7 +364,7 @@ button.primary:disabled {
 button.ghost {
   background: var(--ow-panel-2);
   border: 1px solid var(--ow-line);
-  border-radius: 0.5rem;
+  border-radius: var(--ow-control-radius);
   color: var(--ow-muted);
   font: inherit;
   font-size: 0.82rem;
@@ -371,7 +388,11 @@ button.ghost.sm {
 
 .chip {
   border: 1px solid var(--ow-line);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   background: rgba(16, 22, 48, 0.6);
   color: var(--ow-muted);
   font-size: 0.78rem;
@@ -451,7 +472,11 @@ button.ghost.sm {
 
 .pill {
   border: 1px solid var(--ow-line);
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   background: transparent;
   color: var(--ow-muted);
   font: inherit;
@@ -497,9 +522,65 @@ button.ghost.sm {
   flex-wrap: wrap;
 }
 
+.detail-toggle {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--ow-muted);
+  font: inherit;
+  font-size: 0.74rem;
+  padding: 0;
+  cursor: pointer;
+  margin-left: auto;
+  opacity: 0.7;
+}
+
+.detail-toggle:hover {
+  color: var(--ow-ink);
+  opacity: 1;
+}
+
+.detail-caret {
+  display: inline-block;
+  transition: transform 0.2s ease;
+  font-size: 0.7rem;
+}
+
+.detail-caret.open {
+  transform: rotate(180deg);
+}
+
+.detail-panel {
+  background: rgba(10, 14, 36, 0.35);
+  box-shadow: inset 0 1px 0 rgba(240, 210, 138, 0.07);
+  border-radius: 3px;
+  padding: 0.45rem 0.65rem;
+  margin-top: 0.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.detail-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-size: 0.78rem;
+}
+
+.detail-k {
+  font-size: 0.72rem;
+  color: var(--ow-muted);
+  min-width: 4rem;
+}
+
 .sev {
   font-size: 0.74rem;
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   padding: 0.08rem 0.55rem;
   border: 1px solid var(--ow-line);
 }
@@ -573,7 +654,11 @@ button.ghost.sm {
 
 .src {
   font-size: 0.72rem;
-  border-radius: 999px;
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
   padding: 0.06rem 0.5rem;
   border: 1px solid var(--ow-line);
   color: var(--ow-muted);
