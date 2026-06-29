@@ -67,6 +67,47 @@
 
 ---
 
-## 一句话结论
+## 一句话结论（2b 本体）
 
 PASS —— 6 条硬核查全部独立实跑通过、全门禁绿、未越界；唯一一条非阻塞 follow-up 是 MCP transport 真实注册路径未被测试覆盖、新 `project` 参对 FastMCP schema 生成有潜在（非当前路径）风险，建议按上方 F-1 加固。
+
+---
+
+# F-1 复审（ContextVar 重做 — 第二轮，只读）
+
+**背景**：监督 agent 把上方 F-1 从"非阻塞 follow-up"升级为「必须修」并复现真回归——含 `project: ProjectContext` 的 handler 签名让 FastMCP `func_metadata` 的 `model_json_schema()` 抛 SchemaError（pydantic 递归进 `ProjectContext.embedder`），`create_mcp_server()` 第一个 `server.tool()` 注册即崩。执行 agent 已修（2b 之上的工作树增量，HEAD=059ce92 即 2b 提交）。
+
+**改动**（`git diff --stat`，仍仅 4 文件）：tools.py（8 handler 去 `project` 参，新增 `_shared_project: ContextVar`，`_project`/`_issues_store` 读 `.get()`）、builtin.py（`default_skill_registry` 去 `project=`、`bind` 恢复历史 partial）、cli/main.py（两命令 `set`/`reset` ContextVar）、test_shared_project_ctx.py（改用 `_shared_ctx` 上下文管理器 set/reset var + 新增 `test_handler_signatures_are_mcp_schema_safe`）。
+
+## 逐条核查
+
+### 1. schema 回归真修好（red-before / green-after）— PASS
+- **绿-after**：现版 `test_handler_signatures_are_mcp_schema_safe` 通过；对 8 个 handler 签名构 `create_model(arbitrary_types_allowed=True)` + `model_json_schema()` 不抛，且断言 `"project" not in properties`。
+- **red-before 实证**：我临时把 `project: ProjectContext | None = None` 加回**真实** `audit_project` 签名（脚本改 + 跑），该测试**红**，且报的正是监督描述的 **`SchemaError: Field 'embedder': ... 'cls' must be valid as the first argument to 'isinstance'`**——pydantic 递归进 `ProjectContext.embedder`。随后从备份逐字节还原 tools.py（`git diff --stat` 仍 57+/48-，无残留），测试复绿。证明此测试是忠实的 red/green 锁，不是假绿。
+- 测试用 `arbitrary_types_allowed=True` + `model_json_schema()` 精确复刻 FastMCP `func_metadata` 在 `server.tool()` 注册时的步骤；handler 现签名只剩 str/int/bool/list/float，schema 安全。
+
+### 2. 2b 行为零损（改用 ContextVar 后）— PASS
+- 独立脚本（set/reset var，非 `project=`）实跑，逐条对应上轮四查：
+  - **复用只 open 一次**（PROBE2）：owner open 一次、5 工具调用 `ProjectContext.open` 计数=1，且块后 var 已 reset。
+  - **写后可见**（PROBE3）：audit 前 0、persist 3、紧接 list_issues 经同一 `shared.sqlite_store` 读到 3。
+  - **瘦路径 tripwire**（PROBE4）：var unset 下 patch open/graph/VectorRetriever 三绊线，`list_issues` 跑完 `heavy==[]`，返回正确行。
+  - **不注入逐字节不变**（PROBE1）：var unset 时 `audit_project` 自 open+close（open=1/close=1/open_errors=3），且 var 始终 None。
+- 仓内 `tests/test_shared_project_ctx.py` 7 个全过（含上述 6 个等价行为测试 + 新 schema 锁）。
+
+### 3. ContextVar 正确性 — PASS
+- **CLI set 后 try/finally 必 reset**：`_cmd_agent`（main.py:696-727）、`_cmd_multi_agent`（main.py:771-797）均 `token = set(project)` 后 `finally: tools_mod._shared_project.reset(token); project.close()`。`reset` 在 `finally` 内，异常路径也执行——PROBE5 实证：模拟 session 中途崩，var 仍被 reset 为 None，后续无关命令看到 unset var → 走自管 open，无泄漏到后续命令/测试。
+- **reset 与 close 顺序无害**：`reset(token)` 仅恢复 ContextVar 旧值（纯内存、无 I/O），`close()` 释放 sqlite 连接；两者无依赖，先 reset 后 close 安全。
+- **单线程顺序路径复用仍生效**：multi_agent 的 Diag/Repair/Verifier 在**同一线程**顺序经同一 registry 跑（session.py 无 Thread/asyncio，上轮已确认），ContextVar 在该线程内对每个工具调用可见 → 复用生效（PROBE2 覆盖同进程同线程序列）。
+- **新线程回退自管 open**：PROBE6 实证——主线程 set var 后起一个裸 `threading.Thread`，子线程 `_shared_project.get()` 见 `None`（ContextVar 默认不跨裸线程传播），其 `audit_project` 调用退回自管 open 仍返回 open_errors=3。代码注释（tools.py:38-44）对此声明准确，非缺陷。
+
+### 4. 无越界 / 无回归 — PASS
+- **scope**：`git diff --name-only` 仅 `cli/main.py`、`core/skills/builtin.py`、`mcp_server/tools.py` + 新测试；`git diff -- src/owcopilot/retrieval/ src/owcopilot/storage/ src/owcopilot/content/store.py` 为空——**#1/#2a 零触碰**。
+- `pytest tests/ -q`：**1469 passed, 2 skipped, 7 warnings**（243s）——与预期 1469 逐字相符（2b 的 1468 + 新 schema 锁 1）。
+- `ruff check`（4 touched 文件）：All checks passed。
+- `mypy`（tools.py / builtin.py / main.py）：Success, no issues。
+- `eval-acceptance`：top `passed=True`，8 check 全 true。
+- `eval-golden`：top `passed=True`，5 check 全 true。
+
+## 一句话结论（F-1）
+
+F-1 PASS —— schema 回归确被修死（red-before 实测复现监督的 embedder SchemaError、green-after 复绿）、改用 ContextVar 后 2b 四项行为零损、set/reset 异常路径必清且新线程正确回退、未越界、1469 passed + ruff/mypy/双 eval 全绿。

@@ -11,47 +11,32 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from . import CostTier, SideEffect, Skill, SkillParameter, SkillRegistry
 
-if TYPE_CHECKING:
-    from ...pipeline.project import ProjectContext
 
-
-def default_skill_registry(
-    *,
-    content_root: str,
-    sqlite_path: str | None = None,
-    project: ProjectContext | None = None,
-) -> SkillRegistry:
+def default_skill_registry(*, content_root: str, sqlite_path: str | None = None) -> SkillRegistry:
     """Build the agent's capability layer, bound to one project.
 
-    Two lifecycle modes, selected by ``project``:
+    The tool handlers each open the project themselves (one fresh, consistent view per call), so the
+    agent always observes the latest persisted state — e.g. issues written by ``audit_project`` are
+    visible to a later ``propose_fix``. ``content_root`` / ``sqlite_path`` are bound here, not
+    model-facing parameters, so the agent never has to manage them.
 
-    * ``project is None`` (default, unchanged): the bound tool handlers each open the project
-      themselves (one fresh, consistent view per call). The agent always observes the latest
-      persisted state because every call re-reads it. ``content_root`` / ``sqlite_path`` are bound
-      here, not model-facing parameters, so the agent never has to manage them.
-    * ``project`` is an already-open :class:`ProjectContext`: it is bound into every handler so the
-      whole session (every ReAct step, every multi-agent worker) reuses **one** context — one
-      parse / graph / vector build per task instead of one per tool call. Writes are immediately
-      visible to later tools because they share the one live ``SQLiteStore`` connection. The caller
-      that opened the shared context owns its lifecycle (open once at task start, close at the end);
-      this function never opens or closes it.
+    SCALE-P0 #2b: a session owner may set ``mcp_server.tools._shared_project`` to an already-open
+    :class:`ProjectContext` before running the agent; every handler then reuses that one context
+    (one parse/graph/vector build per task instead of one per tool call) and sees other tools'
+    writes via the one live ``SQLiteStore``. That reuse is wired through a ContextVar — NOT a bound
+    parameter — so this registry and the handler signatures stay clean for FastMCP schema-gen.
     """
     # Lazy import keeps `owcopilot.core.skills` cheap to import and avoids any import-time coupling
     # to the (heavier) pipeline/llm stack the tool handlers pull in.
     from ...mcp_server import tools
 
     def bind(tool: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
-        """Inject the session args so they are never part of the model-facing parameter set.
-
-        ``project`` is injected too when a shared context was supplied; the handlers treat a
-        non-None ``project`` as "reuse this, don't open/close" (see ``mcp_server.tools._project``),
-        so when ``project is None`` the partial is identical to the historical binding.
-        """
-        return partial(tool, content_root=content_root, sqlite_path=sqlite_path, project=project)
+        """Inject the session args so they are never part of the model-facing parameter set."""
+        return partial(tool, content_root=content_root, sqlite_path=sqlite_path)
 
     registry = SkillRegistry()
 

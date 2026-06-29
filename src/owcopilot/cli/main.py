@@ -671,6 +671,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     from ..agent import ReActAgent
     from ..agent.offline import OfflineReactProvider
     from ..core.skills import default_skill_registry
+    from ..mcp_server import tools as tools_mod
 
     if not args.goal.strip():
         raise ValueError(
@@ -687,16 +688,16 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     gateway, telemetry = _llm_gateway(
         args, task="agent_react", offline_provider=OfflineReactProvider(), real_json_mode=False
     )
-    # SCALE-P0 #2b: open ONE shared ProjectContext for the whole ReAct run and bind it into the
-    # registry. Every step's tool call reuses this context (one parse/graph/vector build per task
-    # instead of one per step) and sees writes from earlier steps via the one live SQLiteStore.
-    # ProjectContext.open already runs the (now incremental, 2a) replace_* sync, so the shared view
-    # is consistent with the latest persisted state at session start.
+    # SCALE-P0 #2b: open ONE shared ProjectContext for the whole ReAct run and publish it via the
+    # tools._shared_project ContextVar. Every step's tool call reuses this context (one
+    # parse/graph/vector build per task instead of one per step) and sees writes from earlier steps
+    # via the one live SQLiteStore. ProjectContext.open already runs the (now incremental, 2a)
+    # replace_* sync, so the shared view is consistent with the latest persisted state at start.
+    # The var is set out of band (not a tool parameter) so handler signatures stay clean for MCP.
     project = ProjectContext.open(content_root, sqlite_path=sqlite_path)
+    token = tools_mod._shared_project.set(project)
     try:
-        registry = default_skill_registry(
-            content_root=str(content_root), sqlite_path=sqlite_path, project=project
-        )
+        registry = default_skill_registry(content_root=str(content_root), sqlite_path=sqlite_path)
         # BE-9: wire --skills allowlist into ReActAgent so users can restrict tool access.
         # None means "all skills"; an empty list would restrict to none.
         allowed_skills: set[str] | None = set(args.skills) if args.skills is not None else None
@@ -724,6 +725,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             allowed_skills=allowed_skills,
         ).run(args.goal)
     finally:
+        tools_mod._shared_project.reset(token)
         project.close()
     telemetry_summary = telemetry.summary()
     cost_budget = summarize_workflow(
@@ -744,6 +746,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
 def _cmd_multi_agent(args: argparse.Namespace) -> int:
     from ..agent.offline import OfflineReactProvider
     from ..core.skills import default_skill_registry
+    from ..mcp_server import tools as tools_mod
     from ..multi_agent import MultiAgentSession
 
     if not args.goal.strip():
@@ -763,16 +766,17 @@ def _cmd_multi_agent(args: argparse.Namespace) -> int:
     gateway, telemetry = _llm_gateway(
         args, task="agent_react", offline_provider=OfflineReactProvider(), real_json_mode=False
     )
-    # SCALE-P0 #2b: open ONE shared ProjectContext for the whole multi-agent session. The
-    # Diag/Repair/Verifier workers all run tool calls through this one context — one
+    # SCALE-P0 #2b: open ONE shared ProjectContext for the whole multi-agent session and publish it
+    # via the tools._shared_project ContextVar. The Diag/Repair/Verifier workers run sequentially
+    # through one registry in this thread, so the var is visible to every tool call — one
     # parse/graph/vector build for the session, and every worker sees the issues another worker
     # (e.g. an audit) persisted via the one live SQLiteStore connection. ProjectContext.open runs
-    # the incremental (2a) replace_* sync, so the shared view starts consistent with disk.
+    # the incremental (2a) replace_* sync, so the shared view starts consistent with disk. The var
+    # is set out of band (not a tool parameter) so handler signatures stay clean for MCP schema-gen.
     project = ProjectContext.open(content_root, sqlite_path=sqlite_path)
+    token = tools_mod._shared_project.set(project)
     try:
-        registry = default_skill_registry(
-            content_root=str(content_root), sqlite_path=sqlite_path, project=project
-        )
+        registry = default_skill_registry(content_root=str(content_root), sqlite_path=sqlite_path)
         session = MultiAgentSession(gateway=gateway, registry=registry)
         try:
             report = session.run(args.goal)
@@ -790,6 +794,7 @@ def _cmd_multi_agent(args: argparse.Namespace) -> int:
         finally:
             session.close()
     finally:
+        tools_mod._shared_project.reset(token)
         project.close()
     telemetry_summary = telemetry.summary()
     cost_budget = summarize_workflow(
