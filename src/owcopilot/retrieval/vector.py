@@ -81,11 +81,16 @@ class VectorRetriever:
         rows_loader: Callable[[SQLiteStore], list[_Row]] = load_content_rows,
         vectors_table: str = "content_vectors",
         backend: VectorSearchBackend | None = None,
+        quantized: bool = False,
     ) -> None:
         self.store = store
         self.embedder = embedder or HashingEmbedder()
         self._rows_loader = rows_loader
         self._vectors_table = vectors_table
+        # Default fp32 (lossless, the safe default). ``quantized=True`` opts into the int8 two-stage
+        # backend (G2-A): ~4× smaller / ~3× faster scan with an fp32 rerank that keeps recall
+        # ~0.999. Ignored when an explicit ``backend`` is injected.
+        self._quantized = quantized
         self._rows: list[_Row] = []
         # The search index. Built lazily once the embedding dim is known (a sqlite-vec ``vec0``
         # table is declared ``FLOAT[dim]``, and a lazy ``SemanticEmbedder`` only reveals its dim
@@ -263,7 +268,7 @@ class VectorRetriever:
         ones upserted and the vanished ones deleted."""
         if self._backend is None:
             built: VectorSearchBackend | None = self.store.make_vector_backend(
-                model_id, dim=dim, table=self._vectors_table
+                model_id, dim=dim, table=self._vectors_table, quantized=self._quantized
             )
             self._backend = built if built is not None else NumpyMatrixBackend()
 

@@ -24,7 +24,11 @@ from ..graph.index import ContentGraph
 from ..llm.telemetry import CallRecord
 
 if TYPE_CHECKING:
-    from ..retrieval.vector_backend import SqliteVecBackend
+    from ..retrieval.vector_backend import (
+        SqliteVecBackend,
+        SqliteVecInt8Backend,
+        VectorSearchBackend,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -790,24 +794,43 @@ class SQLiteStore:
         self.conn.commit()
 
     def make_vector_backend(
-        self, model_id: str, *, dim: int, table: str = "content_vectors"
-    ) -> SqliteVecBackend | None:
+        self,
+        model_id: str,
+        *,
+        dim: int,
+        table: str = "content_vectors",
+        quantized: bool = False,
+    ) -> VectorSearchBackend | None:
         """Build the disk-resident vec0 backend for ``table``, or ``None`` to fall back to numpy.
+
+        With ``quantized=False`` (default) this builds the fp32 ``SqliteVecBackend`` (lossless,
+        bit-identical to numpy). With ``quantized=True`` it builds the int8 two-stage
+        ``SqliteVecInt8Backend`` (G2-A): a ~4× smaller int8 coarse index plus an fp32 rerank
+        sidecar, recall ~0.999. The two use distinct vec0 table names so both can coexist in one DB.
 
         Returns ``None`` (with a guided log line, never a crash) when sqlite-vec is unavailable or
         its extension cannot load on this connection -- the retriever then uses the numpy backend so
         environments without the extension stay functional.
 
-        The vec0 table is created on this store's own connection (one file, FTS5 + vectors together)
+        The vec0 index is created on this store's own connection (one file, FTS5 + vectors together)
         and, on first use, **backfilled once** from the existing ``content_vectors`` blob cache so a
         project that already has persisted fp32 vectors does not need to re-embed to populate the
-        index."""
-        from ..retrieval.vector_backend import SqliteVecBackend, SqliteVecError
+        index (the int8 backend quantises each backfilled fp32 vector on upsert)."""
+        from ..retrieval.vector_backend import (
+            SqliteVecBackend,
+            SqliteVecError,
+            SqliteVecInt8Backend,
+        )
 
         _vectors_table(table)  # validate the blob table name
-        vec0 = _vec0_table(table)
+        backend: VectorSearchBackend
         try:
-            backend = SqliteVecBackend(self.conn, dim=int(dim), table=vec0)
+            if quantized:
+                backend = SqliteVecInt8Backend(
+                    self.conn, dim=int(dim), table=_vec0_int8_table(table)
+                )
+            else:
+                backend = SqliteVecBackend(self.conn, dim=int(dim), table=_vec0_table(table))
             # Backfill is inside the guard: probing/inserting against a vec0 table that was
             # persisted at a different dimensionality raises sqlite3.OperationalError, which must
             # degrade to the numpy backend with a guided log line -- never a bare crash.
@@ -822,7 +845,12 @@ class SQLiteStore:
         return backend
 
     def _backfill_vec0(
-        self, model_id: str, backend: SqliteVecBackend, *, dim: int, table: str
+        self,
+        model_id: str,
+        backend: SqliteVecBackend | SqliteVecInt8Backend,
+        *,
+        dim: int,
+        table: str,
     ) -> None:
         """One-time populate of an empty vec0 table from the fp32 blob cache for ``model_id``.
 
@@ -1510,6 +1538,11 @@ _VECTOR_TABLES = {"content_vectors", "reference_vectors"}
 # fp32 source (and the cross-backend fallback); the vec0 table is the disk-resident search index.
 _VEC0_TABLES = {"content_vectors": "content_vec", "reference_vectors": "reference_vec"}
 
+# The int8 (G2-A) vec0 index table per blob cache table. Distinct from the fp32 ``_VEC0_TABLES`` so
+# a project can hold both the fp32 and the int8 search index side by side without name collision;
+# the int8 backend additionally creates its own ``{name}_fp32`` rerank sidecar.
+_VEC0_INT8_TABLES = {"content_vectors": "content_vec_i8", "reference_vectors": "reference_vec_i8"}
+
 
 def _vectors_table(table: str) -> str:
     """Whitelist the vectors table name before it is interpolated into SQL."""
@@ -1523,6 +1556,13 @@ def _vec0_table(table: str) -> str:
     if table not in _VEC0_TABLES:
         raise ValueError(f"unknown vectors table: {table!r}")
     return _VEC0_TABLES[table]
+
+
+def _vec0_int8_table(table: str) -> str:
+    """The validated int8 vec0 virtual-table name for a given blob cache ``table``."""
+    if table not in _VEC0_INT8_TABLES:
+        raise ValueError(f"unknown vectors table: {table!r}")
+    return _VEC0_INT8_TABLES[table]
 
 
 def _reference_hit_from_row(row: sqlite3.Row, *, score: float) -> dict[str, Any]:

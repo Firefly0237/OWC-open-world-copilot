@@ -16,6 +16,16 @@ backends ship here:
 upsert, scores are the exact ``stored · query`` dot product, and ties break by ascending ``ref``
 (matching the numpy backend's stable argsort over ref-ordered rows). int8 quantisation and a real
 ANN backend are a *separate* layer (group 2) added here later without touching these classes.
+
+**Group 2 G2-A is int8 + two-stage rerank (still effectively lossless).**
+``SqliteVecInt8Backend`` stores symmetric int8-quantised vectors in an ``INT8[dim]`` vec0 column
+(~4× smaller, ~3× faster scan than fp32) **and** keeps the exact fp32 vectors in a sidecar table.
+``search`` runs a two stage: ① an int8 coarse KNN pulls ``k' = max(3*limit, 30)`` candidates, then
+② those candidates' fp32 vectors are dot-producted against the fp32 query and re-ranked, returning
+the true top-``limit``. int8-only recall@10 is ~0.84; the fp32 rerank over a 3× candidate pool lifts
+it back to ~0.999 (verified on iid and clustered synthetic corpora, see ``P0_G2_RESEARCH.md`` §2).
+``vector_for`` returns the exact fp32 vector (from the sidecar), so hybrid reranking upstream stays
+fp32-exact. The backend is opt-in; the fp32 ``SqliteVecBackend`` remains the safe default.
 """
 
 from __future__ import annotations
@@ -38,6 +48,20 @@ def _normalise(vector: np.ndarray) -> np.ndarray:
     if norm <= 0:
         return vector
     return vector / norm
+
+
+def quantise_int8(vector: np.ndarray) -> np.ndarray:
+    """Symmetric per-vector int8 quantisation of a **unit-normalised** vector.
+
+    ``round(x * 127)`` clamped to ``[-127, 127]`` (127, not 128, so the codebook is symmetric and
+    ``-x`` maps to ``-q``). sqlite-vec 0.1.9 ships no ``vec_quantize_i8`` SQL function, so the
+    quantisation happens here in Python and the result is stored in an ``INT8[dim]`` vec0 column.
+
+    Deterministic and pure: the same fp32 input always yields the same bytes. A zero vector
+    quantises to all-zeros. Inputs are normalised first so the ``*127`` scale lands inside int8
+    range for any direction (a unit component is in ``[-1, 1]``)."""
+    unit = _normalise(np.asarray(vector, dtype=np.float32))
+    return np.clip(np.round(unit * 127.0), -127, 127).astype(np.int8)
 
 
 @runtime_checkable
@@ -271,4 +295,138 @@ class SqliteVecBackend:
 
     def clear(self) -> None:
         self._conn.execute(f"DELETE FROM {self._table}")  # noqa: S608 - validated table name
+        self._conn.commit()
+
+
+# Coarse-recall floor for the int8 two-stage search: even at a tiny ``limit`` the int8 stage pulls
+# at least this many candidates so the fp32 rerank has a real pool to recover precision from.
+# 3*limit (the multiplier proven in P0_G2_RESEARCH §2) takes over once it exceeds this floor.
+_INT8_COARSE_FLOOR = 30
+_INT8_COARSE_MULTIPLIER = 3
+
+
+class SqliteVecInt8Backend:
+    """Disk-resident **int8** vec0 backend with a two-stage (int8 coarse → fp32 rerank) search.
+
+    Storage is two tables on the runtime connection:
+
+    * ``{table}`` — a vec0 virtual table declared ``INT8[dim]`` holding the symmetric int8
+      quantisation of each unit vector (~4× smaller than fp32). This is the *coarse* index.
+    * ``{table}_fp32`` — a plain table of the exact fp32 unit vectors keyed by ``ref``. This is the
+      authoritative *rerank* source and what ``vector_for`` returns, so int8's lossiness never leaks
+      into scores handed back to the retriever / hybrid reranker.
+
+    ``search`` is two-stage: the int8 KNN returns ``k' = max(3*limit, 30)`` candidates by quantised
+    distance (recall@10 ~0.84 alone), then the fp32 vectors of exactly those candidates are scored
+    by the exact ``stored · query`` dot product and re-ranked, yielding the true top-``limit``
+    (recall@10 ~0.999). Ordering matches the fp32 backend: score desc, ref asc on ties.
+
+    Quantised int8 KNN needs the query wrapped in the ``vec_int8(?)`` constructor (sqlite-vec
+    rejects a raw float32 blob against an ``INT8`` column); the rerank uses the fp32 query."""
+
+    def __init__(self, conn: sqlite3.Connection, *, dim: int, table: str) -> None:
+        if not isinstance(conn, sqlite3.Connection):  # defensive: keep the type contract explicit
+            raise SqliteVecError("SqliteVecInt8Backend requires a sqlite3.Connection")
+        self._conn: sqlite3.Connection = conn
+        self._dim = int(dim)
+        self._table = table
+        self._fp32_table = f"{table}_fp32"
+        SqliteVecBackend._load_extension(conn)
+        self._ensure_tables()
+
+    def _ensure_tables(self) -> None:
+        # int8 coarse index. INT8[dim] = one signed byte per component.
+        self._conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {self._table} "  # noqa: S608 - validated name
+            f"USING vec0(ref TEXT PRIMARY KEY, embedding INT8[{self._dim}])"
+        )
+        # fp32 rerank source: the exact unit vectors, one row per ref.
+        self._conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {self._fp32_table} ("  # noqa: S608 - validated name
+            f"ref TEXT PRIMARY KEY, embedding BLOB NOT NULL)"
+        )
+        self._conn.commit()
+
+    def _count(self) -> int:
+        row = self._conn.execute(
+            f"SELECT COUNT(*) FROM {self._table}"  # noqa: S608 - validated table name
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def upsert(self, ref: str, vector: np.ndarray) -> None:
+        vec = _normalise(np.asarray(vector, dtype=np.float32))
+        qblob = np.ascontiguousarray(quantise_int8(vec), dtype=np.int8).tobytes()
+        fblob = np.ascontiguousarray(vec, dtype=np.float32).tobytes()
+        # DELETE + INSERT = idempotent replace (vec0 has no UPSERT on the rowid table); the fp32
+        # sidecar mirrors the same ref so the two tables never drift.
+        self._conn.execute(
+            f"DELETE FROM {self._table} WHERE ref = ?", (ref,)  # noqa: S608
+        )
+        self._conn.execute(
+            f"INSERT INTO {self._table}(ref, embedding) VALUES (?, vec_int8(?))",  # noqa: S608
+            (ref, qblob),
+        )
+        self._conn.execute(
+            f"INSERT INTO {self._fp32_table}(ref, embedding) VALUES (?, ?) "  # noqa: S608
+            f"ON CONFLICT(ref) DO UPDATE SET embedding = excluded.embedding",
+            (ref, fblob),
+        )
+        self._conn.commit()
+
+    def delete(self, ref: str) -> None:
+        self._conn.execute(
+            f"DELETE FROM {self._table} WHERE ref = ?", (ref,)  # noqa: S608
+        )
+        self._conn.execute(
+            f"DELETE FROM {self._fp32_table} WHERE ref = ?", (ref,)  # noqa: S608
+        )
+        self._conn.commit()
+
+    def search(self, query: np.ndarray, *, limit: int) -> list[tuple[str, float]]:
+        if limit <= 0:
+            return []
+        q = _normalise(np.asarray(query, dtype=np.float32))
+        if q.shape[0] != self._dim:
+            return []
+        count = self._count()
+        if count == 0:
+            return []
+        # Stage ①: int8 coarse KNN over k' = max(3*limit, floor) candidates (capped at corpus size).
+        k = min(count, max(_INT8_COARSE_MULTIPLIER * limit, _INT8_COARSE_FLOOR))
+        qint8 = np.ascontiguousarray(quantise_int8(q), dtype=np.int8).tobytes()
+        candidates = self._conn.execute(
+            f"SELECT ref FROM {self._table} "  # noqa: S608 - validated table name
+            f"WHERE embedding MATCH vec_int8(?) AND k = ? ORDER BY distance",
+            (qint8, k),
+        ).fetchall()
+        if not candidates:
+            return []
+        # Stage ②: pull the exact fp32 vectors of just those candidates and re-rank by the exact dot
+        # product. This is what recovers int8's lost recall to ~1.0 — the heavy fp32 work touches
+        # only k' rows, not the whole corpus.
+        refs = [str(row[0]) for row in candidates]
+        placeholders = ",".join("?" for _ in refs)
+        fp32_rows = self._conn.execute(
+            f"SELECT ref, embedding FROM {self._fp32_table} "  # noqa: S608 - validated name
+            f"WHERE ref IN ({placeholders})",
+            refs,
+        ).fetchall()
+        scored: list[tuple[str, float]] = []
+        for row in fp32_rows:
+            stored = np.frombuffer(bytes(row[1]), dtype=np.float32)
+            scored.append((str(row[0]), float(stored @ q)))
+        return _rank(scored, limit=limit)
+
+    def vector_for(self, ref: str) -> np.ndarray | None:
+        row = self._conn.execute(
+            f"SELECT embedding FROM {self._fp32_table} WHERE ref = ?",  # noqa: S608
+            (ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        return np.frombuffer(bytes(row[0]), dtype=np.float32)
+
+    def clear(self) -> None:
+        self._conn.execute(f"DELETE FROM {self._table}")  # noqa: S608 - validated table name
+        self._conn.execute(f"DELETE FROM {self._fp32_table}")  # noqa: S608 - validated name
         self._conn.commit()

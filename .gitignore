@@ -25,3 +25,8 @@ dist/
 # personal project notes/docs stay local only
 /CHANGELOG.md
 /project_docs/
+
+# P0 scaling probes: disposable isolated venv + vendored wheels (not for the repo)
+scratchpad/testvenv/
+scratchpad/wheels/
+scratchpad/wheels2/

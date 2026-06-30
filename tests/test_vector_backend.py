@@ -21,6 +21,8 @@ from owcopilot.retrieval.vector import VectorRetriever
 from owcopilot.retrieval.vector_backend import (
     NumpyMatrixBackend,
     SqliteVecBackend,
+    SqliteVecInt8Backend,
+    quantise_int8,
     sqlite_vec_available,
 )
 from owcopilot.storage import SQLiteStore
@@ -279,3 +281,273 @@ def test_module_exposes_normalise_shared_helper() -> None:
     assert vector_module._normalise is not None
     v = vector_module._normalise(_vec([3, 4]))
     assert float(np.linalg.norm(v)) == pytest.approx(1.0, abs=1e-6)
+
+
+# ===========================================================================================
+# G2-A: int8 two-stage (int8 coarse recall -> fp32 rerank) backend.
+# ===========================================================================================
+
+
+def _new_int8_backend(dim: int) -> SqliteVecInt8Backend:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    return SqliteVecInt8Backend(conn, dim=dim, table="content_vec_i8")
+
+
+# --------------------------------------------------------------------------- quantisation function
+
+
+def test_quantise_int8_is_deterministic_and_symmetric() -> None:
+    v = _vec([0.3, -0.7, 0.1, 0.5, -0.2, 0.0, 0.9, -0.4])
+    a = quantise_int8(v)
+    b = quantise_int8(v)
+    # pure + deterministic: identical bytes every call.
+    assert a.dtype == np.int8
+    np.testing.assert_array_equal(a, b)
+    # symmetric codebook: q(-x) == -q(x) (no -128 outlier).
+    np.testing.assert_array_equal(quantise_int8(-v), -a)
+    assert int(a.min()) >= -127 and int(a.max()) <= 127
+
+
+def test_quantise_int8_handles_zero_and_extreme_vectors() -> None:
+    dim = 16
+    # zero vector -> all zeros (normalise is a no-op, round(0)=0).
+    zeros = np.zeros(dim, dtype=np.float32)
+    np.testing.assert_array_equal(quantise_int8(zeros), np.zeros(dim, np.int8))
+    # a one-hot axis vector is already unit length: its live component saturates to 127.
+    onehot = np.zeros(dim, dtype=np.float32)
+    onehot[3] = 1.0
+    q = quantise_int8(onehot)
+    assert int(q[3]) == 127
+    assert int(np.abs(q).max()) <= 127
+    # huge magnitudes are normalised first, so they never overflow int8.
+    big = quantise_int8(_vec([1e9, -1e9, 5e8, 0.0]))
+    assert int(np.abs(big).max()) <= 127
+
+
+# --------------------------------------------------------------------------- int8 primitives
+
+
+@requires_sqlite_vec
+def test_int8_backend_upsert_search_vector_for_and_delete() -> None:
+    backend = _new_int8_backend(dim=4)
+    backend.upsert("a", _vec([1, 0, 0, 0]))
+    backend.upsert("b", _vec([0, 1, 0, 0]))
+    backend.upsert("c", _vec([0.9, 0.1, 0, 0]))
+
+    hits = backend.search(_vec([1, 0, 0, 0]), limit=3)
+    assert [ref for ref, _ in hits] == ["a", "c", "b"]
+    assert hits[0][1] >= hits[1][1] >= hits[2][1]
+
+    # vector_for returns the EXACT fp32 unit vector (not the lossy int8), unit-normalised.
+    stored = backend.vector_for("a")
+    assert stored is not None
+    assert stored.dtype == np.float32
+    np.testing.assert_allclose(stored, _vec([1, 0, 0, 0]), atol=1e-6)
+    assert backend.vector_for("missing") is None
+
+    # replace (not duplicate) then delete.
+    backend.upsert("a", _vec([0, 0, 0, 1]))
+    assert [r for r, _ in backend.search(_vec([0, 0, 0, 1]), limit=5)][0] == "a"
+    backend.delete("a")
+    assert backend.vector_for("a") is None
+    backend.delete("a")  # idempotent
+
+
+@requires_sqlite_vec
+def test_int8_backend_clear_and_dim_mismatch() -> None:
+    backend = _new_int8_backend(dim=4)
+    backend.upsert("a", _vec([1, 0, 0, 0]))
+    assert backend.search(_vec([1, 0, 0]), limit=5) == []  # wrong dim -> empty
+    backend.clear()
+    assert backend.search(_vec([1, 0, 0, 0]), limit=5) == []
+    assert backend.vector_for("a") is None
+
+
+# --------------------------------------------------------------------------- recall: two-stage wins
+
+
+def _clustered_corpus(
+    dim: int, n: int, clusters: int, seed: int
+) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    rng = np.random.default_rng(seed)
+    centers = rng.standard_normal((clusters, dim)).astype(np.float32)
+    vectors = {
+        f"r{i}": (centers[i % clusters] + 0.30 * rng.standard_normal(dim)).astype(np.float32)
+        for i in range(n)
+    }
+    return vectors, centers
+
+
+def _fp32_truth(vectors: dict[str, np.ndarray], q: np.ndarray, limit: int) -> set[str]:
+    qn = q / (np.linalg.norm(q) or 1.0)
+    scored = sorted(
+        (
+            (ref, float((v / (np.linalg.norm(v) or 1.0)) @ qn))
+            for ref, v in vectors.items()
+        ),
+        key=lambda x: (-x[1], x[0]),
+    )
+    return {ref for ref, _ in scored[:limit]}
+
+
+@requires_sqlite_vec
+def test_int8_two_stage_recall_is_near_lossless_and_beats_int8_only() -> None:
+    """The core G2-A claim: the int8 coarse -> fp32 rerank two-stage recovers int8's lost recall to
+    ~1.0, and the fp32 rerank is load-bearing (two-stage strictly beats int8-only single-stage)."""
+    dim, n, clusters, seed = 64, 1500, 24, 7
+    vectors, centers = _clustered_corpus(dim, n, clusters, seed)
+    backend = _new_int8_backend(dim=dim)
+    for ref, v in vectors.items():
+        backend.upsert(ref, v)
+
+    rng = np.random.default_rng(seed + 1)
+    limit, n_queries = 10, 120
+    two_stage_hits = 0
+    int8_only_hits = 0
+    total = 0
+    for i in range(n_queries):
+        q = (centers[i % clusters] + 0.30 * rng.standard_normal(dim)).astype(np.float32)
+        truth = _fp32_truth(vectors, q, limit)
+
+        # two-stage (the real backend.search)
+        two = {ref for ref, _ in backend.search(q, limit=limit)}
+        two_stage_hits += len(truth & two)
+
+        # int8-only baseline: pull exactly `limit` candidates from the int8 index, no rerank.
+        qn = q / (np.linalg.norm(q) or 1.0)
+        qint8 = np.ascontiguousarray(quantise_int8(qn), dtype=np.int8).tobytes()
+        rows = backend._conn.execute(  # noqa: SLF001 - exercising the single-stage baseline
+            "SELECT ref FROM content_vec_i8 WHERE embedding MATCH vec_int8(?) AND k = ? "
+            "ORDER BY distance",
+            (qint8, limit),
+        ).fetchall()
+        int8_only_hits += len(truth & {str(r[0]) for r in rows})
+        total += limit
+
+    two_stage_recall = two_stage_hits / total
+    int8_only_recall = int8_only_hits / total
+    assert two_stage_recall >= 0.99, f"two-stage recall {two_stage_recall:.4f} < 0.99"
+    # the rerank must actually buy recall: two-stage strictly above int8-only.
+    assert two_stage_recall > int8_only_recall, (
+        f"two-stage {two_stage_recall:.4f} not above int8-only {int8_only_recall:.4f}"
+    )
+
+
+@requires_sqlite_vec
+def test_int8_index_is_smaller_than_fp32() -> None:
+    """The int8 coarse column is ~4× smaller than the fp32 vectors (the storage win)."""
+    dim = 128
+    backend = _new_int8_backend(dim=dim)
+    rng = np.random.default_rng(3)
+    for i in range(200):
+        backend.upsert(f"r{i}", rng.standard_normal(dim).astype(np.float32))
+
+    int8_bytes = backend._conn.execute(  # noqa: SLF001 - inspecting on-disk byte sizes
+        "SELECT SUM(length(embedding)) FROM content_vec_i8"
+    ).fetchone()[0]
+    fp32_bytes = backend._conn.execute(  # noqa: SLF001
+        "SELECT SUM(length(embedding)) FROM content_vec_i8_fp32"
+    ).fetchone()[0]
+    # one byte/component int8 vs four bytes/component fp32 == exactly 4×.
+    assert fp32_bytes == pytest.approx(int8_bytes * 4, rel=0.01)
+
+
+# --------------------------------------------------------------------------- vs fp32: same top hit
+
+
+@requires_sqlite_vec
+@pytest.mark.parametrize("query_text", ["northern trade road", "ferry", "southern coast queen"])
+def test_int8_two_stage_matches_fp32_top_hits(query_text: str) -> None:
+    """On the eval-style small corpus the int8 two-stage returns the same top hits as fp32 — the
+    property the acceptance recall gate (hit_rate 1.0) depends on."""
+    vectors, embedder = _embedded()
+    fp32_backend = _new_vec_backend(dim=64)
+    int8_backend = _new_int8_backend(dim=64)
+    _populate(fp32_backend, vectors)
+    _populate(int8_backend, vectors)
+
+    q = _embedded()[1].embed(query_text)
+    q = np.asarray(q, dtype=np.float32)
+    q = q / (np.linalg.norm(q) or 1.0)
+
+    fp32_hits = [r for r, _ in fp32_backend.search(q, limit=5)]
+    int8_hits = [r for r, _ in int8_backend.search(q, limit=5)]
+    assert fp32_hits == int8_hits
+
+
+# --------------------------------------------------------------------------- retriever integration
+
+
+@requires_sqlite_vec
+def test_retriever_quantized_backend_search_matches_fp32() -> None:
+    """A VectorRetriever built with quantized=True uses the int8 two-stage backend and returns the
+    same hits as the fp32 default on the canon bundle (the int8 mode is no-loss in effect)."""
+    fp32_hits, _ = _retriever_results(use_numpy=False, query="caravan routes")
+
+    store = SQLiteStore()
+    try:
+        store.replace_content_index(_bundle())
+        retriever = VectorRetriever(store, quantized=True)
+        assert isinstance(retriever._backend, SqliteVecInt8Backend)
+        int8_hits = [(h.ref, h.score) for h in retriever.search("caravan routes", limit=10)]
+    finally:
+        store.close()
+
+    assert [r for r, _ in fp32_hits] == [r for r, _ in int8_hits]
+
+
+@requires_sqlite_vec
+def test_make_vector_backend_quantized_returns_int8_backend() -> None:
+    store = SQLiteStore()
+    try:
+        store.replace_content_index(_bundle())
+        backend = store.make_vector_backend("hashing-1024", dim=1024, quantized=True)
+        assert isinstance(backend, SqliteVecInt8Backend)
+        fp32 = store.make_vector_backend("hashing-1024", dim=1024, quantized=False)
+        assert isinstance(fp32, SqliteVecBackend)
+    finally:
+        store.close()
+
+
+@requires_sqlite_vec
+def test_int8_two_stage_holds_acceptance_retrieval_gate() -> None:
+    """The int8 two-stage path holds the acceptance retrieval hit_rate at 1.0 on the eval world,
+    matching the fp32 default. This is what makes int8 a safe opt-in: swapping it into the context
+    builder does not regress the recall gate the whole acceptance benchmark depends on."""
+    import tempfile
+    from pathlib import Path
+
+    from owcopilot.content.store import ContentStore
+    from owcopilot.evaluation.acceptance import (
+        RETRIEVAL_TIGHT_BUDGET,
+        _retrieval_hit_rate,
+        build_acceptance_world,
+        retrieval_benchmark_queries,
+    )
+    from owcopilot.pipeline.project import ProjectContext
+    from owcopilot.retrieval.context_pack import ContextPackBuilder
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d) / "world"
+        ContentStore(root).save(build_acceptance_world())
+        project = ProjectContext.open(root)
+        try:
+            queries = retrieval_benchmark_queries()
+            base = project.context_builder
+            int8_vec = VectorRetriever(
+                project.sqlite_store, embedder=project.embedder, quantized=True
+            )
+            assert isinstance(int8_vec._backend, SqliteVecInt8Backend)
+            project.context_builder = ContextPackBuilder(
+                bm25=base.bm25, vector=int8_vec, graph=base.graph
+            )
+            hit_rate, _ = _retrieval_hit_rate(project, queries, budget_tokens=700)
+            tight_rate, _ = _retrieval_hit_rate(
+                project, queries, budget_tokens=RETRIEVAL_TIGHT_BUDGET
+            )
+        finally:
+            project.close()
+
+    assert hit_rate == 1.0
+    assert tight_rate == 1.0

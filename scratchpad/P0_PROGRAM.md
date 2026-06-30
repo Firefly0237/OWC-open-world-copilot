@@ -37,3 +37,9 @@
 ## 待办跟踪（显式，不静默）
 - **F-1（非阻塞，中，2b 复查发现）**：8 个 mcp_server/tools.py handler 新增的 `project: ProjectContext` 参，可能干扰真 FastMCP transport（transport.py:42-49）的 `model_json_schema()`。范围=仅「已装 [mcp] 可选 extra 并跑真 MCP transport」的面；agent/skill 路径不受影响（LLM 工具 schema 来自显式 SkillParameter 而非 handler 签名）。本机未装 [mcp] 无法实测。候选修法：注入改 contextvar（脱离签名，但有线程上下文传播 subtlety）/ transport 注册时排除 project 参 / transport 测试桩改真构 schema。决策：待 G1 验收+监督定夺；若修，倾向 transport 边界过滤（装 [mcp] 后可测再做）。
 - 组 2 待接：int8 量化 + usearch ANN（性能）；#0 分片 spike。
+
+## 工作组 2 范围（用户 2026-06-30 拍板：三个都做，复杂则拆分，确保真实实现）
+依调研实测（P0_G2_RESEARCH.md）：int8 两阶段 recall~1.0 已验、usearch ANN 调参后 0.90→两阶段~0.99 已验、sharding 用 vec0 PARTITION KEY 已验。三子单元接力，各 执行→复查，阶段验收+监督：
+- **G2-A：int8 两阶段精排**（retrieval/vector_backend.py SqliteVecBackend + blob 表精排源）。int8 vec0 列 + Python 端量化 + int8 粗召回 k'=3k→fp32 精排 top-k。recall 门须仍绿。可选/可切，默认安全。
+- **G2-B：usearch ANN backend**（新 UsearchBackend 实现 VectorSearchBackend；固定 conn=32/exp_add=200/exp_search≥512；on-disk view mmap；两阶段精排；ref↔uint64 key 映射持久化；blob 表为真值→usearch 可重建解一致性；按 N 阈值从 sqlite-vec 暴力切 ANN）。usearch 离线 wheel scratchpad/wheels2/。
+- **G2-C：#0 world_id/version 完整分片**（content/models.py + SQLite 表加分区维度；vec0 PARTITION KEY；检索默认 scope 当前版本+继承基线；审计/impact 可只跑 active scope）。架构级最大，可能自带 research/design 小循环；冷热分层（历史版本按需挂载）。
