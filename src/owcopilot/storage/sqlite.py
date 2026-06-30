@@ -800,6 +800,7 @@ class SQLiteStore:
         dim: int,
         table: str = "content_vectors",
         quantized: bool = False,
+        ann: bool = False,
     ) -> VectorSearchBackend | None:
         """Build the disk-resident vec0 backend for ``table``, or ``None`` to fall back to numpy.
 
@@ -807,6 +808,15 @@ class SQLiteStore:
         bit-identical to numpy). With ``quantized=True`` it builds the int8 two-stage
         ``SqliteVecInt8Backend`` (G2-A): a ~4× smaller int8 coarse index plus an fp32 rerank
         sidecar, recall ~0.999. The two use distinct vec0 table names so both can coexist in one DB.
+
+        **Tier selection (G2-B).** With ``ann=True`` *and* a corpus already at or above
+        ``USEARCH_MIN_N`` persisted vectors, this builds the on-disk usearch HNSW
+        ``UsearchBackend`` instead — a sub-linear ANN index for the large-N case, two-stage
+        fp32-reranked to ~0.99 recall. The threshold is the safety valve: a small / eval corpus
+        (well under the threshold) always stays on the exact sqlite-vec scan, so the acceptance
+        recall gate (hit_rate 1.0) never sees ANN approximation. ``ann`` defaults to ``False``, so
+        every existing caller keeps the exact backend; the ANN tier is strictly opt-in. If usearch
+        is unavailable the build falls through to the sqlite-vec backend with a guided log line.
 
         Returns ``None`` (with a guided log line, never a crash) when sqlite-vec is unavailable or
         its extension cannot load on this connection -- the retriever then uses the numpy backend so
@@ -823,6 +833,18 @@ class SQLiteStore:
         )
 
         _vectors_table(table)  # validate the blob table name
+
+        # G2-B tier selection: only an explicit opt-in AND a large-enough corpus switch to the ANN
+        # backend. The N check is what keeps small / eval corpora on the exact scan; it reads the
+        # persisted blob-cache count (cheap COUNT, no vectors loaded).
+        if ann and self._corpus_size(model_id, table=table) >= USEARCH_MIN_N:
+            usearch_backend = self._make_usearch_backend(
+                model_id, dim=int(dim), table=table
+            )
+            if usearch_backend is not None:
+                return usearch_backend
+            # usearch unavailable / failed -> fall through to the exact sqlite-vec backend below.
+
         backend: VectorSearchBackend
         try:
             if quantized:
@@ -843,6 +865,82 @@ class SQLiteStore:
             )
             return None
         return backend
+
+    def _corpus_size(self, model_id: str, *, table: str) -> int:
+        """Count of persisted vectors for ``model_id`` in the blob cache ``table`` (the tier knob).
+
+        This is the N the tier selector thresholds on. It reads the authoritative blob cache (which
+        is always populated before a search backend is built), so it is correct even on the very
+        first open before any vec0/usearch index exists."""
+        table = _vectors_table(table)
+        row = self.conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE model_id = ?",  # noqa: S608 - validated name
+            (model_id,),
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def _make_usearch_backend(
+        self, model_id: str, *, dim: int, table: str
+    ) -> VectorSearchBackend | None:
+        """Build the on-disk ``UsearchBackend``, backfilled from the blob cache, or ``None``.
+
+        Returns ``None`` (guided log, no crash) when usearch is unavailable or the index cannot be
+        built — the caller then falls back to the exact sqlite-vec backend. The ``.usearch`` file
+        lives next to the runtime DB (or a temp file for an in-memory DB); the fp32 authority +
+        keymap tables live in this connection, so a fresh index is backfilled once from the blob
+        cache exactly like the vec0 backends."""
+        from ..retrieval.vector_backend import UsearchBackend, UsearchError
+
+        try:
+            backend = UsearchBackend(
+                self.conn,
+                dim=int(dim),
+                table=table,
+                index_path=self._usearch_index_path(table),
+            )
+            self._backfill_usearch(model_id, backend, dim=int(dim), table=table)
+        except (UsearchError, sqlite3.OperationalError) as exc:
+            logger.info(
+                "usearch unavailable for %s (%s); falling back to the sqlite-vec backend.",
+                table,
+                exc,
+            )
+            return None
+        return backend
+
+    def _usearch_index_path(self, table: str) -> str:
+        """Path of the ``.usearch`` file for ``table``.
+
+        Persistent runtime DBs get a sibling ``{db}.{table}.usearch`` so the ANN index survives
+        re-opens alongside the DB. An in-memory DB has no on-disk home, so the index goes to a
+        deterministic temp path keyed by the DB id — it is rebuildable from the (in-memory) fp32
+        table anyway, so a transient temp file is fine."""
+        table = _vectors_table(table)
+        if self.path and self.path != ":memory:" and "mode=memory" not in self.path:
+            return f"{self.path}.{table}.usearch"
+        import tempfile
+
+        return str(Path(tempfile.gettempdir()) / f"owcopilot_{id(self)}_{table}.usearch")
+
+    def _backfill_usearch(
+        self,
+        model_id: str,
+        backend: VectorSearchBackend,
+        *,
+        dim: int,
+        table: str,
+    ) -> None:
+        """One-time populate of an empty usearch index from the fp32 blob cache for ``model_id``.
+
+        Mirrors ``_backfill_vec0``: only runs when the index is empty (a freshly built / rebuilt
+        backend whose fp32 authority table has no rows yet), so it never re-stamps an index the
+        incremental sync already owns."""
+        if backend.search(np.zeros(dim, dtype=np.float32), limit=1):
+            return  # already populated; incremental sync owns it from here
+        for ref, (_text_hash, stored_dim, blob) in self.get_vectors(model_id, table=table).items():
+            if stored_dim != dim:
+                continue  # a stale row from a different model dimensionality; skip, will re-embed
+            backend.upsert(ref, np.frombuffer(blob, dtype=np.float32))
 
     def _backfill_vec0(
         self,
@@ -1531,6 +1629,13 @@ def _reference_source_unchanged(prior: sqlite3.Row, source: Any) -> bool:
         and str(prior["created_at"]) == str(source.created_at)
     )
 
+
+# G2-B tier threshold: the minimum persisted-vector count at which ``make_vector_backend(ann=True)``
+# switches from the exact sqlite-vec scan to the on-disk usearch HNSW ANN backend. Below this, even
+# an opt-in caller stays on the exact scan — that is what guarantees small / eval corpora (a few
+# hundred rows) keep recall 1.0 and never see ANN approximation. 5_000 is the order where the O(N)
+# brute scan starts to dominate latency (P0_G2_RESEARCH §4) while the HNSW build cost stays modest.
+USEARCH_MIN_N = 5_000
 
 _VECTOR_TABLES = {"content_vectors", "reference_vectors"}
 

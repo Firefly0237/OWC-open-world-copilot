@@ -36,6 +36,13 @@ dependencies = [
     # Pure-Python wheel bundling vec0.dll; if the import/extension load fails the retriever degrades
     # to the numpy-matrix backend, so environments without it stay functional.
     "sqlite-vec==0.1.9",
+    # On-disk usearch HNSW ANN backend (retrieval/vector_backend.py UsearchBackend, G2-B): the
+    # large-N tier — a sub-linear approximate index in a .usearch file, two-stage fp32-reranked to
+    # ~0.99 recall, used only above a corpus-size threshold so small/eval corpora keep the exact
+    # sqlite-vec scan. Pinned + vendored under scratchpad/wheels2/ for offline install. If the
+    # import fails the store falls back to a sqlite-vec backend, so environments without it stay
+    # functional.
+    "usearch==2.25.3",
 ]
 
 # No [project.urls] yet — the project is local-only (not published to a public repo).

@@ -82,6 +82,7 @@ class VectorRetriever:
         vectors_table: str = "content_vectors",
         backend: VectorSearchBackend | None = None,
         quantized: bool = False,
+        ann: bool = False,
     ) -> None:
         self.store = store
         self.embedder = embedder or HashingEmbedder()
@@ -91,6 +92,11 @@ class VectorRetriever:
         # backend (G2-A): ~4× smaller / ~3× faster scan with an fp32 rerank that keeps recall
         # ~0.999. Ignored when an explicit ``backend`` is injected.
         self._quantized = quantized
+        # ``ann=True`` (G2-B) opts the *large-N* corpus into the on-disk usearch HNSW backend: the
+        # store only actually switches once the corpus crosses ``USEARCH_MIN_N``, so a small corpus
+        # stays on the exact scan (recall 1.0) even with this set. Ignored when ``backend`` is
+        # injected. Default ``False`` keeps every existing caller on the exact backend.
+        self._ann = ann
         self._rows: list[_Row] = []
         # The search index. Built lazily once the embedding dim is known (a sqlite-vec ``vec0``
         # table is declared ``FLOAT[dim]``, and a lazy ``SemanticEmbedder`` only reveals its dim
@@ -268,7 +274,11 @@ class VectorRetriever:
         ones upserted and the vanished ones deleted."""
         if self._backend is None:
             built: VectorSearchBackend | None = self.store.make_vector_backend(
-                model_id, dim=dim, table=self._vectors_table, quantized=self._quantized
+                model_id,
+                dim=dim,
+                table=self._vectors_table,
+                quantized=self._quantized,
+                ann=self._ann,
             )
             self._backend = built if built is not None else NumpyMatrixBackend()
 

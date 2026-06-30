@@ -22,13 +22,19 @@ from owcopilot.retrieval.vector_backend import (
     NumpyMatrixBackend,
     SqliteVecBackend,
     SqliteVecInt8Backend,
+    UsearchBackend,
     quantise_int8,
     sqlite_vec_available,
+    usearch_available,
 )
 from owcopilot.storage import SQLiteStore
 
 requires_sqlite_vec = pytest.mark.skipif(
     not sqlite_vec_available(), reason="sqlite-vec extension not installed"
+)
+
+requires_usearch = pytest.mark.skipif(
+    not usearch_available(), reason="usearch package not installed"
 )
 
 
@@ -551,3 +557,322 @@ def test_int8_two_stage_holds_acceptance_retrieval_gate() -> None:
 
     assert hit_rate == 1.0
     assert tight_rate == 1.0
+
+
+# ===========================================================================================
+# G2-B: on-disk usearch HNSW ANN backend (ANN coarse -> fp32 rerank) + the N-threshold tier.
+# ===========================================================================================
+
+
+def _new_usearch_backend(dim: int, tmp_path) -> UsearchBackend:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    index_path = str(tmp_path / "content.usearch")
+    return UsearchBackend(conn, dim=dim, table="content_vectors", index_path=index_path)
+
+
+# --------------------------------------------------------------------------- usearch primitives
+
+
+@requires_usearch
+def test_usearch_upsert_search_vector_for_and_delete(tmp_path) -> None:
+    backend = _new_usearch_backend(dim=4, tmp_path=tmp_path)
+    backend.upsert("a", _vec([1, 0, 0, 0]))
+    backend.upsert("b", _vec([0, 1, 0, 0]))
+    backend.upsert("c", _vec([0.9, 0.1, 0, 0]))
+
+    hits = backend.search(_vec([1, 0, 0, 0]), limit=3)
+    assert [ref for ref, _ in hits] == ["a", "c", "b"]
+    assert hits[0][1] >= hits[1][1] >= hits[2][1]
+
+    # vector_for returns the EXACT fp32 unit vector from the authoritative sidecar, not via the ANN.
+    stored = backend.vector_for("a")
+    assert stored is not None
+    assert stored.dtype == np.float32
+    np.testing.assert_allclose(stored, _vec([1, 0, 0, 0]), atol=1e-6)
+    assert backend.vector_for("missing") is None
+
+    # upsert replaces (no duplicate-key crash on the same ref), then delete removes.
+    backend.upsert("a", _vec([0, 0, 0, 1]))
+    assert [r for r, _ in backend.search(_vec([0, 0, 0, 1]), limit=5)][0] == "a"
+    backend.delete("a")
+    assert backend.vector_for("a") is None
+    assert "a" not in {r for r, _ in backend.search(_vec([0, 0, 0, 1]), limit=5)}
+    backend.delete("a")  # idempotent no-op
+
+
+@requires_usearch
+def test_usearch_clear_and_dim_mismatch_and_empty(tmp_path) -> None:
+    backend = _new_usearch_backend(dim=4, tmp_path=tmp_path)
+    assert backend.search(_vec([1, 0, 0, 0]), limit=5) == []  # empty index
+    backend.upsert("a", _vec([1, 0, 0, 0]))
+    assert backend.search(_vec([1, 0, 0]), limit=5) == []  # wrong dim -> empty
+    backend.clear()
+    assert backend.search(_vec([1, 0, 0, 0]), limit=5) == []
+    assert backend.vector_for("a") is None
+
+
+@requires_usearch
+def test_usearch_string_ref_key_mapping_roundtrips(tmp_path) -> None:
+    """String refs (not uint64) round-trip through the persisted ref<->key map: arbitrary string
+    refs upsert, search back to the same strings, and delete by string."""
+    backend = _new_usearch_backend(dim=8, tmp_path=tmp_path)
+    refs = ["entity:npc_aldric", "quest:siege/01", "relation:a:b:c:0", "term:Æther-鑰"]
+    rng = np.random.default_rng(3)
+    for ref in refs:
+        backend.upsert(ref, rng.standard_normal(8).astype(np.float32))
+    for ref in refs:
+        # the exact stored vector comes back for each string ref
+        assert backend.vector_for(ref) is not None
+        # and a query of that vector self-retrieves the same string ref at rank 0
+        hit_refs = [r for r, _ in backend.search(backend.vector_for(ref), limit=4)]
+        assert hit_refs[0] == ref
+    backend.delete("quest:siege/01")
+    assert backend.vector_for("quest:siege/01") is None
+    remaining = {r for r, _ in backend.search(backend.vector_for("entity:npc_aldric"), limit=4)}
+    assert "quest:siege/01" not in remaining
+
+
+# --------------------------------------------------------------------------- on-disk persistence
+
+
+@requires_usearch
+def test_usearch_on_disk_save_and_reopen_roundtrip(tmp_path) -> None:
+    """The .usearch index persists across a close/reopen on the same DB file: a reopened backend
+    serves the same vectors without re-upserting (the index loaded from disk, count matched)."""
+    db_path = str(tmp_path / "runtime.db")
+    index_path = str(tmp_path / "content.usearch")
+    rng = np.random.default_rng(9)
+    vectors = {f"r{i}": rng.standard_normal(16).astype(np.float32) for i in range(20)}
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    backend = UsearchBackend(conn, dim=16, table="content_vectors", index_path=index_path)
+    for ref, v in vectors.items():
+        backend.upsert(ref, v)
+    conn.commit()
+    conn.close()
+    import os
+
+    assert os.path.exists(index_path)
+
+    # reopen: a healthy index (key count == keymap count) loads in place, no rebuild needed.
+    conn2 = sqlite3.connect(db_path)
+    conn2.row_factory = sqlite3.Row
+    reopened = UsearchBackend(conn2, dim=16, table="content_vectors", index_path=index_path)
+    assert len(reopened._index) == len(vectors)  # noqa: SLF001 - asserting on-disk count survived
+    for ref, v in vectors.items():
+        top = reopened.search(v, limit=1)
+        assert top and top[0][0] == ref  # self-retrieval after reopen
+
+
+# --------------------------------------------------------------------------- consistency / rebuild
+
+
+@requires_usearch
+def test_usearch_dirty_index_rebuilds_from_fp32_source(tmp_path) -> None:
+    """A stale .usearch file (its key count disagrees with the authoritative keymap, as after a
+    crash mid-write) is detected on open and rebuilt from the fp32 source — restoring correctness
+    without a manual repair. This is the crash-recovery guarantee the design hinges on."""
+    db_path = str(tmp_path / "runtime.db")
+    index_path = str(tmp_path / "content.usearch")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    backend = UsearchBackend(conn, dim=4, table="content_vectors", index_path=index_path)
+    for ref, v in [("a", [1, 0, 0, 0]), ("b", [0, 1, 0, 0]), ("c", [0, 0, 1, 0])]:
+        backend.upsert(ref, _vec(v))
+    conn.commit()
+
+    # Simulate a crash that updated the authoritative tables but left the .usearch file holding the
+    # OLD 3-key index: drop "c" from fp32 + keymap only. Now the file (3 keys) disagrees with the
+    # keymap (2 rows).
+    conn.execute("DELETE FROM content_vectors_fp32 WHERE ref = 'c'")
+    conn.execute("DELETE FROM content_vectors_keymap WHERE ref = 'c'")
+    conn.commit()
+    conn.close()
+
+    conn2 = sqlite3.connect(db_path)
+    conn2.row_factory = sqlite3.Row
+    healed = UsearchBackend(conn2, dim=4, table="content_vectors", index_path=index_path)
+    # rebuilt to match the authority: 2 keys, "c" gone, "a"/"b" still searchable.
+    assert len(healed._index) == 2  # noqa: SLF001
+    assert healed.vector_for("c") is None
+    assert healed.search(_vec([1, 0, 0, 0]), limit=1)[0][0] == "a"
+    assert healed.search(_vec([0, 1, 0, 0]), limit=1)[0][0] == "b"
+
+
+@requires_usearch
+def test_usearch_corrupt_index_file_rebuilds(tmp_path) -> None:
+    """An unreadable / truncated .usearch file is caught on open and rebuilt from the fp32 source,
+    never crashing the backend."""
+    db_path = str(tmp_path / "runtime.db")
+    index_path = str(tmp_path / "content.usearch")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    backend = UsearchBackend(conn, dim=4, table="content_vectors", index_path=index_path)
+    backend.upsert("a", _vec([1, 0, 0, 0]))
+    backend.upsert("b", _vec([0, 1, 0, 0]))
+    conn.commit()
+    conn.close()
+
+    with open(index_path, "wb") as f:
+        f.write(b"NOT A REAL USEARCH FILE")
+
+    conn2 = sqlite3.connect(db_path)
+    conn2.row_factory = sqlite3.Row
+    healed = UsearchBackend(conn2, dim=4, table="content_vectors", index_path=index_path)
+    assert len(healed._index) == 2  # noqa: SLF001 - rebuilt from fp32 authority
+    assert healed.search(_vec([1, 0, 0, 0]), limit=1)[0][0] == "a"
+
+
+# ----------------------------------------------------------------- recall: tuned + 2-stage
+
+
+@requires_usearch
+def test_usearch_tuned_two_stage_recall_is_high_and_beats_default_params(tmp_path) -> None:
+    """The core G2-B claim, on synthetic clustered vectors vs the fp32 ground truth:
+
+    1. the tuned (connectivity=32 / expansion_search=2048) HNSW + fp32 rerank holds recall@10
+       >= 0.95, and
+    2. the tuning is load-bearing: it strictly beats a default-parameter usearch index (the library
+       defaults that P0_G2_RESEARCH §3 identified as a recall trap).
+    """
+    from usearch.index import Index
+
+    dim, n, clusters, seed = 1024, 6000, 80, 11
+    rng = np.random.default_rng(seed)
+
+    def _norm(v: np.ndarray) -> np.ndarray:
+        return (v / (np.linalg.norm(v, axis=-1, keepdims=True))).astype(np.float32)
+
+    centers = _norm(rng.standard_normal((clusters, dim)).astype(np.float32))
+    labels = rng.integers(0, clusters, n)
+    data = _norm(centers[labels] + 0.30 * rng.standard_normal((n, dim)).astype(np.float32))
+    vectors = {f"r{i}": data[i] for i in range(n)}
+
+    backend = _new_usearch_backend(dim=dim, tmp_path=tmp_path)
+    for ref, v in vectors.items():
+        backend.upsert(ref, v)
+
+    # default-parameter index (the trap) over the same data, for the comparison.
+    default_index = Index(ndim=dim, metric="cos", dtype="f32")
+    default_index.add(np.arange(n, dtype=np.uint64), data)
+    reflist = list(vectors.keys())
+
+    rng_q = np.random.default_rng(seed + 1)
+    limit, n_queries = 10, 60
+    tuned_hits = default_hits = total = 0
+    for i in range(n_queries):
+        q = _norm(centers[i % clusters] + 0.30 * rng_q.standard_normal(dim)).astype(np.float32)
+        # exact fp32 ground truth
+        scored = sorted(
+            ((ref, float(v @ q)) for ref, v in vectors.items()), key=lambda x: (-x[1], x[0])
+        )
+        truth = {ref for ref, _ in scored[:limit]}
+
+        tuned = {ref for ref, _ in backend.search(q, limit=limit)}
+        tuned_hits += len(truth & tuned)
+
+        dk = [int(x) for x in default_index.search(q, limit).keys]
+        default_hits += len(truth & {reflist[k] for k in dk})
+        total += limit
+
+    tuned_recall = tuned_hits / total
+    default_recall = default_hits / total
+    assert tuned_recall >= 0.95, f"tuned two-stage recall {tuned_recall:.4f} < 0.95"
+    assert tuned_recall >= default_recall, (
+        f"tuned {tuned_recall:.4f} not >= default-param {default_recall:.4f}"
+    )
+
+
+# --------------------------------------------------------------------------- tier selection (by N)
+
+
+@requires_sqlite_vec
+def test_make_vector_backend_small_n_stays_on_sqlite_vec_even_with_ann(tmp_path) -> None:
+    """The tier safety valve: with ann=True but a SMALL corpus (below USEARCH_MIN_N) the store
+    still builds the exact sqlite-vec backend, so the eval recall gate never sees ANN approximation.
+    """
+    store = SQLiteStore()
+    try:
+        # a handful of persisted vectors -> well under the threshold.
+        store.upsert_vectors(
+            "hashing-4",
+            [(f"r{i}", "h", 4, _vec([1, 0, 0, 0]).tobytes()) for i in range(5)],
+        )
+        backend = store.make_vector_backend("hashing-4", dim=4, ann=True)
+        assert isinstance(backend, SqliteVecBackend)
+        assert not isinstance(backend, UsearchBackend)
+    finally:
+        store.close()
+
+
+@requires_sqlite_vec
+@requires_usearch
+def test_make_vector_backend_large_n_with_ann_uses_usearch(tmp_path, monkeypatch) -> None:
+    """Above the threshold, ann=True switches the store to the on-disk usearch backend; ann=False
+    (the default) always stays on the exact sqlite-vec backend regardless of N."""
+    from owcopilot.storage import sqlite as sqlite_mod
+
+    # Lower the threshold so the test stays fast (a few rows instead of thousands).
+    monkeypatch.setattr(sqlite_mod, "USEARCH_MIN_N", 3)
+    store = SQLiteStore(str(tmp_path / "rt.db"))
+    try:
+        store.upsert_vectors(
+            "hashing-4",
+            [(f"r{i}", "h", 4, _vec([1, 0, 0, 0]).tobytes()) for i in range(10)],
+        )
+        ann_backend = store.make_vector_backend("hashing-4", dim=4, ann=True)
+        assert isinstance(ann_backend, UsearchBackend)
+        # default (ann=False) never uses usearch even with the same large N.
+        exact_backend = store.make_vector_backend("hashing-4", dim=4, ann=False)
+        assert isinstance(exact_backend, SqliteVecBackend)
+    finally:
+        store.close()
+
+
+@requires_sqlite_vec
+def test_make_vector_backend_falls_back_to_sqlite_vec_when_usearch_unavailable(
+    tmp_path, monkeypatch
+) -> None:
+    """When ann=True crosses the threshold but usearch cannot be built, the store falls back to the
+    exact sqlite-vec backend with a guided log line — never a crash, never a silent numpy degrade
+    when sqlite-vec is in fact available."""
+    from owcopilot.storage import sqlite as sqlite_mod
+
+    monkeypatch.setattr(sqlite_mod, "USEARCH_MIN_N", 3)
+
+    def _boom(self, *_a: object, **_k: object) -> None:
+        return None  # simulate usearch unavailable -> _make_usearch_backend returns None
+
+    monkeypatch.setattr(SQLiteStore, "_make_usearch_backend", _boom)
+    store = SQLiteStore(str(tmp_path / "rt.db"))
+    try:
+        store.upsert_vectors(
+            "hashing-4",
+            [(f"r{i}", "h", 4, _vec([1, 0, 0, 0]).tobytes()) for i in range(10)],
+        )
+        backend = store.make_vector_backend("hashing-4", dim=4, ann=True)
+        assert isinstance(backend, SqliteVecBackend)
+    finally:
+        store.close()
+
+
+@requires_sqlite_vec
+def test_retriever_ann_small_corpus_matches_fp32(tmp_path) -> None:
+    """A VectorRetriever built with ann=True over the small canon bundle stays on the exact backend
+    (small N) and returns the same hits as the fp32 default — proving the opt-in is a no-op on small
+    corpora (the eval gate is safe)."""
+    fp32_hits, _ = _retriever_results(use_numpy=False, query="caravan routes")
+
+    store = SQLiteStore(str(tmp_path / "rt.db"))
+    try:
+        store.replace_content_index(_bundle())
+        retriever = VectorRetriever(store, ann=True)
+        # small corpus -> not the ANN backend.
+        assert not isinstance(retriever._backend, UsearchBackend)
+        ann_hits = [(h.ref, h.score) for h in retriever.search("caravan routes", limit=10)]
+    finally:
+        store.close()
+
+    assert [r for r, _ in fp32_hits] == [r for r, _ in ann_hits]
