@@ -33,9 +33,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Scale-P0 G2-C C1: the canonical default scope. A single-world project (every project today)
+# lives entirely under this scope, so a store opened without an explicit scope behaves exactly as
+# before — same rows, same retrieval, same audit. The dimension is threaded everywhere now so the
+# later units (C2 scope filtering, C3 version inheritance) only have to *use* it, not add it.
+DEFAULT_WORLD_ID = "default"
+DEFAULT_VERSION = "v1"
+
+
 class SQLiteStore:
-    def __init__(self, path: str | Path = ":memory:") -> None:
+    def __init__(
+        self,
+        path: str | Path = ":memory:",
+        *,
+        world_id: str = DEFAULT_WORLD_ID,
+        version: str = DEFAULT_VERSION,
+    ) -> None:
         self.path = str(path)
+        # The store's *current* scope. Writes stamp rows with it; the vector/blob-cache reads are
+        # scoped to it (a retriever only caches within its own scope), and vec0 PARTITION KEY search
+        # is constrained to it — all of which keep the single-world default behaviour unchanged.
+        # Broad scope-aware filtering of the content/audit read paths is C2.
+        self.world_id = world_id
+        self.version = version
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
         # WAL lets the Workbench read while the CLI writes (and vice versa); busy_timeout keeps
@@ -45,8 +65,85 @@ class SQLiteStore:
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.initialize()
 
+    def set_scope(self, world_id: str, version: str) -> None:
+        """Point the store at a (world_id, version) scope for subsequent writes/reads.
+
+        C1 carrier only: ProjectContext sets this to its current scope. With the default
+        ("default", "v1") this is a no-op vs the historical behaviour."""
+        self.world_id = world_id
+        self.version = version
+
     def close(self) -> None:
         self.conn.close()
+
+    # --- version registry (Scale-P0 G2-C C1) ---------------------------------------------------
+    # C1 delivers the table + basic CRUD only. The base_version column records a version's parent
+    # for the C3 inheritance work; C1 stores it but does NOT resolve the base chain (that is C3).
+
+    def register_version(
+        self, world_id: str, version: str, *, base_version: str | None = None
+    ) -> None:
+        """Create or update a (world_id, version) registry row. Idempotent on the composite key.
+
+        ``base_version`` is the parent version this one branches from (``None`` for a root line).
+        C1 only persists it; the inheritance/fork semantics are C3."""
+        self.conn.execute(
+            """
+            INSERT INTO version_registry (world_id, version, base_version, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(world_id, version) DO UPDATE SET base_version = excluded.base_version
+            """,
+            (world_id, version, base_version, _now_iso()),
+        )
+        self.conn.commit()
+
+    def get_version(self, world_id: str, version: str) -> dict[str, Any] | None:
+        """Return the registry row for (world_id, version), or ``None`` if unregistered."""
+        row = self.conn.execute(
+            "SELECT world_id, version, base_version, created_at FROM version_registry "
+            "WHERE world_id = ? AND version = ?",
+            (world_id, version),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "world_id": str(row["world_id"]),
+            "version": str(row["version"]),
+            "base_version": row["base_version"],
+            "created_at": str(row["created_at"]),
+        }
+
+    def list_versions(self, world_id: str | None = None) -> list[dict[str, Any]]:
+        """Registry rows, optionally filtered to one world, ordered by (world_id, version)."""
+        if world_id is None:
+            rows = self.conn.execute(
+                "SELECT world_id, version, base_version, created_at FROM version_registry "
+                "ORDER BY world_id, version"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT world_id, version, base_version, created_at FROM version_registry "
+                "WHERE world_id = ? ORDER BY version",
+                (world_id,),
+            ).fetchall()
+        return [
+            {
+                "world_id": str(row["world_id"]),
+                "version": str(row["version"]),
+                "base_version": row["base_version"],
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def delete_version(self, world_id: str, version: str) -> None:
+        """Remove a (world_id, version) registry row (no-op if absent). C1: registry only — this
+        does NOT cascade to the scope's content/vector rows (that lifecycle is later units)."""
+        self.conn.execute(
+            "DELETE FROM version_registry WHERE world_id = ? AND version = ?",
+            (world_id, version),
+        )
+        self.conn.commit()
 
     def initialize(self) -> None:
         self.conn.executescript(
@@ -112,12 +209,15 @@ class SQLiteStore:
             CREATE INDEX IF NOT EXISTS idx_review_items_type ON review_items(item_type);
 
             CREATE TABLE IF NOT EXISTS content_index (
-                ref TEXT PRIMARY KEY,
+                world_id TEXT NOT NULL DEFAULT 'default',
+                version TEXT NOT NULL DEFAULT 'v1',
+                ref TEXT NOT NULL,
                 object_type TEXT NOT NULL,
                 object_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 body TEXT NOT NULL,
-                row_hash TEXT NOT NULL DEFAULT ''
+                row_hash TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (world_id, version, ref)
             );
 
             CREATE TABLE IF NOT EXISTS content_vectors (
@@ -126,6 +226,8 @@ class SQLiteStore:
                 text_hash TEXT NOT NULL,
                 dim INTEGER NOT NULL,
                 vector BLOB NOT NULL,
+                world_id TEXT NOT NULL DEFAULT 'default',
+                version TEXT NOT NULL DEFAULT 'v1',
                 PRIMARY KEY (ref, model_id)
             );
 
@@ -135,6 +237,8 @@ class SQLiteStore:
                 text_hash TEXT NOT NULL,
                 dim INTEGER NOT NULL,
                 vector BLOB NOT NULL,
+                world_id TEXT NOT NULL DEFAULT 'default',
+                version TEXT NOT NULL DEFAULT 'v1',
                 PRIMARY KEY (ref, model_id)
             );
 
@@ -146,7 +250,9 @@ class SQLiteStore:
                 edge_type TEXT NOT NULL,
                 valid_from INTEGER,
                 valid_until INTEGER,
-                edge_fingerprint TEXT NOT NULL DEFAULT ''
+                edge_fingerprint TEXT NOT NULL DEFAULT '',
+                world_id TEXT NOT NULL DEFAULT 'default',
+                version TEXT NOT NULL DEFAULT 'v1'
             );
 
             CREATE TABLE IF NOT EXISTS telemetry (
@@ -165,28 +271,36 @@ class SQLiteStore:
             CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(
                 ref UNINDEXED,
                 object_type UNINDEXED,
+                world_id UNINDEXED,
+                version UNINDEXED,
                 title,
                 body
             );
 
             CREATE TABLE IF NOT EXISTS reference_sources (
-                id TEXT PRIMARY KEY,
+                world_id TEXT NOT NULL DEFAULT 'default',
+                version TEXT NOT NULL DEFAULT 'v1',
+                id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 source_type TEXT NOT NULL,
                 original_filename TEXT,
                 allowed_uses_json TEXT NOT NULL,
                 text_hash TEXT NOT NULL,
                 metadata_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (world_id, version, id)
             );
 
             CREATE TABLE IF NOT EXISTS reference_chunks (
-                ref TEXT PRIMARY KEY,
+                world_id TEXT NOT NULL DEFAULT 'default',
+                version TEXT NOT NULL DEFAULT 'v1',
+                ref TEXT NOT NULL,
                 source_id TEXT NOT NULL,
                 chunk_index INTEGER NOT NULL,
                 title TEXT NOT NULL,
                 body TEXT NOT NULL,
-                metadata_json TEXT NOT NULL
+                metadata_json TEXT NOT NULL,
+                PRIMARY KEY (world_id, version, ref)
             );
 
             CREATE INDEX IF NOT EXISTS idx_reference_chunks_source_id
@@ -196,6 +310,8 @@ class SQLiteStore:
                 ref UNINDEXED,
                 source_id UNINDEXED,
                 source_title UNINDEXED,
+                world_id UNINDEXED,
+                version UNINDEXED,
                 title,
                 body
             );
@@ -242,6 +358,14 @@ class SQLiteStore:
 
             CREATE INDEX IF NOT EXISTS idx_agent_messages_created
                 ON agent_messages(created_at);
+
+            CREATE TABLE IF NOT EXISTS version_registry (
+                world_id TEXT NOT NULL DEFAULT 'default',
+                version TEXT NOT NULL DEFAULT 'v1',
+                base_version TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (world_id, version)
+            );
             """
         )
         # Older runtime DBs predate the rollback column; content files are the source of truth,
@@ -269,13 +393,87 @@ class SQLiteStore:
             # open/reload, so clear it once here rather than back-filling fingerprints for rows we
             # are about to re-diff anyway.
             self.conn.execute("DELETE FROM graph_edges")
-        # The fingerprint already embeds an occurrence ordinal, so it is unique per edge row even
-        # when a MultiDiGraph holds byte-identical parallel edges -- this lets the incremental
-        # upsert key on it via ON CONFLICT.
-        self.conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_edges_fingerprint "
-            "ON graph_edges(edge_fingerprint)"
+        # Scale-P0 G2-C C1: the (world_id, version) scope columns. Older runtime DBs predate them,
+        # so upgrade in place; the 'default'/'v1' defaults back-fill every existing row to the
+        # canonical scope, losing no data and keeping single-world behaviour unchanged. The scope
+        # indexes are created *after* the columns exist (a legacy DB's CREATE TABLE IF NOT EXISTS
+        # was a no-op, so the columns are added here, not by the table DDL above).
+        scope_tables = (
+            "content_index",
+            "content_vectors",
+            "reference_vectors",
+            "graph_edges",
+            "reference_sources",
+            "reference_chunks",
         )
+        for table in scope_tables:
+            self._ensure_column(table, "world_id", "TEXT NOT NULL DEFAULT 'default'")
+            self._ensure_column(table, "version", "TEXT NOT NULL DEFAULT 'v1'")
+        # The authoritative relational tables key on the object id; with scope, that id is only
+        # unique *within* a scope, so the primary key must include (world_id, version). A legacy DB
+        # (and a DB from the first, buggy C1 cut) still has the pre-scope single-column PK — SQLite
+        # cannot ALTER a PK, so rebuild those tables under the composite PK, carrying every existing
+        # row across (back-filled to the canonical scope). This is what makes a write to one scope
+        # physically unable to collide with / delete another scope's rows. Runs *before* the index
+        # creation below because the rebuild drops/recreates the table.
+        self._ensure_scoped_pk("content_index", ("world_id", "version", "ref"))
+        self._ensure_scoped_pk("reference_sources", ("world_id", "version", "id"))
+        self._ensure_scoped_pk("reference_chunks", ("world_id", "version", "ref"))
+        # graph_edges keeps its AUTOINCREMENT id; its per-edge uniqueness (the incremental-sync
+        # ON CONFLICT key) becomes scope-qualified so the same fingerprint can exist once per scope.
+        # Drop the legacy single-column unique index and (re)create the scoped one.
+        self.conn.execute("DROP INDEX IF EXISTS idx_graph_edges_fingerprint")
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_edges_scope_fingerprint "
+            "ON graph_edges(world_id, version, edge_fingerprint)"
+        )
+        # The non-PK helper indexes are (re)created last: the PK rebuilds above drop+recreate their
+        # tables, so any index must be created after, and the reference_chunks(source_id) lookup
+        # index needs restoring too. CREATE INDEX IF NOT EXISTS keeps this idempotent.
+        for table in scope_tables:
+            self.conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{table}_scope "  # noqa: S608 - whitelisted names
+                f"ON {table}(world_id, version)"
+            )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reference_chunks_source_id "
+            "ON reference_chunks(source_id)"
+        )
+        # content_fts / reference_fts are derived search indexes, but they need a scope column so
+        # the same ref in two scopes maps to two FTS rows and search can filter by scope. FTS5
+        # virtual tables cannot be ALTERed, so a legacy table lacking the scope columns is dropped,
+        # recreated under the new shape, and immediately repopulated from the authoritative tables.
+        # Repopulating here (not relying on the next replace_* sync) is required for correctness:
+        # the incremental sync skips unchanged content_index rows, so it would otherwise leave the
+        # rebuilt FTS empty whenever a row's hash already matched — a silent search outage.
+        rebuilt_content_fts = self._rebuild_fts_if_unscoped(
+            "content_fts",
+            "ref UNINDEXED, object_type UNINDEXED, world_id UNINDEXED, version UNINDEXED, "
+            "title, body",
+        )
+        if rebuilt_content_fts:
+            self.conn.execute(
+                "INSERT INTO content_fts (ref, object_type, world_id, version, title, body) "
+                "SELECT ref, object_type, world_id, version, title, body FROM content_index"
+            )
+        rebuilt_reference_fts = self._rebuild_fts_if_unscoped(
+            "reference_fts",
+            "ref UNINDEXED, source_id UNINDEXED, source_title UNINDEXED, "
+            "world_id UNINDEXED, version UNINDEXED, title, body",
+        )
+        if rebuilt_reference_fts:
+            self.conn.execute(
+                """
+                INSERT INTO reference_fts (
+                    ref, source_id, source_title, world_id, version, title, body
+                )
+                SELECT c.ref, c.source_id, COALESCE(s.title, ''), c.world_id, c.version,
+                       c.title, c.body
+                FROM reference_chunks AS c
+                LEFT JOIN reference_sources AS s
+                    ON s.id = c.source_id AND s.world_id = c.world_id AND s.version = c.version
+                """
+            )
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, column_type: str) -> bool:
@@ -285,6 +483,63 @@ class SQLiteStore:
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
             return True
         return False
+
+    def _ensure_scoped_pk(self, table: str, pk_cols: tuple[str, ...]) -> None:
+        """Rebuild ``table`` under the composite ``pk_cols`` primary key if it is not already so.
+
+        SQLite cannot ALTER a primary key, so a legacy table that keys on the object id alone is
+        rebuilt: a new table with the scoped composite PK and the *same* columns is created, every
+        existing row is copied across (scope columns already back-filled to the canonical scope by
+        ``_ensure_column``), the old table is dropped, and the new one renamed into place. The copy
+        is column-explicit and order-independent, so it is robust regardless of column ordering.
+
+        Idempotent: a table whose PK already matches ``pk_cols`` is left untouched, so re-opening a
+        migrated DB is a no-op."""
+        info = list(self.conn.execute(f"PRAGMA table_info({table})"))
+        current_pk = [str(row["name"]) for row in sorted(info, key=lambda r: r["pk"]) if row["pk"]]
+        if tuple(current_pk) == tuple(pk_cols):
+            return  # already scoped
+        columns = [str(row["name"]) for row in info]
+        # Recreate the column definitions verbatim (type/notnull/default), swapping the table-level
+        # PK for the composite one. dflt_value comes straight from PRAGMA so 'default'/'v1' defaults
+        # survive the rebuild.
+        defs: list[str] = []
+        for row in info:
+            name = str(row["name"])
+            col_type = str(row["type"]) or "TEXT"
+            notnull = " NOT NULL" if row["notnull"] else ""
+            default = f" DEFAULT {row['dflt_value']}" if row["dflt_value"] is not None else ""
+            defs.append(f"{name} {col_type}{notnull}{default}")
+        defs.append(f"PRIMARY KEY ({', '.join(pk_cols)})")
+        tmp = f"{table}__scoped_rebuild"
+        col_list = ", ".join(columns)
+        self.conn.execute(f"DROP TABLE IF EXISTS {tmp}")  # noqa: S608 - derived from table arg
+        self.conn.execute(f"CREATE TABLE {tmp} ({', '.join(defs)})")  # noqa: S608
+        self.conn.execute(
+            f"INSERT INTO {tmp} ({col_list}) SELECT {col_list} FROM {table}"  # noqa: S608
+        )
+        self.conn.execute(f"DROP TABLE {table}")  # noqa: S608
+        self.conn.execute(f"ALTER TABLE {tmp} RENAME TO {table}")  # noqa: S608
+
+    def _rebuild_fts_if_unscoped(self, table: str, columns_ddl: str) -> bool:
+        """Drop+recreate an fts5 ``table`` under ``columns_ddl`` when it lacks the scope columns.
+
+        FTS5 virtual tables cannot be ALTERed to add a column, and the FTS index is a *derived*
+        structure (the authoritative rows live in content_index / reference_chunks), so a legacy
+        table that has no ``world_id`` column is dropped and recreated under the scoped shape.
+        Returns ``True`` when it rebuilt (so the caller repopulates), else ``False``.
+        Idempotent: a table that already has the scope columns is left untouched."""
+        info = list(self.conn.execute(f"PRAGMA table_info({table})"))
+        if not info:
+            return False  # absent; the executescript CREATE already made the scoped one
+        cols = {str(row["name"]) for row in info}
+        if "world_id" in cols and "version" in cols:
+            return False  # already scoped
+        self.conn.execute(f"DROP TABLE IF EXISTS {table}")  # noqa: S608 - whitelisted name
+        self.conn.execute(
+            f"CREATE VIRTUAL TABLE {table} USING fts5({columns_ddl})"  # noqa: S608
+        )
+        return True
 
     def save_audit_run(self, run: AuditRun) -> None:
         self.conn.execute(
@@ -693,16 +948,18 @@ class SQLiteStore:
     # ------------------------------------------------------------------------------------------
 
     def replace_content_index(self, bundle: ContentBundle) -> None:
-        """Sync content_index + content_fts to ``bundle`` incrementally.
+        """Sync content_index + content_fts to ``bundle`` incrementally, within the current scope.
 
         The bundle is the source of truth; this diffs the desired rows against the persisted ones
-        (keyed by ``ref``, compared on a content ``row_hash``) and only touches what changed:
-        changed/new rows are upserted, vanished rows are deleted, and unchanged rows are left
-        alone. content_fts is a plain (non external-content) fts5 table, so its rows are deleted by
-        ``ref`` and re-inserted by hand for exactly the changed/new/removed refs.
+        *of this (world_id, version) scope* (keyed by ``ref``, compared on a content ``row_hash``)
+        and only touches what changed: changed/new rows are upserted, vanished rows are deleted, and
+        unchanged rows are left alone. Every existing-row read and DELETE is scope-filtered, so
+        writing one scope can never read, update or delete another scope's rows (INV-2). content_fts
+        is a plain fts5 table carrying the scope as UNINDEXED columns, so its rows are deleted by
+        ``(ref, scope)`` and re-inserted for exactly the changed/new/removed refs.
 
-        The end state is identical to the old drop-and-reinsert: same content_index rows (now also
-        carrying row_hash) and the same content_fts rows. Runs in a single transaction."""
+        For a single-scope (default) project the end state matches the old drop-and-reinsert:
+        same content_index rows and the same content_fts rows. Runs in a single transaction."""
         rows = list(_content_rows(bundle))
         desired: dict[str, tuple[str, str, str, str, str]] = {}
         desired_hash: dict[str, str] = {}
@@ -712,7 +969,10 @@ class SQLiteStore:
 
         existing_hash = {
             str(row["ref"]): str(row["row_hash"])
-            for row in self.conn.execute("SELECT ref, row_hash FROM content_index")
+            for row in self.conn.execute(
+                "SELECT ref, row_hash FROM content_index WHERE world_id = ? AND version = ?",
+                (self.world_id, self.version),
+            )
         }
 
         removed = [ref for ref in existing_hash if ref not in desired]
@@ -725,28 +985,49 @@ class SQLiteStore:
 
         try:
             for ref in removed:
-                self.conn.execute("DELETE FROM content_index WHERE ref = ?", (ref,))
-                self.conn.execute("DELETE FROM content_fts WHERE ref = ?", (ref,))
+                self.conn.execute(
+                    "DELETE FROM content_index WHERE ref = ? AND world_id = ? AND version = ?",
+                    (ref, self.world_id, self.version),
+                )
+                self.conn.execute(
+                    "DELETE FROM content_fts WHERE ref = ? AND world_id = ? AND version = ?",
+                    (ref, self.world_id, self.version),
+                )
             for ref in changed:
                 _r, object_type, object_id, title, body = desired[ref]
                 self.conn.execute(
                     """
-                    INSERT INTO content_index (ref, object_type, object_id, title, body, row_hash)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(ref) DO UPDATE SET
+                    INSERT INTO content_index (
+                        world_id, version, ref, object_type, object_id, title, body, row_hash
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(world_id, version, ref) DO UPDATE SET
                         object_type = excluded.object_type,
                         object_id = excluded.object_id,
                         title = excluded.title,
                         body = excluded.body,
                         row_hash = excluded.row_hash
                     """,
-                    (ref, object_type, object_id, title, body, desired_hash[ref]),
+                    (
+                        self.world_id,
+                        self.version,
+                        ref,
+                        object_type,
+                        object_id,
+                        title,
+                        body,
+                        desired_hash[ref],
+                    ),
                 )
-                # Plain fts5 has no upsert; delete any prior row for this ref, then re-insert.
-                self.conn.execute("DELETE FROM content_fts WHERE ref = ?", (ref,))
+                # Plain fts5 has no upsert; delete this (ref, scope) row then re-insert.
                 self.conn.execute(
-                    "INSERT INTO content_fts (ref, object_type, title, body) VALUES (?, ?, ?, ?)",
-                    (ref, object_type, title, body),
+                    "DELETE FROM content_fts WHERE ref = ? AND world_id = ? AND version = ?",
+                    (ref, self.world_id, self.version),
+                )
+                self.conn.execute(
+                    "INSERT INTO content_fts (ref, object_type, world_id, version, title, body) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (ref, object_type, self.world_id, self.version, title, body),
                 )
         except Exception:
             self.conn.rollback()
@@ -760,11 +1041,16 @@ class SQLiteStore:
 
         Shared by the content-graph and inspiration-reference vector retrievers (``table``). The
         text_hash lets a retriever embed only rows whose text (or the model) changed, so
-        re-opening a project never re-runs the embedder over unchanged rows."""
+        re-opening a project never re-runs the embedder over unchanged rows.
+
+        Scale-P0 G2-C C1: scoped to the store's current (world_id, version) — a retriever only ever
+        caches/embeds within its own scope. In the single default scope this returns exactly the
+        same rows as before."""
         table = _vectors_table(table)
         rows = self.conn.execute(
-            f"SELECT ref, text_hash, dim, vector FROM {table} WHERE model_id = ?",  # noqa: S608
-            (model_id,),
+            f"SELECT ref, text_hash, dim, vector FROM {table} "  # noqa: S608
+            f"WHERE model_id = ? AND world_id = ? AND version = ?",
+            (model_id, self.world_id, self.version),
         ).fetchall()
         return {
             str(row["ref"]): (str(row["text_hash"]), int(row["dim"]), bytes(row["vector"]))
@@ -784,12 +1070,16 @@ class SQLiteStore:
         table = _vectors_table(table)
         self.conn.executemany(
             f"""
-            INSERT INTO {table} (ref, model_id, text_hash, dim, vector)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO {table} (ref, model_id, text_hash, dim, vector, world_id, version)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ref, model_id) DO UPDATE SET
-                text_hash = excluded.text_hash, dim = excluded.dim, vector = excluded.vector
+                text_hash = excluded.text_hash, dim = excluded.dim, vector = excluded.vector,
+                world_id = excluded.world_id, version = excluded.version
             """,  # noqa: S608
-            [(ref, model_id, text_hash, dim, blob) for ref, text_hash, dim, blob in rows],
+            [
+                (ref, model_id, text_hash, dim, blob, self.world_id, self.version)
+                for ref, text_hash, dim, blob in rows
+            ],
         )
         self.conn.commit()
 
@@ -849,10 +1139,20 @@ class SQLiteStore:
         try:
             if quantized:
                 backend = SqliteVecInt8Backend(
-                    self.conn, dim=int(dim), table=_vec0_int8_table(table)
+                    self.conn,
+                    dim=int(dim),
+                    table=_vec0_int8_table(table),
+                    world_id=self.world_id,
+                    version=self.version,
                 )
             else:
-                backend = SqliteVecBackend(self.conn, dim=int(dim), table=_vec0_table(table))
+                backend = SqliteVecBackend(
+                    self.conn,
+                    dim=int(dim),
+                    table=_vec0_table(table),
+                    world_id=self.world_id,
+                    version=self.version,
+                )
             # Backfill is inside the guard: probing/inserting against a vec0 table that was
             # persisted at a different dimensionality raises sqlite3.OperationalError, which must
             # degrade to the numpy backend with a guided log line -- never a bare crash.
@@ -871,11 +1171,13 @@ class SQLiteStore:
 
         This is the N the tier selector thresholds on. It reads the authoritative blob cache (which
         is always populated before a search backend is built), so it is correct even on the very
-        first open before any vec0/usearch index exists."""
+        first open before any vec0/usearch index exists. Scoped to the current (world_id, version):
+        the tier decision is per-scope, since each scope gets its own search index."""
         table = _vectors_table(table)
         row = self.conn.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE model_id = ?",  # noqa: S608 - validated name
-            (model_id,),
+            f"SELECT COUNT(*) FROM {table} "  # noqa: S608 - validated name
+            f"WHERE model_id = ? AND world_id = ? AND version = ?",
+            (model_id, self.world_id, self.version),
         ).fetchone()
         return int(row[0]) if row is not None else 0
 
@@ -897,6 +1199,8 @@ class SQLiteStore:
                 dim=int(dim),
                 table=table,
                 index_path=self._usearch_index_path(table),
+                world_id=self.world_id,
+                version=self.version,
             )
             self._backfill_usearch(model_id, backend, dim=int(dim), table=table)
         except (UsearchError, sqlite3.OperationalError) as exc:
@@ -909,18 +1213,29 @@ class SQLiteStore:
         return backend
 
     def _usearch_index_path(self, table: str) -> str:
-        """Path of the ``.usearch`` file for ``table``.
+        """Path of the ``.usearch`` file for ``table`` within the current scope.
 
         Persistent runtime DBs get a sibling ``{db}.{table}.usearch`` so the ANN index survives
         re-opens alongside the DB. An in-memory DB has no on-disk home, so the index goes to a
         deterministic temp path keyed by the DB id — it is rebuildable from the (in-memory) fp32
-        table anyway, so a transient temp file is fine."""
+        table anyway, so a transient temp file is fine.
+
+        Scale-P0 G2-C C1: each scope gets its own per-scope HNSW file (the index is not partitioned
+        the way vec0 is). The canonical default scope keeps the exact pre-scope filename so an
+        existing single-world ``.usearch`` index opens in place; only non-default scopes add a
+        ``.{world_id}.{version}`` suffix."""
         table = _vectors_table(table)
+        suffix = ""
+        if (self.world_id, self.version) != (DEFAULT_WORLD_ID, DEFAULT_VERSION):
+            safe = f"{self.world_id}.{self.version}".replace("/", "_").replace("\\", "_")
+            suffix = f".{safe}"
         if self.path and self.path != ":memory:" and "mode=memory" not in self.path:
-            return f"{self.path}.{table}.usearch"
+            return f"{self.path}.{table}{suffix}.usearch"
         import tempfile
 
-        return str(Path(tempfile.gettempdir()) / f"owcopilot_{id(self)}_{table}.usearch")
+        return str(
+            Path(tempfile.gettempdir()) / f"owcopilot_{id(self)}_{table}{suffix}.usearch"
+        )
 
     def _backfill_usearch(
         self,
@@ -965,20 +1280,25 @@ class SQLiteStore:
     def prune_vectors(
         self, model_id: str, keep_refs: set[str], *, table: str = "content_vectors"
     ) -> None:
-        """Drop cached vectors for refs no longer present, keeping the table in step."""
+        """Drop cached vectors for refs no longer present, keeping the table in step.
+
+        Scoped to the current (world_id, version): a reindex of one scope only prunes that scope's
+        cached vectors, never another scope's. Single-world default behaviour is unchanged."""
         table = _vectors_table(table)
         stale = [
             str(row["ref"])
             for row in self.conn.execute(
-                f"SELECT ref FROM {table} WHERE model_id = ?",
-                (model_id,),  # noqa: S608
+                f"SELECT ref FROM {table} "  # noqa: S608
+                f"WHERE model_id = ? AND world_id = ? AND version = ?",
+                (model_id, self.world_id, self.version),
             ).fetchall()
             if str(row["ref"]) not in keep_refs
         ]
         if stale:
             self.conn.executemany(
-                f"DELETE FROM {table} WHERE model_id = ? AND ref = ?",  # noqa: S608
-                [(model_id, ref) for ref in stale],
+                f"DELETE FROM {table} "  # noqa: S608
+                f"WHERE model_id = ? AND ref = ? AND world_id = ? AND version = ?",
+                [(model_id, ref, self.world_id, self.version) for ref in stale],
             )
             self.conn.commit()
 
@@ -1075,7 +1395,11 @@ class SQLiteStore:
         fingerprint already exists are skipped, new fingerprints are inserted, and fingerprints no
         longer present are deleted. The resulting row *set* is identical to the old
         drop-and-reinsert (same edges, same multiplicity); only the AUTOINCREMENT ``id`` values may
-        differ, and nothing reads that column. Runs in a single transaction."""
+        differ, and nothing reads that column. Runs in a single transaction.
+
+        Scale-P0 G2-C C1: the existing-fingerprint read and the removed DELETE are scope-filtered to
+        the current (world_id, version), and inserts stamp it — so a write to one scope never
+        deletes another scope's edges (INV-2). The fingerprint uniqueness is scope-qualified."""
         desired: dict[str, tuple[str, str, str, str, int | None, int | None]] = {}
         seen: dict[tuple[str, str, str, str, int | None, int | None], int] = {}
         for edge in graph.edge_refs():
@@ -1094,7 +1418,10 @@ class SQLiteStore:
 
         existing = {
             str(row["edge_fingerprint"])
-            for row in self.conn.execute("SELECT edge_fingerprint FROM graph_edges")
+            for row in self.conn.execute(
+                "SELECT edge_fingerprint FROM graph_edges WHERE world_id = ? AND version = ?",
+                (self.world_id, self.version),
+            )
         }
         removed = existing - desired.keys()
         added = desired.keys() - existing
@@ -1102,17 +1429,30 @@ class SQLiteStore:
         try:
             for fingerprint in sorted(removed):
                 self.conn.execute(
-                    "DELETE FROM graph_edges WHERE edge_fingerprint = ?", (fingerprint,)
+                    "DELETE FROM graph_edges "
+                    "WHERE edge_fingerprint = ? AND world_id = ? AND version = ?",
+                    (fingerprint, self.world_id, self.version),
                 )
             for fingerprint in sorted(added):
                 source, target, kind, edge_type, valid_from, valid_until = desired[fingerprint]
                 self.conn.execute(
                     """
                     INSERT INTO graph_edges (
-                        source, target, kind, edge_type, valid_from, valid_until, edge_fingerprint
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        source, target, kind, edge_type, valid_from, valid_until, edge_fingerprint,
+                        world_id, version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (source, target, kind, edge_type, valid_from, valid_until, fingerprint),
+                    (
+                        source,
+                        target,
+                        kind,
+                        edge_type,
+                        valid_from,
+                        valid_until,
+                        fingerprint,
+                        self.world_id,
+                        self.version,
+                    ),
                 )
         except Exception:
             self.conn.rollback()
@@ -1156,8 +1496,12 @@ class SQLiteStore:
         text_hash changed (or whose stored metadata/title differs) are re-chunked and re-inserted,
         and unchanged sources are left untouched.
 
-        The end state is identical to the old drop-and-reinsert: same reference_sources /
-        reference_chunks / reference_fts rows. Runs in a single transaction."""
+        For a single-scope (default) project the end state matches the old drop-and-reinsert:
+        same reference_sources / reference_chunks / reference_fts rows. One transaction.
+
+        Scale-P0 G2-C C1: every existing-source read and every delete is scope-filtered to the
+        current (world_id, version), and inserts stamp it — so a write to one scope never reads or
+        prunes another scope's reference rows (INV-2)."""
         source_titles = {source.id: source.title for source in sources}
         chunks_by_source: dict[str, list[Any]] = {}
         for chunk in chunks:
@@ -1166,7 +1510,7 @@ class SQLiteStore:
         # (text_hash, title, source_type, original_filename, allowed_uses, metadata, created_at) is
         # everything persisted for a source row; comparing the whole tuple means a metadata-only
         # edit re-syncs too, while a genuinely unchanged book is skipped. text_hash alone gates the
-        # expensive chunk work below.
+        # expensive chunk work below. Scoped to the current (world_id, version).
         existing_sources = {
             str(row["id"]): row
             for row in self.conn.execute(
@@ -1174,7 +1518,9 @@ class SQLiteStore:
                 SELECT id, title, source_type, original_filename, allowed_uses_json,
                        text_hash, metadata_json, created_at
                 FROM reference_sources
-                """
+                WHERE world_id = ? AND version = ?
+                """,
+                (self.world_id, self.version),
             )
         }
         desired_ids = {source.id for source in sources}
@@ -1196,11 +1542,13 @@ class SQLiteStore:
                 self.conn.execute(
                     """
                     INSERT INTO reference_sources (
-                        id, title, source_type, original_filename, allowed_uses_json,
-                        text_hash, metadata_json, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        world_id, version, id, title, source_type, original_filename,
+                        allowed_uses_json, text_hash, metadata_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        self.world_id,
+                        self.version,
                         source.id,
                         source.title,
                         source.source_type,
@@ -1216,10 +1564,13 @@ class SQLiteStore:
                     self.conn.execute(
                         """
                         INSERT INTO reference_chunks (
-                            ref, source_id, chunk_index, title, body, metadata_json
-                        ) VALUES (?, ?, ?, ?, ?, ?)
+                            world_id, version, ref, source_id, chunk_index, title, body,
+                            metadata_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
+                            self.world_id,
+                            self.version,
                             ref,
                             chunk.source_id,
                             chunk.chunk_index,
@@ -1230,13 +1581,16 @@ class SQLiteStore:
                     )
                     self.conn.execute(
                         """
-                        INSERT INTO reference_fts (ref, source_id, source_title, title, body)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO reference_fts (
+                            ref, source_id, source_title, world_id, version, title, body
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             ref,
                             chunk.source_id,
                             source_titles.get(chunk.source_id, ""),
+                            self.world_id,
+                            self.version,
                             chunk.title,
                             chunk.body,
                         ),
@@ -1247,17 +1601,31 @@ class SQLiteStore:
         self.conn.commit()
 
     def _delete_reference_source(self, source_id: str) -> None:
-        """Remove a reference source and its chunks + fts rows (plain fts5 needs manual deletes)."""
+        """Remove a reference source and its chunks + fts rows, **within the current scope only**
+        (plain fts5 needs manual deletes). Every delete is scope-filtered so pruning a source in one
+        scope cannot touch a same-id source in another scope (INV-2)."""
         chunk_refs = [
             str(row["ref"])
             for row in self.conn.execute(
-                "SELECT ref FROM reference_chunks WHERE source_id = ?", (source_id,)
+                "SELECT ref FROM reference_chunks "
+                "WHERE source_id = ? AND world_id = ? AND version = ?",
+                (source_id, self.world_id, self.version),
             )
         ]
         for ref in chunk_refs:
-            self.conn.execute("DELETE FROM reference_fts WHERE ref = ?", (ref,))
-        self.conn.execute("DELETE FROM reference_chunks WHERE source_id = ?", (source_id,))
-        self.conn.execute("DELETE FROM reference_sources WHERE id = ?", (source_id,))
+            self.conn.execute(
+                "DELETE FROM reference_fts WHERE ref = ? AND world_id = ? AND version = ?",
+                (ref, self.world_id, self.version),
+            )
+        self.conn.execute(
+            "DELETE FROM reference_chunks "
+            "WHERE source_id = ? AND world_id = ? AND version = ?",
+            (source_id, self.world_id, self.version),
+        )
+        self.conn.execute(
+            "DELETE FROM reference_sources WHERE id = ? AND world_id = ? AND version = ?",
+            (source_id, self.world_id, self.version),
+        )
 
     def list_reference_sources(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -1281,12 +1649,16 @@ class SQLiteStore:
         match_query = build_fts_match_query(query)
         if match_query is None:
             return self._fallback_reference_search(query, limit=limit)
+        # bm25 weights are positional, one per reference_fts column. Column order is now
+        # (ref, source_id, source_title, world_id, version, title, body) after the C1 scope columns
+        # were added, so the title boost (4.0) and body (1.0) weights moved to positions 6/7; the
+        # leading metadata columns stay at 0.0. Keeping this aligned preserves the original ranking.
         rows = self.conn.execute(
             """
             SELECT
                 f.ref, f.source_id, f.source_title, f.title, f.body,
                 c.chunk_index, c.metadata_json,
-                bm25(reference_fts, 0.0, 0.0, 4.0, 1.0) AS rank
+                bm25(reference_fts, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 1.0) AS rank
             FROM reference_fts AS f
             JOIN reference_chunks AS c ON c.ref = f.ref
             WHERE reference_fts MATCH ?

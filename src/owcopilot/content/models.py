@@ -52,6 +52,13 @@ class ProvenanceMixin(BaseModel):
     origin: Origin = Origin.HUMAN
     source_ref: SourceRef | None = None
     review_status: ReviewStatus = ReviewStatus.APPROVED
+    # Scale-P0 G2-C C1: the (world_id, version) scope is a *storage / sharding* dimension, NOT a
+    # content field. It is deliberately absent from the content models, so content files and their
+    # serialization (model_dump / content_hash / snapshot payloads / ContentStore.save round-trip)
+    # stay byte-for-byte identical to the pre-scope baseline. Sharding is applied at the SQLite
+    # layer: the store stamps its current scope (set by ProjectContext) onto each row on write, so
+    # no object ever carries world_id/version. (Entity keeps its own pre-existing free-text
+    # ``version`` field, which is content, not scope.)
 
 
 class Entity(ProvenanceMixin):

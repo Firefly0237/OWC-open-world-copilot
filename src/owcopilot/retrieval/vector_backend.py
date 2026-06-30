@@ -194,6 +194,49 @@ def sqlite_vec_available() -> bool:
     return True
 
 
+def _vec0_is_partitioned(conn: sqlite3.Connection, table: str) -> bool | None:
+    """Whether the existing vec0 ``table`` already has the scope PARTITION KEY columns.
+
+    Returns ``None`` when the table does not exist yet (a fresh DB). A legacy vec0 table built by
+    G2-A/B (pre-C1) has only ``ref``/``embedding``; the partitioned table additionally exposes
+    ``world_id``/``version`` columns, which is what this distinguishes."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    if exists is None:
+        return None
+    cols = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}  # noqa: S608
+    return "world_id" in cols and "version" in cols
+
+
+def _drop_unpartitioned_vec0(conn: sqlite3.Connection, table: str) -> None:
+    """Drop a legacy (pre-C1, un-partitioned) vec0 ``table`` so it is recreated with PARTITION KEYs.
+
+    The vec0 index is a *derived* structure: the authoritative fp32 vectors live in the
+    ``content_vectors`` / ``reference_vectors`` blob cache (which keeps its rows through the C1
+    migration), and the store re-backfills an empty vec0 table from that cache on first use. So
+    dropping a stale-schema index loses no data — it just forces a one-time rebuild under the new
+    partitioned schema. A fresh DB (table absent) is left alone."""
+    if _vec0_is_partitioned(conn, table) is False:
+        conn.execute(f"DROP TABLE IF EXISTS {table}")  # noqa: S608 - validated table name
+        conn.commit()
+
+
+def _plain_table_lacks_scope(conn: sqlite3.Connection, table: str) -> bool:
+    """Whether an existing *plain* (non-vec0) ``table`` predates the scope columns.
+
+    Used for the int8 backend's fp32 rerank sidecar and usearch's authority/keymap tables: a legacy
+    one has no ``world_id`` column. Returns ``False`` when the table is absent (a fresh DB needs no
+    drop) or already scoped."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    if exists is None:
+        return False
+    cols = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}  # noqa: S608
+    return "world_id" not in cols
+
+
 class SqliteVecBackend:
     """Disk-resident fp32 vector backend over a sqlite-vec ``vec0`` virtual table.
 
@@ -204,14 +247,30 @@ class SqliteVecBackend:
 
     The same SQLite connection that owns the rest of the runtime store is reused, so vec0 lives in
     the project DB alongside FTS5 and the ``content_vectors`` blob cache — one file, one transaction
-    boundary."""
+    boundary.
 
-    def __init__(self, conn: sqlite3.Connection, *, dim: int, table: str) -> None:
+    **Scale-P0 G2-C C1 scope.** The vec0 table carries ``world_id``/``version`` as sqlite-vec
+    ``PARTITION KEY`` columns, and this backend instance is bound to one ``(world_id, version)``
+    scope: every upsert stamps that scope, and every search/vector_for/count is constrained to it.
+    The default ("default", "v1") makes a single-world project's index byte-for-byte equivalent to
+    the pre-scope index. C1 only partitions the store; cross-scope reads are C2."""
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        dim: int,
+        table: str,
+        world_id: str = "default",
+        version: str = "v1",
+    ) -> None:
         if not isinstance(conn, sqlite3.Connection):  # defensive: keep the type contract explicit
             raise SqliteVecError("SqliteVecBackend requires a sqlite3.Connection")
         self._conn: sqlite3.Connection = conn
         self._dim = int(dim)
         self._table = table
+        self._world_id = world_id
+        self._version = version
         self._load_extension(conn)
         self._ensure_table()
 
@@ -241,35 +300,46 @@ class SqliteVecBackend:
                 pass
 
     def _ensure_table(self) -> None:
-        # vec0 virtual table; FLOAT[dim] = fp32, ref as the text primary key.
+        # vec0 virtual table; FLOAT[dim] = fp32, ref as the text primary key, world_id/version as
+        # PARTITION KEY columns so the scope-scoped KNN only scans the current scope's vectors.
+        _drop_unpartitioned_vec0(self._conn, self._table)
         self._conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS {self._table} "  # noqa: S608 - validated table name
-            f"USING vec0(ref TEXT PRIMARY KEY, embedding FLOAT[{self._dim}])"
+            f"USING vec0(world_id TEXT PARTITION KEY, version TEXT PARTITION KEY, "
+            f"ref TEXT PRIMARY KEY, embedding FLOAT[{self._dim}])"
         )
         self._conn.commit()
 
     def _count(self) -> int:
         row = self._conn.execute(
-            f"SELECT COUNT(*) FROM {self._table}"  # noqa: S608 - validated table name
+            f"SELECT COUNT(*) FROM {self._table} "  # noqa: S608 - validated table name
+            f"WHERE world_id = ? AND version = ?",
+            (self._world_id, self._version),
         ).fetchone()
         return int(row[0]) if row is not None else 0
 
     def upsert(self, ref: str, vector: np.ndarray) -> None:
         vec = _normalise(np.asarray(vector, dtype=np.float32))
         blob = np.ascontiguousarray(vec, dtype=np.float32).tobytes()
-        # DELETE + INSERT = idempotent replace (vec0 has no UPSERT on the rowid table).
+        # DELETE + INSERT = idempotent replace (vec0 has no UPSERT on the rowid table). Both are
+        # scoped to this backend's (world_id, version) partition.
         self._conn.execute(
-            f"DELETE FROM {self._table} WHERE ref = ?", (ref,)  # noqa: S608
+            f"DELETE FROM {self._table} "  # noqa: S608
+            f"WHERE ref = ? AND world_id = ? AND version = ?",
+            (ref, self._world_id, self._version),
         )
         self._conn.execute(
-            f"INSERT INTO {self._table}(ref, embedding) VALUES (?, ?)",  # noqa: S608
-            (ref, blob),
+            f"INSERT INTO {self._table}(world_id, version, ref, embedding) "  # noqa: S608
+            f"VALUES (?, ?, ?, ?)",
+            (self._world_id, self._version, ref, blob),
         )
         self._conn.commit()
 
     def delete(self, ref: str) -> None:
         self._conn.execute(
-            f"DELETE FROM {self._table} WHERE ref = ?", (ref,)  # noqa: S608
+            f"DELETE FROM {self._table} "  # noqa: S608
+            f"WHERE ref = ? AND world_id = ? AND version = ?",
+            (ref, self._world_id, self._version),
         )
         self._conn.commit()
 
@@ -282,16 +352,17 @@ class SqliteVecBackend:
         count = self._count()
         if count == 0:
             return []
-        # vec0 KNN gives candidates in cosine (==L2 for unit vectors) order. Pull every row (vec0 is
-        # an exact brute-force scan, so this is the same O(N) it already does) and recompute the
-        # exact dot product from the stored fp32 blobs. That makes scores bit-identical to the
-        # numpy backend and lets _rank apply the identical (score desc, ref asc) ordering — so the
-        # boundary ties and the `score > 0` filter the retriever applies cannot diverge.
+        # vec0 KNN gives candidates in cosine (==L2 for unit vectors) order. Pull every row in this
+        # scope partition (vec0 is an exact brute-force scan, so this is the same O(N) it already
+        # does over the partition) and recompute the exact dot product from the stored fp32 blobs.
+        # That makes scores bit-identical to the numpy backend and lets _rank apply the identical
+        # (score desc, ref asc) ordering — so boundary ties and the retriever's `score > 0` filter
+        # cannot diverge.
         qblob = np.ascontiguousarray(q, dtype=np.float32).tobytes()
         rows = self._conn.execute(
             f"SELECT ref, embedding FROM {self._table} "  # noqa: S608 - validated table name
-            f"WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (qblob, count),
+            f"WHERE world_id = ? AND version = ? AND embedding MATCH ? AND k = ? ORDER BY distance",
+            (self._world_id, self._version, qblob, count),
         ).fetchall()
         scored: list[tuple[str, float]] = []
         for row in rows:
@@ -302,14 +373,20 @@ class SqliteVecBackend:
 
     def vector_for(self, ref: str) -> np.ndarray | None:
         row = self._conn.execute(
-            f"SELECT embedding FROM {self._table} WHERE ref = ?", (ref,)  # noqa: S608
+            f"SELECT embedding FROM {self._table} "  # noqa: S608
+            f"WHERE ref = ? AND world_id = ? AND version = ?",
+            (ref, self._world_id, self._version),
         ).fetchone()
         if row is None:
             return None
         return np.frombuffer(bytes(row[0]), dtype=np.float32)
 
     def clear(self) -> None:
-        self._conn.execute(f"DELETE FROM {self._table}")  # noqa: S608 - validated table name
+        self._conn.execute(
+            f"DELETE FROM {self._table} "  # noqa: S608 - validated table name
+            f"WHERE world_id = ? AND version = ?",
+            (self._world_id, self._version),
+        )
         self._conn.commit()
 
 
@@ -337,34 +414,59 @@ class SqliteVecInt8Backend:
     (recall@10 ~0.999). Ordering matches the fp32 backend: score desc, ref asc on ties.
 
     Quantised int8 KNN needs the query wrapped in the ``vec_int8(?)`` constructor (sqlite-vec
-    rejects a raw float32 blob against an ``INT8`` column); the rerank uses the fp32 query."""
+    rejects a raw float32 blob against an ``INT8`` column); the rerank uses the fp32 query.
 
-    def __init__(self, conn: sqlite3.Connection, *, dim: int, table: str) -> None:
+    **Scale-P0 G2-C C1 scope.** The int8 vec0 table carries ``world_id``/``version`` PARTITION KEY
+    columns and the fp32 rerank sidecar keys on ``(world_id, version, ref)``; the instance is bound
+    to one scope. The default ("default", "v1") leaves a single-world index equivalent to the
+    pre-scope one."""
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        dim: int,
+        table: str,
+        world_id: str = "default",
+        version: str = "v1",
+    ) -> None:
         if not isinstance(conn, sqlite3.Connection):  # defensive: keep the type contract explicit
             raise SqliteVecError("SqliteVecInt8Backend requires a sqlite3.Connection")
         self._conn: sqlite3.Connection = conn
         self._dim = int(dim)
         self._table = table
         self._fp32_table = f"{table}_fp32"
+        self._world_id = world_id
+        self._version = version
         SqliteVecBackend._load_extension(conn)
         self._ensure_tables()
 
     def _ensure_tables(self) -> None:
-        # int8 coarse index. INT8[dim] = one signed byte per component.
+        # int8 coarse index. INT8[dim] = one signed byte per component, scope as PARTITION KEYs.
+        _drop_unpartitioned_vec0(self._conn, self._table)
         self._conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS {self._table} "  # noqa: S608 - validated name
-            f"USING vec0(ref TEXT PRIMARY KEY, embedding INT8[{self._dim}])"
+            f"USING vec0(world_id TEXT PARTITION KEY, version TEXT PARTITION KEY, "
+            f"ref TEXT PRIMARY KEY, embedding INT8[{self._dim}])"
         )
-        # fp32 rerank source: the exact unit vectors, one row per ref.
+        # fp32 rerank source: the exact unit vectors, keyed by (scope, ref) so the same ref can
+        # live in distinct scopes. A legacy pre-C1 sidecar (PK = ref only) is dropped and rebuilt
+        # from the blob cache, the same derived-index reasoning as the vec0 table.
+        if _plain_table_lacks_scope(self._conn, self._fp32_table):
+            self._conn.execute(f"DROP TABLE IF EXISTS {self._fp32_table}")  # noqa: S608
         self._conn.execute(
             f"CREATE TABLE IF NOT EXISTS {self._fp32_table} ("  # noqa: S608 - validated name
-            f"ref TEXT PRIMARY KEY, embedding BLOB NOT NULL)"
+            f"world_id TEXT NOT NULL DEFAULT 'default', version TEXT NOT NULL DEFAULT 'v1', "
+            f"ref TEXT NOT NULL, embedding BLOB NOT NULL, "
+            f"PRIMARY KEY (world_id, version, ref))"
         )
         self._conn.commit()
 
     def _count(self) -> int:
         row = self._conn.execute(
-            f"SELECT COUNT(*) FROM {self._table}"  # noqa: S608 - validated table name
+            f"SELECT COUNT(*) FROM {self._table} "  # noqa: S608 - validated table name
+            f"WHERE world_id = ? AND version = ?",
+            (self._world_id, self._version),
         ).fetchone()
         return int(row[0]) if row is not None else 0
 
@@ -373,27 +475,35 @@ class SqliteVecInt8Backend:
         qblob = np.ascontiguousarray(quantise_int8(vec), dtype=np.int8).tobytes()
         fblob = np.ascontiguousarray(vec, dtype=np.float32).tobytes()
         # DELETE + INSERT = idempotent replace (vec0 has no UPSERT on the rowid table); the fp32
-        # sidecar mirrors the same ref so the two tables never drift.
+        # sidecar mirrors the same (scope, ref) so the two tables never drift.
         self._conn.execute(
-            f"DELETE FROM {self._table} WHERE ref = ?", (ref,)  # noqa: S608
+            f"DELETE FROM {self._table} "  # noqa: S608
+            f"WHERE ref = ? AND world_id = ? AND version = ?",
+            (ref, self._world_id, self._version),
         )
         self._conn.execute(
-            f"INSERT INTO {self._table}(ref, embedding) VALUES (?, vec_int8(?))",  # noqa: S608
-            (ref, qblob),
+            f"INSERT INTO {self._table}(world_id, version, ref, embedding) "  # noqa: S608
+            f"VALUES (?, ?, ?, vec_int8(?))",
+            (self._world_id, self._version, ref, qblob),
         )
         self._conn.execute(
-            f"INSERT INTO {self._fp32_table}(ref, embedding) VALUES (?, ?) "  # noqa: S608
-            f"ON CONFLICT(ref) DO UPDATE SET embedding = excluded.embedding",
-            (ref, fblob),
+            f"INSERT INTO {self._fp32_table}(world_id, version, ref, embedding) "  # noqa: S608
+            f"VALUES (?, ?, ?, ?) "
+            f"ON CONFLICT(world_id, version, ref) DO UPDATE SET embedding = excluded.embedding",
+            (self._world_id, self._version, ref, fblob),
         )
         self._conn.commit()
 
     def delete(self, ref: str) -> None:
         self._conn.execute(
-            f"DELETE FROM {self._table} WHERE ref = ?", (ref,)  # noqa: S608
+            f"DELETE FROM {self._table} "  # noqa: S608
+            f"WHERE ref = ? AND world_id = ? AND version = ?",
+            (ref, self._world_id, self._version),
         )
         self._conn.execute(
-            f"DELETE FROM {self._fp32_table} WHERE ref = ?", (ref,)  # noqa: S608
+            f"DELETE FROM {self._fp32_table} "  # noqa: S608
+            f"WHERE ref = ? AND world_id = ? AND version = ?",
+            (ref, self._world_id, self._version),
         )
         self._conn.commit()
 
@@ -406,13 +516,15 @@ class SqliteVecInt8Backend:
         count = self._count()
         if count == 0:
             return []
-        # Stage ①: int8 coarse KNN over k' = max(3*limit, floor) candidates (capped at corpus size).
+        # Stage ①: int8 coarse KNN over k' = max(3*limit, floor) candidates (capped at corpus size),
+        # constrained to this scope partition.
         k = min(count, max(_INT8_COARSE_MULTIPLIER * limit, _INT8_COARSE_FLOOR))
         qint8 = np.ascontiguousarray(quantise_int8(q), dtype=np.int8).tobytes()
         candidates = self._conn.execute(
             f"SELECT ref FROM {self._table} "  # noqa: S608 - validated table name
-            f"WHERE embedding MATCH vec_int8(?) AND k = ? ORDER BY distance",
-            (qint8, k),
+            f"WHERE world_id = ? AND version = ? AND embedding MATCH vec_int8(?) AND k = ? "
+            f"ORDER BY distance",
+            (self._world_id, self._version, qint8, k),
         ).fetchall()
         if not candidates:
             return []
@@ -423,8 +535,8 @@ class SqliteVecInt8Backend:
         placeholders = ",".join("?" for _ in refs)
         fp32_rows = self._conn.execute(
             f"SELECT ref, embedding FROM {self._fp32_table} "  # noqa: S608 - validated name
-            f"WHERE ref IN ({placeholders})",
-            refs,
+            f"WHERE world_id = ? AND version = ? AND ref IN ({placeholders})",
+            (self._world_id, self._version, *refs),
         ).fetchall()
         scored: list[tuple[str, float]] = []
         for row in fp32_rows:
@@ -434,16 +546,25 @@ class SqliteVecInt8Backend:
 
     def vector_for(self, ref: str) -> np.ndarray | None:
         row = self._conn.execute(
-            f"SELECT embedding FROM {self._fp32_table} WHERE ref = ?",  # noqa: S608
-            (ref,),
+            f"SELECT embedding FROM {self._fp32_table} "  # noqa: S608
+            f"WHERE ref = ? AND world_id = ? AND version = ?",
+            (ref, self._world_id, self._version),
         ).fetchone()
         if row is None:
             return None
         return np.frombuffer(bytes(row[0]), dtype=np.float32)
 
     def clear(self) -> None:
-        self._conn.execute(f"DELETE FROM {self._table}")  # noqa: S608 - validated table name
-        self._conn.execute(f"DELETE FROM {self._fp32_table}")  # noqa: S608 - validated name
+        self._conn.execute(
+            f"DELETE FROM {self._table} "  # noqa: S608 - validated table name
+            f"WHERE world_id = ? AND version = ?",
+            (self._world_id, self._version),
+        )
+        self._conn.execute(
+            f"DELETE FROM {self._fp32_table} "  # noqa: S608 - validated name
+            f"WHERE world_id = ? AND version = ?",
+            (self._world_id, self._version),
+        )
         self._conn.commit()
 
 
@@ -542,7 +663,14 @@ class UsearchBackend:
     these values)."""
 
     def __init__(
-        self, conn: sqlite3.Connection, *, dim: int, table: str, index_path: str
+        self,
+        conn: sqlite3.Connection,
+        *,
+        dim: int,
+        table: str,
+        index_path: str,
+        world_id: str = "default",
+        version: str = "v1",
     ) -> None:
         if not isinstance(conn, sqlite3.Connection):  # defensive: keep the type contract explicit
             raise UsearchError("UsearchBackend requires a sqlite3.Connection")
@@ -558,6 +686,12 @@ class UsearchBackend:
         self._dim = int(dim)
         self._fp32_table = f"{table}_fp32"
         self._keymap_table = f"{table}_keymap"
+        # Scale-P0 G2-C C1: one backend instance == one (world_id, version) scope. The fp32
+        # authority + keymap tables carry the scope columns and every read/write is constrained to
+        # this scope; the .usearch file is per-scope (the store names it with the scope), so each
+        # scope's HNSW is isolated. The default ("default", "v1") keeps a single-world index intact.
+        self._world_id = world_id
+        self._version = version
         self._index_path = index_path
         self._ensure_tables()
         self._index = self._open_or_rebuild_index()
@@ -576,21 +710,35 @@ class UsearchBackend:
         )
 
     def _ensure_tables(self) -> None:
-        # fp32 authority: exact unit vectors, one row per ref.
+        # fp32 authority: exact unit vectors, keyed by (scope, ref). Legacy pre-C1 tables (PK = ref
+        # / ref UNIQUE) are dropped and rebuilt — they are derived from the blob cache the store
+        # backfills, so a one-time rebuild loses no canonical data.
+        if _plain_table_lacks_scope(self._conn, self._fp32_table):
+            self._conn.execute(f"DROP TABLE IF EXISTS {self._fp32_table}")  # noqa: S608
+        if _plain_table_lacks_scope(self._conn, self._keymap_table):
+            self._conn.execute(f"DROP TABLE IF EXISTS {self._keymap_table}")  # noqa: S608
         self._conn.execute(
             f"CREATE TABLE IF NOT EXISTS {self._fp32_table} ("  # noqa: S608 - validated name
-            f"ref TEXT PRIMARY KEY, embedding BLOB NOT NULL)"
+            f"world_id TEXT NOT NULL DEFAULT 'default', version TEXT NOT NULL DEFAULT 'v1', "
+            f"ref TEXT NOT NULL, embedding BLOB NOT NULL, "
+            f"PRIMARY KEY (world_id, version, ref))"
         )
-        # ref <-> uint64 key map. key is the PK (usearch's handle); ref is unique (one key per ref).
+        # ref <-> uint64 key map. key is the global PK (usearch's handle, unique across scopes);
+        # (scope, ref) is unique (one key per ref within a scope).
         self._conn.execute(
             f"CREATE TABLE IF NOT EXISTS {self._keymap_table} ("  # noqa: S608 - validated name
-            f"key INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE)"
+            f"key INTEGER PRIMARY KEY, "
+            f"world_id TEXT NOT NULL DEFAULT 'default', version TEXT NOT NULL DEFAULT 'v1', "
+            f"ref TEXT NOT NULL, UNIQUE(world_id, version, ref))"
         )
         self._conn.commit()
 
     def _keymap_count(self) -> int:
+        """Count of keys for *this scope* — what the per-scope .usearch index should hold."""
         row = self._conn.execute(
-            f"SELECT COUNT(*) FROM {self._keymap_table}"  # noqa: S608 - validated name
+            f"SELECT COUNT(*) FROM {self._keymap_table} "  # noqa: S608 - validated name
+            f"WHERE world_id = ? AND version = ?",
+            (self._world_id, self._version),
         ).fetchone()
         return int(row[0]) if row is not None else 0
 
@@ -633,7 +781,10 @@ class UsearchBackend:
         index = self._new_index()
         rows = self._conn.execute(
             f"SELECT m.key, f.embedding FROM {self._keymap_table} AS m "  # noqa: S608
-            f"JOIN {self._fp32_table} AS f ON f.ref = m.ref"
+            f"JOIN {self._fp32_table} AS f "
+            f"ON f.ref = m.ref AND f.world_id = m.world_id AND f.version = m.version "
+            f"WHERE m.world_id = ? AND m.version = ?",
+            (self._world_id, self._version),
         ).fetchall()
         if rows:
             keys = np.fromiter((int(r[0]) for r in rows), dtype=np.uint64, count=len(rows))
@@ -655,8 +806,9 @@ class UsearchBackend:
 
     def _key_for_ref(self, ref: str) -> int | None:
         row = self._conn.execute(
-            f"SELECT key FROM {self._keymap_table} WHERE ref = ?",  # noqa: S608 - validated name
-            (ref,),
+            f"SELECT key FROM {self._keymap_table} "  # noqa: S608 - validated name
+            f"WHERE ref = ? AND world_id = ? AND version = ?",
+            (ref, self._world_id, self._version),
         ).fetchone()
         return None if row is None else int(row[0])
 
@@ -670,7 +822,10 @@ class UsearchBackend:
         existing = self._key_for_ref(ref)
         if existing is not None:
             return existing
-        key = _ref_to_key(ref)
+        # ``key`` is the global PK (unique across scopes), so the collision probe scans all scopes;
+        # the proposed start folds the scope into the hash so the same ref in two scopes prefers
+        # distinct keys (and a per-scope .usearch index only ever sees its own scope's keys).
+        key = _ref_to_key(f"{self._world_id}\x00{self._version}\x00{ref}")
         while (
             self._conn.execute(
                 f"SELECT 1 FROM {self._keymap_table} WHERE key = ?",  # noqa: S608 - validated name
@@ -680,8 +835,9 @@ class UsearchBackend:
         ):
             key = (key + 1) % _KEY_SPACE
         self._conn.execute(
-            f"INSERT INTO {self._keymap_table}(key, ref) VALUES (?, ?)",  # noqa: S608
-            (key, ref),
+            f"INSERT INTO {self._keymap_table}(key, world_id, version, ref) "  # noqa: S608
+            f"VALUES (?, ?, ?, ?)",
+            (key, self._world_id, self._version, ref),
         )
         return key
 
@@ -694,9 +850,10 @@ class UsearchBackend:
         # HNSW. usearch raises on a duplicate key, so an existing key is removed before re-adding —
         # that makes upsert an idempotent replace.
         self._conn.execute(
-            f"INSERT INTO {self._fp32_table}(ref, embedding) VALUES (?, ?) "  # noqa: S608
-            f"ON CONFLICT(ref) DO UPDATE SET embedding = excluded.embedding",
-            (ref, fblob),
+            f"INSERT INTO {self._fp32_table}(world_id, version, ref, embedding) "  # noqa: S608
+            f"VALUES (?, ?, ?, ?) "
+            f"ON CONFLICT(world_id, version, ref) DO UPDATE SET embedding = excluded.embedding",
+            (self._world_id, self._version, ref, fblob),
         )
         key = self._assign_key(ref)
         self._conn.commit()
@@ -709,10 +866,14 @@ class UsearchBackend:
     def delete(self, ref: str) -> None:
         key = self._key_for_ref(ref)
         self._conn.execute(
-            f"DELETE FROM {self._fp32_table} WHERE ref = ?", (ref,)  # noqa: S608
+            f"DELETE FROM {self._fp32_table} "  # noqa: S608
+            f"WHERE ref = ? AND world_id = ? AND version = ?",
+            (ref, self._world_id, self._version),
         )
         self._conn.execute(
-            f"DELETE FROM {self._keymap_table} WHERE ref = ?", (ref,)  # noqa: S608
+            f"DELETE FROM {self._keymap_table} "  # noqa: S608
+            f"WHERE ref = ? AND world_id = ? AND version = ?",
+            (ref, self._world_id, self._version),
         )
         self._conn.commit()
         if key is not None and self._index.contains(np.uint64(key)):
@@ -740,9 +901,10 @@ class UsearchBackend:
         placeholders = ",".join("?" for _ in keys)
         rows = self._conn.execute(
             f"SELECT m.ref, f.embedding FROM {self._keymap_table} AS m "  # noqa: S608
-            f"JOIN {self._fp32_table} AS f ON f.ref = m.ref "
-            f"WHERE m.key IN ({placeholders})",
-            keys,
+            f"JOIN {self._fp32_table} AS f "
+            f"ON f.ref = m.ref AND f.world_id = m.world_id AND f.version = m.version "
+            f"WHERE m.world_id = ? AND m.version = ? AND m.key IN ({placeholders})",
+            (self._world_id, self._version, *keys),
         ).fetchall()
         scored: list[tuple[str, float]] = []
         for row in rows:
@@ -752,16 +914,25 @@ class UsearchBackend:
 
     def vector_for(self, ref: str) -> np.ndarray | None:
         row = self._conn.execute(
-            f"SELECT embedding FROM {self._fp32_table} WHERE ref = ?",  # noqa: S608
-            (ref,),
+            f"SELECT embedding FROM {self._fp32_table} "  # noqa: S608
+            f"WHERE ref = ? AND world_id = ? AND version = ?",
+            (ref, self._world_id, self._version),
         ).fetchone()
         if row is None:
             return None
         return np.frombuffer(bytes(row[0]), dtype=np.float32)
 
     def clear(self) -> None:
-        self._conn.execute(f"DELETE FROM {self._fp32_table}")  # noqa: S608 - validated name
-        self._conn.execute(f"DELETE FROM {self._keymap_table}")  # noqa: S608 - validated name
+        self._conn.execute(
+            f"DELETE FROM {self._fp32_table} "  # noqa: S608 - validated name
+            f"WHERE world_id = ? AND version = ?",
+            (self._world_id, self._version),
+        )
+        self._conn.execute(
+            f"DELETE FROM {self._keymap_table} "  # noqa: S608 - validated name
+            f"WHERE world_id = ? AND version = ?",
+            (self._world_id, self._version),
+        )
         self._conn.commit()
         self._index = self._new_index()
         self._persist(self._index)

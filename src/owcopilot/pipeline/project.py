@@ -20,6 +20,12 @@ from ..retrieval.graph_expand import GraphExpansionRetriever
 from ..retrieval.vector import VectorRetriever
 from ..storage import SQLiteStore
 
+# Scale-P0 G2-C C1: the canonical default scope. A project opened without an explicit scope lives
+# entirely under ("default", "v1") and behaves byte-for-byte as before. C1 only threads the
+# dimension; scope-aware retrieval/audit is C2, version inheritance C3.
+DEFAULT_WORLD_ID = "default"
+DEFAULT_VERSION = "v1"
+
 
 @dataclass
 class ProjectContext:
@@ -33,6 +39,11 @@ class ProjectContext:
     reference_store: ReferenceStore
     reference_context_builder: ReferenceContextBuilder
     embedder: Embedder
+    # The project's current (world_id, version) scope. Defaults to the canonical scope so existing
+    # single-world projects are unchanged. The store is pointed at this scope, which stamps every
+    # write and (from C2) will filter reads.
+    world_id: str = DEFAULT_WORLD_ID
+    version: str = DEFAULT_VERSION
 
     @classmethod
     def open(
@@ -41,10 +52,12 @@ class ProjectContext:
         *,
         sqlite_path: str | Path = ":memory:",
         embedder: Embedder | None = None,
+        world_id: str = DEFAULT_WORLD_ID,
+        version: str = DEFAULT_VERSION,
     ) -> ProjectContext:
         root = Path(content_root)
         content_store = ContentStore(root)
-        sqlite_store = SQLiteStore(sqlite_path)
+        sqlite_store = SQLiteStore(sqlite_path, world_id=world_id, version=version)
         bundle = content_store.load()
         graph = build_content_graph(bundle)
         sqlite_store.replace_content_index(bundle)
@@ -71,6 +84,8 @@ class ProjectContext:
             reference_store=reference_store,
             reference_context_builder=ReferenceContextBuilder(sqlite_store, embedder=embedder),
             embedder=embedder,
+            world_id=world_id,
+            version=version,
         )
 
     def qa_context_builder(self) -> ContextPackBuilder:
