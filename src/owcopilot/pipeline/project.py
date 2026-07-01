@@ -58,7 +58,12 @@ class ProjectContext:
         root = Path(content_root)
         content_store = ContentStore(root)
         sqlite_store = SQLiteStore(sqlite_path, world_id=world_id, version=version)
-        bundle = content_store.load()
+        # Scale-P0 G2-C C3c: load the *effective* bundle for this (world, version) scope via the
+        # copy-on-write overlay (C3a). The graph, audit and impact analysis then all run on the
+        # current version's effective content, not the whole multi-version tree -- the audit/impact
+        # reduce-N that C2 deferred. The default scope has no version overlay, so load_scoped equals
+        # load() and single-world behaviour is byte-identical.
+        bundle = content_store.load_scoped(world_id=world_id, version=version)
         graph = build_content_graph(bundle)
         sqlite_store.replace_content_index(bundle)
         sqlite_store.replace_graph_edges(graph)
@@ -103,7 +108,8 @@ class ProjectContext:
         )
 
     def reload(self) -> None:
-        self.bundle = self.content_store.load()
+        # C3c: re-resolve the effective bundle for the current scope (see open()).
+        self.bundle = self.content_store.load_scoped(world_id=self.world_id, version=self.version)
         self.graph = build_content_graph(self.bundle)
         self.sqlite_store.replace_content_index(self.bundle)
         self.sqlite_store.replace_graph_edges(self.graph)
