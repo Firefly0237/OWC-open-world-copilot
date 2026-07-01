@@ -138,6 +138,20 @@ class ContentStore:
         base = data.get("base_version")
         return str(base) if base else None
 
+    def common_base_version(self, a: str, b: str) -> str:
+        """The merge base of two versions: the deepest version common to both base chains.
+
+        Scale-P0 G2-C C4c: each chain runs baseline -> ... -> version, so the common prefix's last
+        element is the nearest shared ancestor (the baseline ``v1`` at worst)."""
+        chain_a = self._resolve_version_chain(a)
+        chain_b = self._resolve_version_chain(b)
+        common = _BASELINE_VERSION
+        for va, vb in zip(chain_a, chain_b, strict=False):
+            if va != vb:
+                break
+            common = va
+        return common
+
     def _load_tombstones(self, version: str) -> set[str]:
         """The ``"kind:id"`` entries a derived version deletes from its base (``[]`` if none)."""
         path = self.root / "versions" / version / "tombstones.json"

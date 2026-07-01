@@ -198,6 +198,80 @@ def version_diff(
     return bundle_diff(old, new)
 
 
+class MergeConflict(BaseModel):
+    kind: str
+    id: str
+    reason: str  # "add-add" | "both-changed" | "modify-delete"
+
+
+class MergeResult(BaseModel):
+    merged: ContentBundle
+    conflicts: list[MergeConflict] = Field(default_factory=list)
+
+
+_MERGE_DICT_KINDS = (
+    ("entity", "entities"),
+    ("region", "regions"),
+    ("quest", "quests"),
+    ("poi", "pois"),
+    ("dialogue", "dialogues"),
+    ("dialogue_tree", "dialogue_trees"),
+    ("localized_text", "localized_texts"),
+    ("term", "terms"),
+    ("style_guide", "style_guides"),
+    ("quest_event_ref", "quest_event_refs"),
+)
+
+
+def merge_versions(
+    store: ContentStore, *, ours: str, theirs: str, world_id: str = "default"
+) -> MergeResult:
+    """Three-way merge of version ``theirs`` into ``ours`` over their common base (C4c).
+
+    For each object: if both sides agree, or only one side changed vs the merge base, that value is
+    taken automatically; if both sides changed it differently (add/add, both-changed, or
+    modify/delete) it is a CONFLICT -- collected, never auto-applied. ``merged`` carries every
+    non-conflicting resolution (a conflict keeps ``ours`` as a placeholder); relations are unioned.
+    Nothing is written to canon: the caller reviews the conflicts and persists via ``save_scoped`` +
+    the review queue, so human review stays the only canon-write path."""
+    base = store.load_scoped(world_id=world_id, version=store.common_base_version(ours, theirs))
+    ours_b = store.load_scoped(world_id=world_id, version=ours)
+    theirs_b = store.load_scoped(world_id=world_id, version=theirs)
+    merged = ContentBundle()
+    conflicts: list[MergeConflict] = []
+    for kind, attr in _MERGE_DICT_KINDS:
+        base_map = getattr(base, attr)
+        ours_map = getattr(ours_b, attr)
+        theirs_map = getattr(theirs_b, attr)
+        out = getattr(merged, attr)
+        for oid in set(base_map) | set(ours_map) | set(theirs_map):
+            bo, oo, to = base_map.get(oid), ours_map.get(oid), theirs_map.get(oid)
+            if oo == to:  # both sides agree (same value, or both absent)
+                resolved = oo
+            elif to == bo:  # theirs unchanged vs base -> take ours
+                resolved = oo
+            elif oo == bo:  # ours unchanged vs base -> take theirs
+                resolved = to
+            else:  # both changed the object differently -> conflict, keep ours as placeholder
+                reason = (
+                    "add-add"
+                    if bo is None
+                    else "modify-delete"
+                    if oo is None or to is None
+                    else "both-changed"
+                )
+                conflicts.append(MergeConflict(kind=kind, id=oid, reason=reason))
+                resolved = oo
+            if resolved is not None:
+                out[oid] = resolved
+    merged.relations = list(ours_b.relations)
+    seen = {_rel_sig(r.model_dump(mode="json")) for r in merged.relations}
+    for rel in theirs_b.relations:
+        if _rel_sig(rel.model_dump(mode="json")) not in seen:
+            merged.relations.append(rel)
+    return MergeResult(merged=merged, conflicts=conflicts)
+
+
 def _diff_relations(
     old_json: dict[str, Any],
     new_json: dict[str, Any],
