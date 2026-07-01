@@ -182,23 +182,106 @@ class ContentStore:
             if coll is not None:
                 coll.pop(oid, None)
 
+    def create_version(self, version: str, *, base_version: str = _BASELINE_VERSION) -> None:
+        """Branch a derived ``version`` from ``base_version`` (copy-on-write: no content copied).
+
+        Writes only ``versions/<version>/version.json`` recording the base; the override dir starts
+        empty, so ``load_scoped(version=<version>)`` immediately equals its base until content is
+        saved into it. Refuses the baseline name, an existing version, an unknown base, or a base
+        cycle -- keeping ``_resolve_version_chain`` acyclic by construction."""
+        if version == _BASELINE_VERSION:
+            raise ValueError(f"{_BASELINE_VERSION!r} is the baseline version and cannot be created")
+        _validate_id_chars(version, context="create_version", forbidden=_FORBIDDEN_ID_CHARS)
+        vdir = self.root / "versions" / version
+        if (vdir / "version.json").exists():
+            raise ValueError(f"version {version!r} already exists")
+        if (
+            base_version != _BASELINE_VERSION
+            and not (self.root / "versions" / base_version / "version.json").exists()
+        ):
+            raise ValueError(f"base version {base_version!r} does not exist")
+        if version in self._resolve_version_chain(base_version):
+            raise ValueError(f"creating {version!r} on base {base_version!r} would form a cycle")
+        vdir.mkdir(parents=True, exist_ok=True)
+        (vdir / "version.json").write_text(
+            _json({"version": version, "base_version": base_version}), encoding="utf-8"
+        )
+        self._parse_cache.clear()
+
+    def save_scoped(self, bundle: ContentBundle, *, version: str = _BASELINE_VERSION) -> None:
+        """Persist ``bundle`` as ``version``, writing only its diff from the base (copy-on-write).
+
+        Baseline ``v1`` writes the whole bundle to the root tree (== ``save``). A derived version
+        writes to ``versions/<version>/`` only objects that differ from / are new vs its resolved
+        base, plus a ``tombstones.json`` for base objects the bundle drops -- so an unchanged object
+        is never duplicated into the override, and ``load_scoped(version=version)`` round-trips the
+        saved bundle. (Removing a *relation* present in the base is not yet supported; relations
+        union -- a later refinement, matching the overlay.)"""
+        if version == _BASELINE_VERSION:
+            self.save(bundle)
+            return
+        if not (self.root / "versions" / version / "version.json").exists():
+            raise ValueError(f"version {version!r} does not exist; call create_version first")
+        base = self.load_scoped(version=self._version_base(version) or _BASELINE_VERSION)
+        diff, tombstones = self._diff_bundle(bundle, base)
+        self._parse_cache.clear()
+        self._write_bundle_to(self.root / "versions" / version, diff)
+        (self.root / "versions" / version / "tombstones.json").write_text(
+            _json(sorted(tombstones)), encoding="utf-8"
+        )
+
+    def _diff_bundle(
+        self, bundle: ContentBundle, base: ContentBundle
+    ) -> tuple[ContentBundle, list[str]]:
+        """Copy-on-write diff of ``bundle`` vs ``base``: a bundle of only the overridden/new
+        objects, and the ``"kind:id"`` tombstones for base objects ``bundle`` drops."""
+        diff = ContentBundle()
+        tombstones: list[str] = []
+        dict_kinds = (
+            ("entity", "entities"),
+            ("region", "regions"),
+            ("quest", "quests"),
+            ("poi", "pois"),
+            ("dialogue", "dialogues"),
+            ("dialogue_tree", "dialogue_trees"),
+            ("localized_text", "localized_texts"),
+            ("term", "terms"),
+            ("style_guide", "style_guides"),
+            ("quest_event_ref", "quest_event_refs"),
+        )
+        for kind, attr in dict_kinds:
+            current: dict[str, Any] = getattr(bundle, attr)
+            base_coll: dict[str, Any] = getattr(base, attr)
+            override = {oid: obj for oid, obj in current.items() if base_coll.get(oid) != obj}
+            getattr(diff, attr).update(override)
+            tombstones += [f"{kind}:{oid}" for oid in base_coll if oid not in current]
+        diff.relations = [r for r in bundle.relations if r not in base.relations]
+        return diff, tombstones
+
     def save(self, bundle: ContentBundle) -> None:
         # A save rewrites files in place; mtime_ns + size usually shifts, but an edit that preserves
         # both on a same-second filesystem could otherwise let the parse cache serve the pre-save
         # value. save() is rare relative to load(), so drop the whole cache and let the next load
         # re-stat -- correctness over a micro-optimisation on the write path.
         self._parse_cache.clear()
-        self._write_json_dir(self.root / "world" / "entities", bundle.entities)
-        self._write_relations(bundle.relations)
-        self._write_quest_event_refs(bundle.quest_event_refs)
-        self._write_json_dir(self.root / "regions", bundle.regions)
-        self._write_json_dir(self.root / "quests", bundle.quests)
-        self._write_json_dir(self.root / "pois", bundle.pois)
-        self._write_json_dir(self.root / "dialogues", bundle.dialogues)
-        self._write_json_dir(self.root / "dialogues" / "trees", bundle.dialogue_trees)
-        self._write_json_dir(self.root / "localization" / "texts", bundle.localized_texts)
-        self._write_terms(bundle.terms)
-        self._write_style_guides(bundle.style_guides)
+        self._write_bundle_to(self.root, bundle)
+
+    def _write_bundle_to(self, root: Path, bundle: ContentBundle) -> None:
+        """Write a full ``ContentBundle`` to an arbitrary content root (baseline or a version dir).
+
+        Scale-P0 G2-C C3b: factored out of ``save`` so ``save_scoped`` can write a version's
+        override tree through the same writers. For ``self.root`` this is the pre-C3 ``save``."""
+        self._write_json_dir(root / "world" / "entities", bundle.entities)
+        self._write_relations(root, bundle.relations)
+        self._write_quest_event_refs(root, bundle.quest_event_refs)
+        self._write_json_dir(root / "regions", bundle.regions)
+        self._write_json_dir(root / "quests", bundle.quests)
+        self._write_json_dir(root / "pois", bundle.pois)
+        self._write_json_dir(root / "dialogues", bundle.dialogues)
+        self._write_json_dir(root / "dialogues" / "trees", bundle.dialogue_trees)
+        self._write_json_dir(root / "localization" / "texts", bundle.localized_texts)
+        self._write_terms(root, bundle.terms)
+        self._write_style_guides(root, bundle.style_guides)
 
     def exists(self) -> bool:
         return self.root.exists()
@@ -326,30 +409,30 @@ class ContentStore:
             resolve_under_root(self.root, target)
             self._write_json(target, model)
 
-    def _write_relations(self, relations: list[Relation]) -> None:
-        path = self.root / "world" / "relations.jsonl"
+    def _write_relations(self, root: Path, relations: list[Relation]) -> None:
+        path = root / "world" / "relations.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         lines = [_json_line(relation) for relation in relations]
         path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
-    def _write_quest_event_refs(self, refs: dict[str, QuestEventReference]) -> None:
-        path = self.root / "quests" / "event_refs.jsonl"
+    def _write_quest_event_refs(self, root: Path, refs: dict[str, QuestEventReference]) -> None:
+        path = root / "quests" / "event_refs.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         lines = [_json_line(ref) for ref in refs.values()]
         path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
-    def _write_terms(self, terms: dict[str, Term]) -> None:
-        path = self.root / "world" / "terms.json"
+    def _write_terms(self, root: Path, terms: dict[str, Term]) -> None:
+        path = root / "world" / "terms.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = [term.model_dump(mode="json", exclude_none=True) for term in terms.values()]
         path.write_text(_json(payload), encoding="utf-8")
 
-    def _write_style_guides(self, style_guides: dict[str, StyleGuide]) -> None:
+    def _write_style_guides(self, root: Path, style_guides: dict[str, StyleGuide]) -> None:
         """Persist EVERY style guide with all its fields (id, body, rules, …) — the old code only
         wrote the single ``"style_guide"`` key's ``body``, silently dropping rules and any other
         guide. The legacy ``.md`` is removed once the full-fidelity JSON exists."""
-        path = self.root / "world" / "style_guides.json"
-        legacy = self.root / "world" / "style_guide.md"
+        path = root / "world" / "style_guides.json"
+        legacy = root / "world" / "style_guide.md"
         if not style_guides:
             path.unlink(missing_ok=True)
             legacy.unlink(missing_ok=True)

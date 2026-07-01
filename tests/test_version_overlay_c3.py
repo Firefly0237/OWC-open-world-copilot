@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from owcopilot.content.models import ContentBundle, Entity, EntityType, Relation
 from owcopilot.content.store import ContentStore
 
@@ -125,3 +127,66 @@ def test_version_chain_cycle_is_defensive(tmp_path) -> None:
     _write_version(tmp_path, "v2", base="v3")
     _write_version(tmp_path, "v3", base="v2")
     assert "e1" in store.load_scoped(version="v2").entities  # terminates, baseline present
+
+
+# --------------------------------------------------------------------------- C3b: create + save
+
+
+def test_create_version_starts_equal_to_base(tmp_path) -> None:
+    store = ContentStore(tmp_path)
+    _baseline(store, {"e1": "Alice", "e2": "Bob"})
+    store.create_version("v2", base_version="v1")
+    assert (tmp_path / "versions" / "v2" / "version.json").exists()
+    # copy-on-write: a fresh branch equals its base until content is saved into it
+    assert (
+        store.load_scoped(version="v2").model_dump()
+        == store.load_scoped(version="v1").model_dump()
+    )
+
+
+def test_save_scoped_roundtrips_override_add_and_drop(tmp_path) -> None:
+    store = ContentStore(tmp_path)
+    _baseline(store, {"e1": "Alice", "e2": "Bob"})
+    store.create_version("v2", base_version="v1")
+    b2 = store.load_scoped(version="v2")
+    b2.entities["e1"] = _entity("e1", "Alice-v2")  # override
+    b2.entities["e3"] = _entity("e3", "New")  # add
+    del b2.entities["e2"]  # drop -> tombstone
+    store.save_scoped(b2, version="v2")
+    reloaded = store.load_scoped(version="v2")
+    assert {k: v.name for k, v in reloaded.entities.items()} == {"e1": "Alice-v2", "e3": "New"}
+    # the baseline is untouched by a version save
+    assert set(store.load_scoped(version="v1").entities) == {"e1", "e2"}
+
+
+def test_save_scoped_writes_only_the_diff(tmp_path) -> None:
+    store = ContentStore(tmp_path)
+    _baseline(store, {"e1": "Alice", "e2": "Bob", "e3": "Carol"})
+    store.create_version("v2", base_version="v1")
+    b2 = store.load_scoped(version="v2")
+    b2.entities["e2"] = _entity("e2", "Bob-v2")  # change only e2
+    store.save_scoped(b2, version="v2")
+    override_dir = tmp_path / "versions" / "v2" / "world" / "entities"
+    assert {p.stem for p in override_dir.glob("*.json")} == {"e2"}  # only the diff materialised
+
+
+def test_create_version_rejects_bad_inputs(tmp_path) -> None:
+    store = ContentStore(tmp_path)
+    _baseline(store, {"e1": "Alice"})
+    with pytest.raises(ValueError):
+        store.create_version("v1")  # baseline name
+    store.create_version("v2", base_version="v1")
+    with pytest.raises(ValueError):
+        store.create_version("v2", base_version="v1")  # already exists
+    with pytest.raises(ValueError):
+        store.create_version("v9", base_version="nope")  # unknown base
+
+
+def test_save_scoped_baseline_writes_root(tmp_path) -> None:
+    store = ContentStore(tmp_path)
+    _baseline(store, {"e1": "Alice"})
+    bundle = store.load()
+    bundle.entities["e1"] = _entity("e1", "Alice-edited")
+    store.save_scoped(bundle, version="v1")  # baseline -> writes the root tree (== save)
+    assert store.load().entities["e1"].name == "Alice-edited"
+    assert not (tmp_path / "versions").exists()  # no version dir created
