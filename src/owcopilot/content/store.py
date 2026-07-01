@@ -32,6 +32,11 @@ from .normalize import _FORBIDDEN_ID_CHARS, _validate_id_chars
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
+# Scale-P0 G2-C C3a: the baseline version is this store's root tree; derived versions live under
+# ``root/versions/<version>/``. ``v1`` matches the default scope, so ``load_scoped(version="v1")``
+# with no ``versions/`` dir is byte-identical to ``load()`` (INV-1).
+_BASELINE_VERSION = "v1"
+
 
 class ContentStore:
     def __init__(self, root: str | Path) -> None:
@@ -49,28 +54,133 @@ class ContentStore:
         self._cache_misses = 0
 
     def load(self) -> ContentBundle:
+        """Load the baseline content tree (the default world, version ``v1``)."""
+        return self._load_bundle_from(self.root)
+
+    def _load_bundle_from(self, root: Path) -> ContentBundle:
+        """Load a full ``ContentBundle`` from an arbitrary content-root directory.
+
+        Scale-P0 G2-C C3a: factored out of ``load()`` so version overlays can load the baseline
+        tree and each derived version's override directory through the same code path. Called with
+        ``self.root`` for the baseline; with ``self.root / "versions" / <version>`` for an override
+        layer (see ``load_scoped``). Behaviour for ``self.root`` is identical to pre-C3 ``load``."""
         bundle = ContentBundle()
-        for entity in self._load_json_dir(self.root / "world" / "entities", Entity):
+        for entity in self._load_json_dir(root / "world" / "entities", Entity):
             bundle.entities[entity.id] = entity
-        bundle.relations = self._load_relations()
-        bundle.quest_event_refs = self._load_quest_event_refs()
-        for region in self._load_json_dir(self.root / "regions", RegionBrief):
+        bundle.relations = self._load_relations(root)
+        bundle.quest_event_refs = self._load_quest_event_refs(root)
+        for region in self._load_json_dir(root / "regions", RegionBrief):
             bundle.regions[region.id] = region
-        for quest in self._load_json_dir(self.root / "quests", Quest):
+        for quest in self._load_json_dir(root / "quests", Quest):
             bundle.quests[quest.id] = quest
-        for poi in self._load_json_dir(self.root / "pois", POI):
+        for poi in self._load_json_dir(root / "pois", POI):
             bundle.pois[poi.id] = poi
-        for dialogue in self._load_json_dir(self.root / "dialogues", DialogueRef):
+        for dialogue in self._load_json_dir(root / "dialogues", DialogueRef):
             bundle.dialogues[dialogue.id] = dialogue
-        for tree in self._load_json_dir(self.root / "dialogues" / "trees", DialogueTree):
+        for tree in self._load_json_dir(root / "dialogues" / "trees", DialogueTree):
             bundle.dialogue_trees[tree.id] = tree
-        for text in self._load_json_dir(self.root / "localization" / "texts", LocalizedText):
+        for text in self._load_json_dir(root / "localization" / "texts", LocalizedText):
             bundle.localized_texts[text.id] = text
-        for term in self._load_terms():
+        for term in self._load_terms(root):
             bundle.terms[term.id] = term
-        for style in self._load_style_guides():
+        for style in self._load_style_guides(root):
             bundle.style_guides[style.id] = style
         return bundle
+
+    # -- Scale-P0 G2-C C3a: version overlay (copy-on-write inheritance) --------------------------
+
+    def load_scoped(self, *, world_id: str = "default", version: str = "v1") -> ContentBundle:
+        """Effective ``ContentBundle`` for a ``(world_id, version)`` scope via copy-on-write.
+
+        The baseline ``v1`` is this store's root tree. A derived version lives in
+        ``root/versions/<version>/`` (only its added/changed object files) plus an optional
+        ``tombstones.json`` (``"kind:id"`` entries it deletes from the base). Reading walks the base
+        chain [baseline … target] and overlays each layer: the nearest version's definition of an id
+        wins; a tombstone removes it. ``version == "v1"`` with no ``versions/`` dir returns exactly
+        ``load()`` (INV-1 byte-identical). ``world_id`` is threaded for the (world, version) scope,
+        but multi-world content-root routing is C6 -- here the baseline is always this store's root.
+        """
+        chain = self._resolve_version_chain(version)
+        bundle = self._load_bundle_from(self._version_root(chain[0]))
+        for derived in chain[1:]:
+            overlay = self._load_bundle_from(self._version_root(derived))
+            self._apply_overlay(bundle, overlay, self._load_tombstones(derived))
+        return bundle
+
+    def _version_root(self, version: str) -> Path:
+        """Content root for a version: the store root for baseline ``v1``, else its override dir."""
+        if version == _BASELINE_VERSION:
+            return self.root
+        return self.root / "versions" / version
+
+    def _resolve_version_chain(self, version: str) -> list[str]:
+        """Base chain from baseline to ``version`` (inclusive), read from the file-backed
+        ``versions/<v>/version.json`` (``base_version``). The baseline ``v1`` terminates the walk;
+        a version with no metadata derives directly from the baseline. Defensive against cycles."""
+        if version == _BASELINE_VERSION:
+            return [_BASELINE_VERSION]
+        chain: list[str] = []
+        seen: set[str] = set()
+        current: str | None = version
+        while current is not None and current != _BASELINE_VERSION and current not in seen:
+            seen.add(current)
+            chain.append(current)
+            current = self._version_base(current)
+        chain.append(_BASELINE_VERSION)
+        chain.reverse()  # baseline first, target last
+        return chain
+
+    def _version_base(self, version: str) -> str | None:
+        meta = self.root / "versions" / version / "version.json"
+        if not meta.exists():
+            return None  # no metadata -> derives directly from the baseline
+        data = json.loads(meta.read_text(encoding="utf-8"))
+        base = data.get("base_version")
+        return str(base) if base else None
+
+    def _load_tombstones(self, version: str) -> set[str]:
+        """The ``"kind:id"`` entries a derived version deletes from its base (``[]`` if none)."""
+        path = self.root / "versions" / version / "tombstones.json"
+        if not path.exists():
+            return set()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {str(x) for x in data} if isinstance(data, list) else set()
+
+    def _apply_overlay(
+        self, base: ContentBundle, overlay: ContentBundle, tombstones: set[str]
+    ) -> None:
+        """Overlay ``overlay`` onto ``base`` in place: override id-keyed objects, union relations,
+        then remove tombstoned ``"kind:id"`` entries. (Relation removal is a later refinement.)"""
+        base.entities.update(overlay.entities)
+        base.quests.update(overlay.quests)
+        base.regions.update(overlay.regions)
+        base.pois.update(overlay.pois)
+        base.dialogues.update(overlay.dialogues)
+        base.dialogue_trees.update(overlay.dialogue_trees)
+        base.localized_texts.update(overlay.localized_texts)
+        base.terms.update(overlay.terms)
+        base.style_guides.update(overlay.style_guides)
+        base.quest_event_refs.update(overlay.quest_event_refs)
+        base.relations.extend(overlay.relations)
+        if not tombstones:
+            return
+        collections: dict[str, dict[str, Any]] = {
+            "entity": base.entities,
+            "quest": base.quests,
+            "region": base.regions,
+            "poi": base.pois,
+            "dialogue": base.dialogues,
+            "dialogue_tree": base.dialogue_trees,
+            "localized_text": base.localized_texts,
+            "term": base.terms,
+            "style_guide": base.style_guides,
+            "quest_event_ref": base.quest_event_refs,
+        }
+        for entry in tombstones:
+            kind, _, oid = entry.partition(":")
+            coll = collections.get(kind)
+            if coll is not None:
+                coll.pop(oid, None)
 
     def save(self, bundle: ContentBundle) -> None:
         # A save rewrites files in place; mtime_ns + size usually shifts, but an edit that preserves
@@ -121,8 +231,8 @@ class ContentStore:
             loaded.append(self._read_parsed(file_path, model.model_validate_json))
         return loaded
 
-    def _load_relations(self) -> list[Relation]:
-        path = self.root / "world" / "relations.jsonl"
+    def _load_relations(self, root: Path) -> list[Relation]:
+        path = root / "world" / "relations.jsonl"
         if not path.exists():
             return []
 
@@ -133,8 +243,8 @@ class ContentStore:
 
         return self._read_parsed(path, parse)
 
-    def _load_quest_event_refs(self) -> dict[str, QuestEventReference]:
-        path = self.root / "quests" / "event_refs.jsonl"
+    def _load_quest_event_refs(self, root: Path) -> dict[str, QuestEventReference]:
+        path = root / "quests" / "event_refs.jsonl"
         if not path.exists():
             return {}
 
@@ -148,10 +258,10 @@ class ContentStore:
 
         return self._read_parsed(path, parse)
 
-    def _load_style_guides(self) -> list[StyleGuide]:
+    def _load_style_guides(self, root: Path) -> list[StyleGuide]:
         """Full-fidelity JSON is canonical; an old body-only ``style_guide.md`` still loads (so
         worlds saved before this format upgrade keep working, just without their rules)."""
-        path = self.root / "world" / "style_guides.json"
+        path = root / "world" / "style_guides.json"
         if path.exists():
 
             def parse_guides(text: str) -> list[StyleGuide]:
@@ -161,13 +271,13 @@ class ContentStore:
                 return []
 
             return self._read_parsed(path, parse_guides)
-        legacy = self.root / "world" / "style_guide.md"
+        legacy = root / "world" / "style_guide.md"
         if legacy.exists():
             return self._read_parsed(legacy, lambda text: [StyleGuide(body=text)])
         return []
 
-    def _load_terms(self) -> list[Term]:
-        path = self.root / "world" / "terms.json"
+    def _load_terms(self, root: Path) -> list[Term]:
+        path = root / "world" / "terms.json"
         if not path.exists():
             return []
 
