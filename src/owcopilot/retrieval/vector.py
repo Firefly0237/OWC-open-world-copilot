@@ -47,21 +47,34 @@ class _Row:
 
 
 def load_content_rows(store: SQLiteStore) -> list[_Row]:
-    """Rows for the content-graph vector index (the default corpus)."""
+    """Rows for the content-graph vector index (the default corpus).
+
+    Scale-P0 G2-C C2: scope-aware read. The vector backend's KNN is already partitioned to the
+    store's (world_id, version) scope (C1), but the retriever materialises display rows (the
+    ``rows_by_ref`` body/title) from here too, so this scan is filtered to the same scope — a
+    same-id ref in another scope can neither be embedded into this corpus nor supply a body. In the
+    single default scope this returns exactly the same rows as before."""
     return [
         _Row(str(r["ref"]), str(r["object_type"]), str(r["title"]), str(r["body"]))
         for r in store.conn.execute(
-            "SELECT ref, object_type, title, body FROM content_index ORDER BY ref"
+            "SELECT ref, object_type, title, body FROM content_index "
+            "WHERE world_id = ? AND version = ? ORDER BY ref",
+            (store.world_id, store.version),
         ).fetchall()
     ]
 
 
 def load_reference_rows(store: SQLiteStore) -> list[_Row]:
-    """Rows for the inspiration-library vector index (reference chunks)."""
+    """Rows for the inspiration-library vector index (reference chunks).
+
+    Scale-P0 G2-C C2: scope-aware read, scoped to the store's current (world_id, version) like
+    ``load_content_rows``."""
     return [
         _Row(str(r["ref"]), "reference_chunk", str(r["title"]), str(r["body"]))
         for r in store.conn.execute(
-            "SELECT ref, title, body FROM reference_chunks ORDER BY ref"
+            "SELECT ref, title, body FROM reference_chunks "
+            "WHERE world_id = ? AND version = ? ORDER BY ref",
+            (store.world_id, store.version),
         ).fetchall()
     ]
 

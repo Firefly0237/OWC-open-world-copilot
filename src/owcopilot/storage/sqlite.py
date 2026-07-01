@@ -1311,8 +1311,14 @@ class SQLiteStore:
         false refusal."""
         if not entity_ids:
             return []
+        # Scale-P0 G2-C C2: scope-aware read. This is a full scan of the scope's relation rows, so
+        # the (world_id, version) filter both keeps relation completion within the current scope and
+        # is a concrete "降N" win — the scan now touches only this scope's relations, not the whole
+        # multi-world table. The composite scope index serves the predicate.
         rows = self.conn.execute(
-            "SELECT ref, object_type, title, body FROM content_index WHERE object_type = 'relation'"
+            "SELECT ref, object_type, title, body FROM content_index "
+            "WHERE object_type = 'relation' AND world_id = ? AND version = ?",
+            (self.world_id, self.version),
         ).fetchall()
         matched: list[sqlite3.Row] = []
         for row in rows:
@@ -1329,15 +1335,19 @@ class SQLiteStore:
         if not refs:
             return {}
         placeholders = ",".join("?" for _ in refs)
+        # Scale-P0 G2-C C2: scope-aware read. Materialise only this scope's chunks (and join the
+        # source within the same scope, so a same-id source in another scope cannot supply the
+        # title). In the single default scope this is the same rows as before.
         rows = self.conn.execute(
             f"""
             SELECT c.ref, c.source_id, s.title AS source_title, c.title, c.body,
                    c.chunk_index, c.metadata_json
             FROM reference_chunks AS c
-            LEFT JOIN reference_sources AS s ON s.id = c.source_id
-            WHERE c.ref IN ({placeholders})
+            LEFT JOIN reference_sources AS s
+                ON s.id = c.source_id AND s.world_id = c.world_id AND s.version = c.version
+            WHERE c.ref IN ({placeholders}) AND c.world_id = ? AND c.version = ?
             """,  # noqa: S608
-            refs,
+            (*refs, self.world_id, self.version),
         ).fetchall()
         return {str(row["ref"]): row for row in rows}
 
@@ -1463,14 +1473,18 @@ class SQLiteStore:
         match_query = build_fts_match_query(query)
         if match_query is None:
             return []
+        # Scale-P0 G2-C C2: scope-aware read. content_fts carries world_id/version as UNINDEXED
+        # columns, so the MATCH is constrained to the store's current (world_id, version) — search
+        # only sees this scope's rows. In the single default scope this matches the pre-C2 result
+        # exactly (every row is in that scope), while a multi-scope DB no longer scans foreign rows.
         rows = self.conn.execute(
             """
             SELECT ref, object_type, title, body
             FROM content_fts
-            WHERE content_fts MATCH ?
+            WHERE content_fts MATCH ? AND world_id = ? AND version = ?
             LIMIT ?
             """,
-            (match_query, limit),
+            (match_query, self.world_id, self.version, limit),
         ).fetchall()
         return [
             {
@@ -1628,8 +1642,11 @@ class SQLiteStore:
         )
 
     def list_reference_sources(self) -> list[dict[str, Any]]:
+        # Scale-P0 G2-C C2: scope-aware read — only the current scope's reference sources.
         rows = self.conn.execute(
-            "SELECT * FROM reference_sources ORDER BY created_at, id"
+            "SELECT * FROM reference_sources WHERE world_id = ? AND version = ? "
+            "ORDER BY created_at, id",
+            (self.world_id, self.version),
         ).fetchall()
         return [
             {
@@ -1653,6 +1670,10 @@ class SQLiteStore:
         # (ref, source_id, source_title, world_id, version, title, body) after the C1 scope columns
         # were added, so the title boost (4.0) and body (1.0) weights moved to positions 6/7; the
         # leading metadata columns stay at 0.0. Keeping this aligned preserves the original ranking.
+        # Scale-P0 G2-C C2: scope-aware read. reference_fts carries world_id/version as UNINDEXED
+        # columns, so the MATCH is constrained to the current scope, and the chunk join is scope-
+        # qualified so a same-ref chunk in another scope cannot be paired in. Single default scope:
+        # identical rows to pre-C2.
         rows = self.conn.execute(
             """
             SELECT
@@ -1660,12 +1681,13 @@ class SQLiteStore:
                 c.chunk_index, c.metadata_json,
                 bm25(reference_fts, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 1.0) AS rank
             FROM reference_fts AS f
-            JOIN reference_chunks AS c ON c.ref = f.ref
-            WHERE reference_fts MATCH ?
+            JOIN reference_chunks AS c
+                ON c.ref = f.ref AND c.world_id = f.world_id AND c.version = f.version
+            WHERE reference_fts MATCH ? AND f.world_id = ? AND f.version = ?
             ORDER BY rank
             LIMIT ?
             """,
-            (match_query, limit),
+            (match_query, self.world_id, self.version, limit),
         ).fetchall()
         hits = [_reference_hit_from_row(row, score=-float(row["rank"])) for row in rows]
         if len(hits) < limit:
@@ -1678,15 +1700,22 @@ class SQLiteStore:
         return hits[:limit]
 
     def _fallback_reference_search(self, query: str, *, limit: int) -> list[dict[str, Any]]:
+        # Scale-P0 G2-C C2: scope-aware read. The lexical fallback is a full scan of the chunk
+        # table, so scoping it to the current (world_id, version) both isolates the scope and is a
+        # reduce-N win: it scans only this scope's chunks. The source join is scope-qualified for
+        # the same reason as the FTS path. Single default scope: identical scan/result to pre-C2.
         rows = self.conn.execute(
             """
             SELECT
                 c.ref, c.source_id, s.title AS source_title, c.title, c.body,
                 c.chunk_index, c.metadata_json
             FROM reference_chunks AS c
-            LEFT JOIN reference_sources AS s ON s.id = c.source_id
+            LEFT JOIN reference_sources AS s
+                ON s.id = c.source_id AND s.world_id = c.world_id AND s.version = c.version
+            WHERE c.world_id = ? AND c.version = ?
             ORDER BY c.ref
-            """
+            """,
+            (self.world_id, self.version),
         ).fetchall()
         hits: list[dict[str, Any]] = []
         for row in rows:
