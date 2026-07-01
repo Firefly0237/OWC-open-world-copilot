@@ -80,6 +80,37 @@ def create_managed_world(name: str, *, base: str | Path | None = None) -> Path:
     return target
 
 
+def open_managed_world(
+    name: str,
+    *,
+    version: str = "v1",
+    base: str | Path | None = None,
+    sqlite_path: str | Path = ":memory:",
+    embedder: Any = None,
+) -> Any:
+    """Open a managed world by NAME as a scoped ProjectContext -- the multi-world "switch".
+
+    Scale-P0 G2-C C6: managed worlds are already separate content roots under ``worlds_home``
+    (create/list/delete/import/export above), so their content is isolated by construction. This
+    ties that identity to the ``(world_id, version)`` scope: the world's sanitized name becomes the
+    ProjectContext's ``world_id`` and ``version`` selects the copy-on-write line (C3), so the scope
+    dimension reflects the actual world+version -- self-describing, and correct even if a future
+    deployment shares one runtime DB across worlds (the C1 ``world_id`` column keeps them apart)."""
+    from ..pipeline.project import ProjectContext
+
+    world_name = sanitize_world_name(name)
+    world_dir = worlds_home(base) / world_name
+    if not world_dir.exists() or not world_dir.is_dir():
+        raise ValueError(f"世界「{world_name}」不存在。请先创建或导入它。")
+    return ProjectContext.open(
+        world_dir,
+        world_id=world_name,
+        version=version,
+        sqlite_path=sqlite_path,
+        embedder=embedder,
+    )
+
+
 def export_world_zip(root: str | Path) -> bytes:
     """Pack a content root into a portable world pack (runtime/.git excluded)."""
     source = Path(root)
