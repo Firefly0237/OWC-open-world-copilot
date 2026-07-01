@@ -45,6 +45,11 @@ class SnapshotMeta(BaseModel):
     label: str = ""
     created_at: str
     content_hash: str
+    # Scale-P0 G2-C C4b: the (world, version) scope this snapshot froze (INV-4: a snapshot is an
+    # immutable point-in-time freeze OF A SCOPE, distinct from the mutable version line). Defaults
+    # keep pre-C4 snapshots (which have no scope fields) loading as the canonical default scope.
+    world_id: str = "default"
+    version: str = "v1"
 
 
 class FieldChange(BaseModel):
@@ -67,15 +72,23 @@ class CanonDiff(BaseModel):
     summary: dict[str, int] = Field(default_factory=dict)
 
 
-def write_snapshot(store: ContentStore, *, label: str = "") -> SnapshotMeta:
-    """Dump the current world to ``<root>/.snapshots/<id>.json`` and return its metadata."""
-    bundle = store.load()
+def write_snapshot(
+    store: ContentStore, *, label: str = "", world_id: str = "default", version: str = "v1"
+) -> SnapshotMeta:
+    """Freeze a ``(world_id, version)`` scope's effective world to ``<root>/.snapshots/<id>.json``.
+
+    Scale-P0 G2-C C4b: the snapshot captures that version's copy-on-write effective bundle
+    (``load_scoped``) and records the scope, so a snapshot of a derived version differs from the
+    baseline. The default scope freezes ``load()`` exactly as before (INV-1)."""
+    bundle = store.load_scoped(world_id=world_id, version=version)
     snap_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
     meta = SnapshotMeta(
         id=snap_id,
         label=label.strip(),
         created_at=datetime.now(UTC).isoformat(),
         content_hash=content_hash(bundle),
+        world_id=world_id,
+        version=version,
     )
     payload = {**meta.model_dump(mode="json"), "bundle": bundle.model_dump(mode="json")}
     path = store.root / _SNAP_DIR / f"{snap_id}.json"
@@ -95,7 +108,9 @@ def list_snapshots(store: ContentStore) -> list[SnapshotMeta]:
     metas: list[SnapshotMeta] = []
     for path in directory.glob("*.json"):
         data = json.loads(path.read_text(encoding="utf-8"))
-        fields = {key: data.get(key) for key in SnapshotMeta.model_fields}
+        # Only carry keys actually present, so a pre-C4 snapshot (no world_id/version) falls back to
+        # the SnapshotMeta defaults instead of validating a missing key as None.
+        fields = {key: data[key] for key in SnapshotMeta.model_fields if key in data}
         metas.append(SnapshotMeta.model_validate(fields))
     metas.sort(key=lambda m: m.id, reverse=True)
     return metas
@@ -164,6 +179,23 @@ def bundle_diff(old: ContentBundle, new: ContentBundle) -> CanonDiff:
         changed=changed,
         summary={"added": len(added), "removed": len(removed), "changed": len(changed)},
     )
+
+
+def version_diff(
+    store: ContentStore,
+    *,
+    from_version: str,
+    to_version: str,
+    world_id: str = "default",
+) -> CanonDiff:
+    """Structural diff between two versions' effective (copy-on-write resolved) bundles.
+
+    Scale-P0 G2-C C4a: reuses ``bundle_diff`` over ``ContentStore.load_scoped`` of each version, so
+    it reports what ``to_version`` added / removed / changed relative to ``from_version`` (e.g. a
+    version vs its base). ``world_id`` is threaded for the (world, version) scope."""
+    old = store.load_scoped(world_id=world_id, version=from_version)
+    new = store.load_scoped(world_id=world_id, version=to_version)
+    return bundle_diff(old, new)
 
 
 def _diff_relations(
