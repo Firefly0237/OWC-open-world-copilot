@@ -228,7 +228,7 @@ class SQLiteStore:
                 vector BLOB NOT NULL,
                 world_id TEXT NOT NULL DEFAULT 'default',
                 version TEXT NOT NULL DEFAULT 'v1',
-                PRIMARY KEY (ref, model_id)
+                PRIMARY KEY (world_id, version, ref, model_id)
             );
 
             CREATE TABLE IF NOT EXISTS reference_vectors (
@@ -239,7 +239,7 @@ class SQLiteStore:
                 vector BLOB NOT NULL,
                 world_id TEXT NOT NULL DEFAULT 'default',
                 version TEXT NOT NULL DEFAULT 'v1',
-                PRIMARY KEY (ref, model_id)
+                PRIMARY KEY (world_id, version, ref, model_id)
             );
 
             CREATE TABLE IF NOT EXISTS graph_edges (
@@ -419,6 +419,12 @@ class SQLiteStore:
         self._ensure_scoped_pk("content_index", ("world_id", "version", "ref"))
         self._ensure_scoped_pk("reference_sources", ("world_id", "version", "id"))
         self._ensure_scoped_pk("reference_chunks", ("world_id", "version", "ref"))
+        # G2 acceptance fix: the vector blob caches keyed on (ref, model_id) only, so a shared DB
+        # would let the same ref in another scope collide on upsert and thrash the embedding cache.
+        # Scope their PK too, so a ref's fp32 blob is cached per (world, version) like every other
+        # authoritative table.
+        self._ensure_scoped_pk("content_vectors", ("world_id", "version", "ref", "model_id"))
+        self._ensure_scoped_pk("reference_vectors", ("world_id", "version", "ref", "model_id"))
         # graph_edges keeps its AUTOINCREMENT id; its per-edge uniqueness (the incremental-sync
         # ON CONFLICT key) becomes scope-qualified so the same fingerprint can exist once per scope.
         # Drop the legacy single-column unique index and (re)create the scoped one.
@@ -1072,9 +1078,8 @@ class SQLiteStore:
             f"""
             INSERT INTO {table} (ref, model_id, text_hash, dim, vector, world_id, version)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(ref, model_id) DO UPDATE SET
-                text_hash = excluded.text_hash, dim = excluded.dim, vector = excluded.vector,
-                world_id = excluded.world_id, version = excluded.version
+            ON CONFLICT(world_id, version, ref, model_id) DO UPDATE SET
+                text_hash = excluded.text_hash, dim = excluded.dim, vector = excluded.vector
             """,  # noqa: S608
             [
                 (ref, model_id, text_hash, dim, blob, self.world_id, self.version)
