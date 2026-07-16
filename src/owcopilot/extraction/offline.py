@@ -1,3 +1,4 @@
+# 文稿提炼的离线确定性 provider。
 """Deterministic offline providers for manuscript extraction.
 
 Not language models: cheap pattern extractors that exercise the full pipeline —

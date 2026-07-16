@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +21,7 @@ from owcopilot.app.workspaces import (
     import_world_zip,
     list_managed_worlds,
     sanitize_world_name,
+    worlds_home,
 )
 from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest, Relation
 from owcopilot.content.store import ContentStore
@@ -73,6 +75,24 @@ def test_world_name_cannot_escape_worlds_home(tmp_path) -> None:
         assert not safe.startswith("..")
     created = create_managed_world("../../etc/passwd", base=base)
     assert created.resolve().parent == base.resolve()  # stayed directly under worlds_home
+
+
+def test_worlds_home_reads_env_var(monkeypatch, tmp_path) -> None:
+    # a container mounts its data volume via OWCOPILOT_WORLDS_HOME (no explicit `base` arg)
+    mounted = tmp_path / "mounted-worlds"
+    monkeypatch.setenv("OWCOPILOT_WORLDS_HOME", str(mounted))
+    assert worlds_home() == mounted
+
+
+def test_worlds_home_default_unchanged_without_env_var(monkeypatch) -> None:
+    monkeypatch.delenv("OWCOPILOT_WORLDS_HOME", raising=False)
+    assert worlds_home() == Path.home() / ".owcopilot" / "worlds"
+
+
+def test_worlds_home_explicit_base_wins_over_env_var(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OWCOPILOT_WORLDS_HOME", str(tmp_path / "env-worlds"))
+    explicit = tmp_path / "explicit-worlds"
+    assert worlds_home(explicit) == explicit
 
 
 def test_delete_managed_world_removes_only_its_own_dir(tmp_path) -> None:

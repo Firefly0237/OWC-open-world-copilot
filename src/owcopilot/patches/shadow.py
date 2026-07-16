@@ -1,3 +1,4 @@
+# 把补丁操作应用到 ContentBundle 的 shadow 副本（重审用，不碰真源）。
 """Apply patch operations to a shadow ContentBundle copy."""
 
 from __future__ import annotations

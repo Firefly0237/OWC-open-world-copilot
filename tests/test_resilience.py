@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from owcopilot.llm.cache import ExactCache
-from owcopilot.llm.gateway import LLMGateway, OpenAICompatProvider
+from owcopilot.llm.gateway import LLMGateway, OpenAICompatProvider, ToolCallResponse
 from owcopilot.llm.resilience import (
+    PROVIDER_CAPABILITY_MEMBERS,
     CircuitBreakerProvider,
     CircuitOpenError,
     FailoverProvider,
@@ -250,3 +253,212 @@ def test_cache_key_distinguishes_primary_and_secondary_through_wrappers() -> Non
     text_b = secondary_gateway.complete(task="generate", system="s", user="u")
     assert text_b == "gpt-4o-mini"  # did not reuse the primary's cached answer
     assert other.calls == 1
+
+
+# --------------------------------------------------- capability transparency (supports_tools etc.)
+# Regression: before this, wrapping a tool-capable provider in either resilience class made
+# `provider_supports_tools()` probe False (the wrapper had no `supports_tools` attribute and no
+# `complete_with_tools`), so the ReAct agent's `_native_tools_available()` silently fell back to the
+# degraded text loop the instant a studio opted into failover/circuit-breaking — "enabling
+# resilience degrades native tool-calling to text ReAct".
+
+
+class _ToolOk:
+    """Fake provider that supports native tool-calling and always succeeds on both call shapes."""
+
+    supports_tools = True
+    model = "tool-primary"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.tool_calls = 0
+
+    def complete(self, *, system: str, user: str, model: str):
+        self.calls += 1
+        return "text-ok", 1, 1
+
+    def complete_with_tools(self, *, messages, tools, model: str) -> ToolCallResponse:
+        self.tool_calls += 1
+        return ToolCallResponse(text="tool-ok", input_tokens=1, output_tokens=1)
+
+
+class _ToolFail:
+    """Fake provider that declares tool support but always raises an availability error."""
+
+    supports_tools = True
+    model = "tool-primary"
+
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.calls = 0
+
+    def complete(self, *, system: str, user: str, model: str):
+        self.calls += 1
+        raise self.exc
+
+    def complete_with_tools(self, *, messages, tools, model: str) -> ToolCallResponse:
+        self.calls += 1
+        raise self.exc
+
+
+class _NoTools:
+    """Fake provider exposing only the required `complete()` — no native tool-calling at all,
+    exactly like the offline fakes / any provider that hasn't implemented the optional surface."""
+
+    def __init__(self, tag: str = "secondary") -> None:
+        self.tag = tag
+        self.calls = 0
+
+    def complete(self, *, system: str, user: str, model: str):
+        self.calls += 1
+        return self.tag, 1, 1
+
+
+# ---------------------------------------------------------- protocol-completeness (drift) guard
+def test_wrappers_forward_every_provider_capability_member() -> None:
+    """Reflective guard over PROVIDER_CAPABILITY_MEMBERS (the single source of truth documented in
+    resilience.py): both wrappers must expose every member. If a future member is added to that
+    tuple (a new optional provider capability) without adding matching delegation to a wrapper,
+    THIS test fails — instead of the capability silently vanishing behind resilience again."""
+    fp = FailoverProvider(_ToolOk(), _ToolOk())
+    cb = CircuitBreakerProvider(_ToolOk())
+
+    for member in PROVIDER_CAPABILITY_MEMBERS:
+        assert hasattr(fp, member), f"FailoverProvider does not forward {member!r}"
+        assert hasattr(cb, member), f"CircuitBreakerProvider does not forward {member!r}"
+        assert callable(getattr(fp, member)) or member in ("model", "supports_tools")
+        assert callable(getattr(cb, member)) or member in ("model", "supports_tools")
+
+
+# ---------------------------------------------------------------- supports_tools passthrough
+def test_failover_supports_tools_reflects_primary_when_true() -> None:
+    assert FailoverProvider(_ToolOk(), _NoTools()).supports_tools is True
+
+
+def test_failover_supports_tools_reflects_primary_when_false() -> None:
+    # Never borrows a tool-capable SECONDARY's capability to look better than reality — the probe
+    # is prospective (primary is what a fresh call tries first), so it must stay honestly False.
+    assert FailoverProvider(_NoTools(), _ToolOk()).supports_tools is False
+
+
+def test_circuit_breaker_supports_tools_forwards_inner() -> None:
+    assert CircuitBreakerProvider(_ToolOk()).supports_tools is True
+    assert CircuitBreakerProvider(_NoTools()).supports_tools is False
+
+
+def test_circuit_breaker_supports_tools_ignores_circuit_state() -> None:
+    # "半开/全开状态下能力查询仍指向被包 provider 本体": capability is a static trait, unaffected by
+    # circuit health — an OPEN circuit still reports the wrapped provider's true capability.
+    cb = CircuitBreakerProvider(_ToolFail(RuntimeError("boom")), failure_threshold=1)
+    with pytest.raises(RuntimeError):
+        cb.complete(system="s", user="u", model="m")
+    assert cb.is_open
+    assert cb.supports_tools is True
+
+
+# ------------------------------------------------ gateway takes the native path through a wrapper
+def _tools_gateway(provider) -> LLMGateway:
+    return LLMGateway(
+        providers={"cheap": provider},
+        router=StaticRouter(mapping={"agent_react": "cheap"}),
+        telemetry=TelemetryCollector(),
+    )
+
+
+_TOOLS_SCHEMA = [{"type": "function", "function": {"name": "noop", "parameters": {}}}]
+_TOOLS_MESSAGES = [{"role": "user", "content": "hi"}]
+
+
+def test_gateway_takes_native_tool_path_through_circuit_breaker_wrapper() -> None:
+    inner = _ToolOk()
+    gateway = _tools_gateway(CircuitBreakerProvider(inner))
+
+    resp = gateway.complete_with_tools(
+        task="agent_react", messages=_TOOLS_MESSAGES, tools=_TOOLS_SCHEMA
+    )
+
+    assert resp.text == "tool-ok"
+    assert inner.tool_calls == 1  # the REAL provider's complete_with_tools actually ran
+
+
+def test_gateway_takes_native_tool_path_through_failover_wrapper() -> None:
+    inner = _ToolOk()
+    gateway = _tools_gateway(FailoverProvider(inner, _NoTools()))
+
+    resp = gateway.complete_with_tools(
+        task="agent_react", messages=_TOOLS_MESSAGES, tools=_TOOLS_SCHEMA
+    )
+
+    assert resp.text == "tool-ok"
+    assert inner.tool_calls == 1
+
+
+# ------------------------------------------------- complete_with_tools failover + degradation
+def test_failover_complete_with_tools_hands_off_when_secondary_also_supports_tools() -> None:
+    primary = _ToolFail(RuntimeError("connection refused"))
+    secondary = _ToolOk()
+    fp = FailoverProvider(primary, secondary)
+
+    resp = fp.complete_with_tools(messages=_TOOLS_MESSAGES, tools=_TOOLS_SCHEMA, model="m")
+
+    assert resp.text == "tool-ok"
+    assert fp.failovers == 1
+    assert secondary.tool_calls == 1
+
+
+def test_failover_complete_with_tools_refuses_to_fake_capability_on_degraded_secondary(
+    caplog,
+) -> None:
+    # Primary supports tools but fails; the secondary CANNOT do native tool-calling. Faking success
+    # (or silently calling secondary.complete() instead) would lie about the answer's shape, so this
+    # must refuse: re-raise the primary's real error and log a WARNING naming the degradation.
+    primary = _ToolFail(RuntimeError("connection refused"))
+    secondary = _NoTools()
+    fp = FailoverProvider(primary, secondary)
+
+    with caplog.at_level(logging.WARNING, logger="owcopilot.llm.resilience"):
+        with pytest.raises(RuntimeError, match="connection refused"):
+            fp.complete_with_tools(messages=_TOOLS_MESSAGES, tools=_TOOLS_SCHEMA, model="m")
+
+    assert fp.failovers == 0  # no hand-off actually completed
+    assert secondary.calls == 0  # never called — would AttributeError (no complete_with_tools)
+    assert any("does not support native tool-calling" in r.message for r in caplog.records)
+
+
+def test_failover_complete_with_tools_passes_through_auth_error_uncalled() -> None:
+    # Same passthrough contract as complete(): an auth error must not trigger a hand-off attempt.
+    primary = _ToolFail(RuntimeError("401 unauthorized"))
+    secondary = _ToolOk()
+    fp = FailoverProvider(primary, secondary)
+
+    with pytest.raises(RuntimeError, match="401"):
+        fp.complete_with_tools(messages=_TOOLS_MESSAGES, tools=_TOOLS_SCHEMA, model="m")
+    assert secondary.tool_calls == 0
+    assert fp.failovers == 0
+
+
+# ------------------------------------------------- circuit breaker shares ONE circuit across shapes
+def test_circuit_breaker_complete_with_tools_shares_circuit_with_complete() -> None:
+    failing = _ToolFail(RuntimeError("boom"))
+    cb = CircuitBreakerProvider(failing, failure_threshold=2)
+
+    with pytest.raises(RuntimeError):
+        cb.complete(system="s", user="u", model="m")  # streak = 1
+    with pytest.raises(RuntimeError):
+        cb.complete_with_tools(messages=_TOOLS_MESSAGES, tools=_TOOLS_SCHEMA, model="m")  # streak=2
+
+    assert cb.is_open
+    assert cb.trips == 1
+    with pytest.raises(CircuitOpenError):
+        cb.complete_with_tools(messages=_TOOLS_MESSAGES, tools=_TOOLS_SCHEMA, model="m")
+    assert failing.calls == 2  # fast-fail never touched the inner provider a 3rd time
+
+
+def test_circuit_breaker_complete_with_tools_closes_on_success() -> None:
+    ok = _ToolOk()
+    cb = CircuitBreakerProvider(ok, failure_threshold=1)
+
+    resp = cb.complete_with_tools(messages=_TOOLS_MESSAGES, tools=_TOOLS_SCHEMA, model="m")
+
+    assert resp.text == "tool-ok"
+    assert not cb.is_open

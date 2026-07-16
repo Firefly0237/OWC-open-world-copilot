@@ -35,6 +35,7 @@ def _term(
 # build_term_block
 # ---------------------------------------------------------------------------
 
+
 def test_forbidden_term_in_must_not_line() -> None:
     """[硬] Forbidden term must appear in MUST NOT use: line."""
     terms = [_term("t1", "凋零", forbidden=["死亡", "死了"])]
@@ -153,6 +154,7 @@ def test_forbidden_deduplication() -> None:
 # build_term_block_for_critic
 # ---------------------------------------------------------------------------
 
+
 def test_critic_block_le20_injects_all() -> None:
     """Critic: <= 20 terms -> inject all."""
     terms = [_term("t1", "凋零", forbidden=["死亡"])]
@@ -183,10 +185,7 @@ def test_critic_block_gt20_only_forbidden_terms() -> None:
 
 def test_critic_block_empty_forbidden_no_output_gt20() -> None:
     """Critic: > 20 terms, none with forbidden -> return ""."""
-    terms = [
-        _term(f"t{i}", f"canon_{i}", aliases=[f"alias_{i}"])
-        for i in range(25)
-    ]
+    terms = [_term(f"t{i}", f"canon_{i}", aliases=[f"alias_{i}"]) for i in range(25)]
     result = build_term_block_for_critic(terms)
     assert result == ""
 

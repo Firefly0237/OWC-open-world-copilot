@@ -1,3 +1,4 @@
+# 一键创世的预设世界简报（纯数据，无版权文本）。
 """Preset world-seed briefs for one-click genesis (pure data, no copyrighted text)."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# 表驱动策划数据的 CSV 导入器。
 """CSV importer for table-driven planning data."""
 
 from __future__ import annotations

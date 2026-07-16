@@ -1,3 +1,4 @@
+# 信任与溯源审计规则。
 """Trust and provenance audit rules."""
 
 from __future__ import annotations

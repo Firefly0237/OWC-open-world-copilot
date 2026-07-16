@@ -1,3 +1,4 @@
+# 图与关系一致性规则（对称性/孤儿节点/矛盾指向等）。
 """Graph and relationship consistency rules."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# v2 确定性审计框架：本项目的 ground-truth oracle。
 """Deterministic audit framework for v2."""
 
 from .baseline import AuditBaseline, apply_baseline, issue_fingerprint

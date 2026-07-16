@@ -1,3 +1,4 @@
+# 嵌入器选择：真实语义嵌入器 + 自动工厂（按可用后端选，缺依赖则回退）。
 """Embedder selection: the real semantic embedder, and the auto factory.
 
 The retrieval stack runs against the ``Embedder`` protocol (``llm.cache``). Two backends:

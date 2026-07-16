@@ -1,7 +1,8 @@
+# 整改工单的按世界持久化（<root>/.compliance/ 下的 JSON 账本）。
 """Per-world persistence for remediation cases — a JSON ledger under ``<root>/.compliance/``.
 
-WS-D ships before the multi-tenant platform (WS-P); when WS-P lands, this audit trail migrates to
-the platform audit log / Postgres. The on-disk JSON keeps the trail today with zero canon pollution
+This ledger is intentionally separate from the WS-P platform audit log (SQLite): remediation cases
+live beside the world they concern. The on-disk JSON keeps the trail with zero canon pollution
 (it sits beside the world, not inside the content bundle).
 """
 

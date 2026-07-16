@@ -127,9 +127,7 @@ def test_gold_scenarios_covers_6_skills() -> None:
     all_actions: set[str] = set()
     for s in scenarios:
         all_actions.update(s.expected_actions)
-    assert required_skills <= all_actions, (
-        f"Missing skills: {required_skills - all_actions}"
-    )
+    assert required_skills <= all_actions, f"Missing skills: {required_skills - all_actions}"
 
 
 def test_gold_scenarios_unique_ids() -> None:
@@ -205,7 +203,7 @@ def test_offline_provider_multi_step() -> None:
     user1 = (
         f"Goal: {goal}\n\n"
         "Thought: Auditing.\nAction: audit_project\nAction Input: {}\n"
-        "Observation: {\"open_errors\": 3}\n\n"
+        'Observation: {"open_errors": 3}\n\n'
         "Continue."
     )
     text1, _, _ = provider.complete(system="", user=user1, model="")
@@ -273,8 +271,7 @@ def test_gate_fails_when_provider_returns_wrong_actions(tmp_path: Path, monkeypa
     # of the expected action(s) — a single wrong action per scenario.
     wrong_scripts = {
         scenario.goal: [
-            "Thought: Wrong on purpose.\n"
-            'Action: build_context_pack\nAction Input: {"query": "x"}',
+            'Thought: Wrong on purpose.\nAction: build_context_pack\nAction Input: {"query": "x"}',
             "Thought: Done.\nFinal Answer: 完毕。",
         ]
         for scenario in gold
@@ -324,8 +321,7 @@ def test_acceptance_has_tool_selection_check(tmp_path: Path) -> None:
     """
     report = run_acceptance_evaluation(tmp_path)
     assert len(report.checks) >= 6, (
-        f"Expected at least 6 checks, got {len(report.checks)}: "
-        f"{[c.name for c in report.checks]}"
+        f"Expected at least 6 checks, got {len(report.checks)}: {[c.name for c in report.checks]}"
     )
     check_names = [c.name for c in report.checks]
     assert "tool_selection_accuracy_gate" in check_names
@@ -351,9 +347,7 @@ def test_acceptance_sixth_check_note_honest(tmp_path: Path) -> None:
     report = run_acceptance_evaluation(tmp_path)
     note = report.checks[-1].details.get("note", "")
     keywords = ["sanity gate", "手工标注", "集合F1", "不计顺序"]
-    assert any(kw in note for kw in keywords), (
-        f"note does not contain honesty keywords: {note!r}"
-    )
+    assert any(kw in note for kw in keywords), f"note does not contain honesty keywords: {note!r}"
 
 
 def test_acceptance_metrics_has_tool_f1(tmp_path: Path) -> None:

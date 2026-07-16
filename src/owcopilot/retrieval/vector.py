@@ -1,3 +1,4 @@
+# 稠密向量检索：持久化嵌入 + 精确余弦。小语料够用，大语料转 vector_backend 的 ANN。
 """Dense vector retriever: persisted embeddings + exact cosine search.
 
 The embedder is injected (``Embedder`` protocol). With the deterministic ``HashingEmbedder``
@@ -46,11 +47,27 @@ class _Row:
     body: str
 
 
+@dataclass(frozen=True)
+class QueryBundle:
+    """A query text paired with its already-computed, L2-normalised embedding.
+
+    Mirrors LlamaIndex's ``QueryBundle``: the query object *carries* the embedding so every
+    consumer (the dense recall leg, the rerank similarity leg) reuses one encode instead of
+    re-embedding the same text. :meth:`VectorRetriever.search` and
+    :meth:`VectorRetriever.similarities` accept either a raw ``str`` (encode on the spot — the
+    unchanged path) or a pre-encoded bundle (reuse ``embedding``). The vector is stored exactly as
+    ``search``/``similarities`` would have produced it (``_normalise`` of ``embedder.embed`` as
+    fp32), so the bundle path is bit-identical to the text path."""
+
+    text: str
+    embedding: np.ndarray
+
+
 def load_content_rows(store: SQLiteStore) -> list[_Row]:
     """Rows for the content-graph vector index (the default corpus).
 
-    Scale-P0 G2-C C2: scope-aware read. The vector backend's KNN is already partitioned to the
-    store's (world_id, version) scope (C1), but the retriever materialises display rows (the
+    Scope-aware read. The vector backend's KNN is already partitioned to the
+    store's (world_id, version) scope, but the retriever materialises display rows (the
     ``rows_by_ref`` body/title) from here too, so this scan is filtered to the same scope — a
     same-id ref in another scope can neither be embedded into this corpus nor supply a body. In the
     single default scope this returns exactly the same rows as before."""
@@ -67,7 +84,7 @@ def load_content_rows(store: SQLiteStore) -> list[_Row]:
 def load_reference_rows(store: SQLiteStore) -> list[_Row]:
     """Rows for the inspiration-library vector index (reference chunks).
 
-    Scale-P0 G2-C C2: scope-aware read, scoped to the store's current (world_id, version) like
+    Scope-aware read, scoped to the store's current (world_id, version) like
     ``load_content_rows``."""
     return [
         _Row(str(r["ref"]), "reference_chunk", str(r["title"]), str(r["body"]))
@@ -76,6 +93,25 @@ def load_reference_rows(store: SQLiteStore) -> list[_Row]:
             "WHERE world_id = ? AND version = ? ORDER BY ref",
             (store.world_id, store.version),
         ).fetchall()
+    ]
+
+
+def load_community_report_rows(store: SQLiteStore) -> list[_Row]:
+    """Rows for the GraphRAG community-report vector index (macro-overview reports).
+
+    The ref carries the ``community:`` prefix so a dense hit shares the ref namespace of the
+    lexical leg (``CommunityReportRetriever``), letting RRF fuse the two legs on ref. Note
+    ``list_community_reports`` is NOT scope-filtered (pre-existing) — the report corpus is
+    world-global, while its embeddings persist under the store's current (world_id, version) scope;
+    in the default single scope the two coincide."""
+    return [
+        _Row(
+            ref=f"community:{r['id']}",
+            object_type="community_report",
+            title=str(r["title"]),
+            body=str(r["summary"]),
+        )
+        for r in store.list_community_reports()
     ]
 
 
@@ -96,20 +132,26 @@ class VectorRetriever:
         backend: VectorSearchBackend | None = None,
         quantized: bool = False,
         ann: bool = False,
+        auto_tier: bool = False,
     ) -> None:
         self.store = store
         self.embedder = embedder or HashingEmbedder()
         self._rows_loader = rows_loader
         self._vectors_table = vectors_table
         # Default fp32 (lossless, the safe default). ``quantized=True`` opts into the int8 two-stage
-        # backend (G2-A): ~4× smaller / ~3× faster scan with an fp32 rerank that keeps recall
-        # ~0.999. Ignored when an explicit ``backend`` is injected.
+        # backend: ~4× smaller / ~3× faster scan with an fp32 rerank that keeps recall ~0.999.
+        # Ignored when an explicit ``backend`` is injected.
         self._quantized = quantized
-        # ``ann=True`` (G2-B) opts the *large-N* corpus into the on-disk usearch HNSW backend: the
+        # ``ann=True`` opts the *large-N* corpus into the on-disk usearch HNSW backend: the
         # store only actually switches once the corpus crosses ``USEARCH_MIN_N``, so a small corpus
         # stays on the exact scan (recall 1.0) even with this set. Ignored when ``backend`` is
         # injected. Default ``False`` keeps every existing caller on the exact backend.
         self._ann = ann
+        # ``auto_tier=True`` (the product default) lets the RetrievalPolicy pick ann/int8 from the
+        # actual corpus size at build time, so the backend scales with the world instead of being
+        # pinned by a static flag. Small/eval corpora resolve to lossless fp32 exact scan (the
+        # acceptance recall gate is never perturbed); large ones get int8 and then the HNSW index.
+        self._auto_tier = auto_tier
         self._rows: list[_Row] = []
         # The search index. Built lazily once the embedding dim is known (a sqlite-vec ``vec0``
         # table is declared ``FLOAT[dim]``, and a lazy ``SemanticEmbedder`` only reveals its dim
@@ -139,11 +181,45 @@ class VectorRetriever:
         load → hashing fallback) flips this to ``False`` instead of lying ``True``."""
         return self.model_id.startswith("st:")
 
-    def similarities(self, query: str, refs: list[str]) -> dict[str, float]:
-        """Cosine of ``query`` to each requested ref's stored vector, for hybrid reranking."""
+    def encode_query(self, text: str) -> QueryBundle:
+        """Encode + L2-normalise ``text`` once into a reusable :class:`QueryBundle`.
+
+        The single-encode carrier: the returned vector is exactly what ``search``/``similarities``
+        compute from a raw ``str`` (``_normalise`` of ``embedder.embed`` as fp32), so passing the
+        bundle to either is bit-identical to passing the text — it just avoids re-embedding."""
+        return QueryBundle(text=text, embedding=self._query_vector(text))
+
+    def encode_queries(self, texts: list[str]) -> list[QueryBundle]:
+        """Batch-encode ``texts`` in a single ``embed_many`` call, then L2-normalise each.
+
+        Equivalent to ``[encode_query(t) for t in texts]`` but issues one ``embed_many`` so a
+        neural backend runs a single batched forward pass (the BEIR/SentenceTransformers
+        ``encode_queries`` convention). Under the default per-item ``embed_many`` (the
+        ``HashingEmbedder``) the result is bit-identical to the per-text path; a real transformer
+        backend may differ by the tiny numerics of batched vs single encode (intended batching)."""
+        if not texts:
+            return []
+        raw = self.embedder.embed_many(texts)
+        return [
+            QueryBundle(text=text, embedding=_normalise(np.asarray(vec, dtype=np.float32)))
+            for text, vec in zip(texts, raw, strict=True)
+        ]
+
+    def _query_vector(self, query: str | QueryBundle) -> np.ndarray:
+        """The normalised query vector: reuse a bundle's embedding, else encode the raw text."""
+        if isinstance(query, QueryBundle):
+            return query.embedding
+        return _normalise(np.asarray(self.embedder.embed(query), dtype=np.float32))
+
+    def similarities(self, query: str | QueryBundle, refs: list[str]) -> dict[str, float]:
+        """Cosine of ``query`` to each requested ref's stored vector, for hybrid reranking.
+
+        ``query`` may be a raw ``str`` (encoded here) or a pre-encoded :class:`QueryBundle` (its
+        vector reused), so a caller that already embedded the query for the dense leg does not pay
+        for a second encode."""
         if not refs or self._backend is None:
             return {}
-        q = _normalise(np.asarray(self.embedder.embed(query), dtype=np.float32))
+        q = self._query_vector(query)
         scores: dict[str, float] = {}
         for ref in refs:
             stored = self._backend.vector_for(ref)
@@ -152,10 +228,10 @@ class VectorRetriever:
             scores[ref] = float(stored @ q)
         return scores
 
-    def search(self, query: str, *, limit: int = 10) -> list[RetrievalHit]:
+    def search(self, query: str | QueryBundle, *, limit: int = 10) -> list[RetrievalHit]:
         if not self._rows or self._backend is None:
             return []
-        q = _normalise(np.asarray(self.embedder.embed(query), dtype=np.float32))
+        q = self._query_vector(query)
         # The backend returns up to ``limit`` (ref, score) pairs already ordered by score desc,
         # ref asc on ties. Apply the retriever's ``score > 0`` rule and materialise hits; because
         # the backend order matches the historical stable argsort, the kept set is identical to the
@@ -269,6 +345,20 @@ class VectorRetriever:
             model_id=persist_model_id,
         )
 
+    def _resolve_tier(self) -> tuple[bool, bool]:
+        """Return the ``(quantized, ann)`` flags for the backend build.
+
+        In auto mode the RetrievalPolicy maps the current corpus size to a tier (small → fp32 exact,
+        mid → int8, large → int8 + HNSW); otherwise the static constructor flags are used verbatim.
+        ``ann`` still self-gates on ``USEARCH_MIN_N`` inside the store, so auto and static agree on
+        the safety valve — this only makes the *default* corpus-adaptive instead of pinned off."""
+        if not self._auto_tier:
+            return self._quantized, self._ann
+        from .policy import RetrievalPolicy  # noqa: PLC0415 — lazy: avoid import cycle
+
+        policy = RetrievalPolicy.for_corpus(len(self._rows))
+        return policy.use_int8, policy.use_ann
+
     def _sync_backend(
         self,
         *,
@@ -286,12 +376,13 @@ class VectorRetriever:
         re-opened sqlite-vec backend already holds the unchanged rows, so it only needs the changed
         ones upserted and the vanished ones deleted."""
         if self._backend is None:
+            quantized, ann = self._resolve_tier()
             built: VectorSearchBackend | None = self.store.make_vector_backend(
                 model_id,
                 dim=dim,
                 table=self._vectors_table,
-                quantized=self._quantized,
-                ann=self._ann,
+                quantized=quantized,
+                ann=ann,
             )
             self._backend = built if built is not None else NumpyMatrixBackend()
 

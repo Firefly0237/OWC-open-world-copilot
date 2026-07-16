@@ -25,19 +25,25 @@ from owcopilot.worldgen.critic import WorldQuestCritic
 # Minimal offline providers for testing
 # ---------------------------------------------------------------------------
 
-_VALID_CRITIQUE = json.dumps({
-    "verdict": "pass",
-    "score": 0.85,
-    "summary": "looks good",
-    "dimensions": [{"dimension": "craft", "severity": "ok", "issue": "", "fix": ""}],
-})
+_VALID_CRITIQUE = json.dumps(
+    {
+        "verdict": "pass",
+        "score": 0.85,
+        "summary": "looks good",
+        "dimensions": [{"dimension": "craft", "severity": "ok", "issue": "", "fix": ""}],
+    }
+)
 
-_VALID_REVISE_CRITIQUE = json.dumps({
-    "verdict": "revise",
-    "score": 0.4,
-    "summary": "needs work",
-    "dimensions": [{"dimension": "intent", "severity": "blocker", "issue": "bad", "fix": "fix it"}],
-})
+_VALID_REVISE_CRITIQUE = json.dumps(
+    {
+        "verdict": "revise",
+        "score": 0.4,
+        "summary": "needs work",
+        "dimensions": [
+            {"dimension": "intent", "severity": "blocker", "issue": "bad", "fix": "fix it"}
+        ],
+    }
+)
 
 
 class _FixedProvider:
@@ -75,6 +81,7 @@ def _make_gateway(provider: Any, name: str = "cheap") -> LLMGateway:
 # ---------------------------------------------------------------------------
 # critique_with_retry: backward compatibility
 # ---------------------------------------------------------------------------
+
 
 def test_critique_with_retry_no_evaluator_uses_main_gateway() -> None:
     """[硬] evaluator_gateway=None: main gateway is used, behavior unchanged."""
@@ -169,6 +176,7 @@ def test_no_evaluator_no_exception_propagated_on_main_error() -> None:
 # QuestCritic.critique() with evaluator_gateway
 # ---------------------------------------------------------------------------
 
+
 def test_quest_critic_evaluator_gateway_parameter_accepted() -> None:
     """QuestCritic.critique() accepts evaluator_gateway without error."""
     main_provider = _FixedProvider(_VALID_CRITIQUE, "main")
@@ -210,6 +218,7 @@ def test_quest_critic_no_evaluator_backward_compatible() -> None:
 # ---------------------------------------------------------------------------
 # WorldQuestCritic.critique() with evaluator_gateway
 # ---------------------------------------------------------------------------
+
 
 def test_world_quest_critic_evaluator_gateway_routed() -> None:
     """WorldQuestCritic uses evaluator_gateway when provided."""

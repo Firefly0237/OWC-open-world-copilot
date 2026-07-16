@@ -280,6 +280,165 @@ def test_ink_extracts_knots_diverts_and_variables() -> None:
     assert {v["name"] for v in plan.variables} == {"gold", "MAX"}
 
 
+def test_ink_recognize_is_byte_for_byte_stable_except_new_condition_field() -> None:
+    """The scanner refactor must not perturb the legacy skeleton output. This script uses none of
+    the new constructs, so its full ImportPlan is identical to the pre-refactor importer's — the
+    only difference is the one added field, ``condition``, defaulting to "" on every relation."""
+    script = (
+        "VAR gold = 0\n"
+        "CONST MAX = 10\n"
+        "=== paris ===\n"
+        "We arrive in Paris.\n"
+        "-> cafe\n"
+        "= cafe\n"
+        "A small cafe.\n"
+        "-> london\n"
+        "=== london ===\n"
+        "The end.\n"
+        "-> END\n"
+    )
+    dumped = recognize_ink(script, source_file="story.ink").model_dump(mode="json")
+
+    def _entity(node_id: str, line: int) -> dict:
+        return {
+            "id": node_id,
+            "name": node_id,
+            "type": "event",
+            "description": "",
+            "fields": {},
+            "source_ref": {"file": "story.ink", "locator": f"ink:{node_id}@L{line}"},
+            "confidence": 1.0,
+            "method": "deterministic",
+        }
+
+    def _rel(src: str, tgt: str, target_word: str, line: int) -> dict:
+        return {
+            "source": src,
+            "target": tgt,
+            "kind": "leads_to",
+            "evidence": f"-> {target_word}",
+            "condition": "",  # the one new field; empty = unconditional (was absent before)
+            "source_ref": {"file": "story.ink", "locator": f"ink:{src}->{target_word}@L{line}"},
+            "confidence": 1.0,
+            "method": "deterministic",
+        }
+
+    assert dumped == {
+        "source_format": "ink",
+        "entities": [_entity("paris", 3), _entity("paris.cafe", 6), _entity("london", 9)],
+        "relations": [
+            _rel("paris", "paris.cafe", "cafe", 5),
+            _rel("paris.cafe", "london", "london", 8),
+        ],
+        "column_mapping": None,
+        "columns": [],
+        "variables": [
+            {"kind": "VAR", "name": "gold", "value": "0"},
+            {"kind": "CONST", "name": "MAX", "value": "10"},
+        ],
+        "unmapped": [],
+        "warnings": [],
+        "new": [],
+        "changed": [],
+        "unchanged": [],
+    }
+
+
+def test_ink_conditional_choice_becomes_guarded_edge() -> None:
+    """A conditional choice with a same-line divert yields a ``leads_to`` edge whose evidence is the
+    choice's shown text and whose ``condition`` is the guard translated into the logic DSL."""
+    script = (
+        "VAR teacup = false\n"
+        "=== start ===\n"
+        "-> offer\n"
+        "= offer\n"
+        "He pushes a cup toward me.\n"
+        "* {not teacup} [Take it] -> drink\n"
+        "* [Refuse] -> leave\n"
+        "= drink\n"
+        "I take a sip. -> END\n"
+        "= leave\n"
+        "I push it away. -> END\n"
+    )
+    plan = recognize_ink(script, source_file="tea.ink")
+
+    edges = {(r.source, r.target): r for r in plan.relations}
+    take = edges[("start.offer", "start.drink")]
+    assert take.condition == "not teacup"  # guard translated into the DSL
+    assert take.evidence == "Take it"  # the choice's shown (bracket) text, not "-> drink"
+    refuse = edges[("start.offer", "start.leave")]
+    assert refuse.condition == ""  # unconditional choice
+    assert not plan.warnings
+
+
+def test_ink_labelled_gather_is_addressable_and_tunnel_is_not_an_edge() -> None:
+    """A labelled gather ``- (name)`` becomes an addressable node so a later ``-> name`` resolves;
+    a tunnel (``-> x ->`` / ``->->``) is recognized and skipped, not mis-captured as an edge."""
+    script = (
+        "=== hub ===\n"
+        "- (loop) You are back at the hub.\n"
+        "* [Go around] -> loop\n"  # divert to the labelled gather
+        "* [Leave] -> side -> hub\n"  # a tunnel call — must NOT become an edge
+        "=== side ===\n"
+        "A detour. ->->\n"  # tunnel return — must NOT become an edge
+    )
+    plan = recognize_ink(script, source_file="hub.ink")
+
+    assert "hub.loop" in {e.id for e in plan.entities}  # labelled gather is an addressable node
+    rels = {(r.source, r.target) for r in plan.relations}
+    assert ("hub", "hub.loop") in rels  # -> loop resolves to the labelled gather
+    assert not any(t == "side" for _, t in rels)  # tunnel target is not emitted as an edge
+    assert not any(r.target == "hub" and r.source == "side" for r in plan.relations)
+
+
+def test_ink_untranslatable_guard_is_flagged_not_silently_dropped() -> None:
+    """ink's ``&&`` is not in the logic DSL. The guard is left empty on the edge and its raw text is
+    surfaced as a warning — the condition is never silently coerced or lost."""
+    script = (
+        "VAR a = false\n"
+        "VAR b = false\n"
+        "=== start ===\n"
+        "* {a && b} [Both] -> done\n"
+        "=== done ===\n"
+        "-> END\n"
+    )
+    plan = recognize_ink(script, source_file="g.ink")
+
+    edge = next(r for r in plan.relations if r.target == "done")
+    assert edge.condition == ""  # DSL cannot express `a && b`
+    assert any("a && b" in w and "DSL" in w for w in plan.warnings)  # raw kept for review
+
+
+def test_ink_untranslatable_guard_on_a_non_edge_choice_is_still_flagged() -> None:
+    """A guarded choice that continues into the weave (no same-line ``-> target``) never becomes an
+    edge, so it bypasses the edge loop. Its untranslatable guard must still surface as a warning —
+    otherwise (the regressed behaviour) it would be silently lost from the review surface."""
+    script = (
+        "VAR a = false\n"
+        "VAR b = false\n"
+        "=== start ===\n"
+        "* {a && b} keep going\n"  # guarded choice, NO divert — falls through into the weave
+        "- The story continues.\n"
+    )
+    plan = recognize_ink(script, source_file="g.ink")
+
+    assert not plan.relations  # no same-line divert → no materialized edge
+    assert any("a && b" in w and "DSL" in w for w in plan.warnings)  # raw kept for review anyway
+
+
+def test_ink_choice_condition_flows_into_relation_metadata() -> None:
+    """The translated guard rides through plan_to_bundle into the content Relation's metadata, the
+    structured home for an edge condition (the content model is untouched by this task)."""
+    script = (
+        "VAR forceful = 0\n=== start ===\n* {forceful > 0} [Press] -> push\n=== push ===\n-> END\n"
+    )
+    plan = recognize_ink(script, source_file="c.ink")
+    bundle = plan_to_bundle(plan)
+    relation = next(r for r in bundle.relations if r.target == "push")
+    assert relation.metadata["condition"] == "forceful > 0"
+    assert relation.metadata["evidence"] == "Press"
+
+
 # --- Yarn adapter ------------------------------------------------------------------------------
 def test_yarn_extracts_nodes_jumps_speakers_and_variables() -> None:
     script = (
@@ -351,6 +510,23 @@ def test_unity_asset_refs_are_flagged_not_invented() -> None:
     assert ("HeroData", "IronGuard", "alliedFaction") in rels
     assert "homeRegion" in plan.unmapped  # unresolvable fileID/PathID ref — kept, not guessed
     assert any("GUID" in w or "fileID" in w for w in plan.warnings)
+
+
+def test_ink_and_yarn_accept_cjk_identifiers() -> None:
+    """CJK-named knots/nodes/speakers are first-class (a CJK-first tool must not silently drop
+    them); ASCII names starting with W/d guard against regex-class typos."""
+    ink_src = "=== 序章 ===\n-> Warehouse\n=== Warehouse ===\n-> END\n"
+    plan = recognize_ink(ink_src)
+    ids = {e.id for e in plan.entities}
+    assert {"序章", "Warehouse"} <= ids
+    assert ("序章", "Warehouse", "leads_to") in {
+        (r.source, r.target, r.kind) for r in plan.relations
+    }
+    yarn_src = (
+        "title: 开场\n---\n玛拉: 你来了。\n<<jump Warehouse>>\n===\ntitle: Warehouse\n---\nx\n===\n"
+    )
+    yarn = recognize_yarn(yarn_src)
+    assert {"开场", "Warehouse", "玛拉"} <= {e.id for e in yarn.entities}
 
 
 # --- action + CLI: end to end against a seeded project -----------------------------------------

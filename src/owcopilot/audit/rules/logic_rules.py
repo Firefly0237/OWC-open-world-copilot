@@ -1,3 +1,4 @@
+# 任务逻辑层规则（WS-A）：把逻辑层发现的确定性问题以审计 finding 暴露。
 """Quest logic-layer rules (WS-A): surface the deterministic logic problems found by
 ``logic.audit_quest_logic`` (undefined vars / type errors / unreachable stages / deadlocks) plus
 the bundle-aware dangling-reference check (stage/quest ids that do not exist)."""

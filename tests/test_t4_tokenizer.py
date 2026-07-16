@@ -16,6 +16,7 @@ import warnings
 # Basic token counting with tiktoken
 # ---------------------------------------------------------------------------
 
+
 def test_count_tokens_cjk_english_mix() -> None:
     """T4-C-1: Mixed CJK+English returns a real BPE count in [6, 10]."""
     from owcopilot.llm.tokenizer import count_tokens
@@ -83,6 +84,7 @@ def test_count_tokens_long_text() -> None:
 # Fallback behaviour when tiktoken is not available
 # ---------------------------------------------------------------------------
 
+
 def test_count_tokens_fallback_no_tiktoken(monkeypatch) -> None:
     """T4-C-3: Without tiktoken, falls back to len//4 and emits UserWarning (not silent)."""
     import owcopilot.llm.tokenizer as tok_mod
@@ -135,9 +137,7 @@ def test_count_tokens_fallback_emits_warning_on_import_error(monkeypatch) -> Non
             tok_mod.count_tokens("test text")
             # The UserWarning must have been emitted
             user_warnings = [x for x in w if issubclass(x.category, UserWarning)]
-            assert user_warnings, (
-                "Expected a UserWarning when tiktoken is unavailable, got none"
-            )
+            assert user_warnings, "Expected a UserWarning when tiktoken is unavailable, got none"
             assert any("tiktoken" in str(x.message) for x in user_warnings)
     finally:
         tok_mod._ENCODER = original_encoder
@@ -147,6 +147,7 @@ def test_count_tokens_fallback_emits_warning_on_import_error(monkeypatch) -> Non
 # ---------------------------------------------------------------------------
 # _trim_transcript uses token counts (T4-C integration)
 # ---------------------------------------------------------------------------
+
 
 def test_trim_transcript_uses_token_budget() -> None:
     """_trim_transcript respects token budget, not char budget."""
@@ -195,6 +196,7 @@ def test_trim_transcript_always_keeps_one_turn() -> None:
 # P3a: honest approximation annotation (non-OpenAI models / budget-not-billing)
 # ---------------------------------------------------------------------------
 
+
 def test_tokenizer_documents_approximation_and_non_billing() -> None:
     """The docstrings must honestly flag the count as an APPROXIMATION for non-OpenAI models and
     state it is for context-budget, never billing — the P3a honesty red line."""
@@ -212,3 +214,72 @@ def test_tokenizer_documents_approximation_and_non_billing() -> None:
     assert "billing" in blob or "billed" in blob or "not for billing" in blob
     # error is bounded
     assert "bound" in blob, "must state the approximation error is bounded"
+
+
+# ---------------------------------------------------------------------------
+# T5: token-budget truncation (truncate_to_token_budget)
+# ---------------------------------------------------------------------------
+
+
+def test_truncate_to_token_budget_same_limit_consistent() -> None:
+    """T5: the same token cap yields the same kept-token budget regardless of language.
+
+    A CJK-heavy string and an English string that each exceed N tokens both truncate to exactly N
+    tokens — the budget is measured in tokens, so it is language-independent (unlike a char cap,
+    which would keep ~4x more CJK content for the same char count)."""
+    from owcopilot.llm.tokenizer import count_tokens, truncate_to_token_budget
+
+    n = 50
+    cjk = "在一个遥远古老的王国里住着一位勇敢的骑士和一条沉睡的巨龙。" * 20
+    eng = "The quick brown fox jumps over the lazy dog by the riverbank. " * 20
+
+    # Precondition (via production count_tokens): both genuinely exceed the budget.
+    assert count_tokens(cjk) > n
+    assert count_tokens(eng) > n
+
+    cjk_head, cjk_kept = truncate_to_token_budget(cjk, n)
+    eng_head, eng_kept = truncate_to_token_budget(eng, n)
+
+    assert cjk_kept == n
+    assert eng_kept == n
+    # The heads are real prefixes cut to the budget, not the whole string.
+    assert len(cjk_head) < len(cjk)
+    assert len(eng_head) < len(eng)
+
+
+def test_truncate_to_token_budget_within_budget_returns_text_unchanged() -> None:
+    """Text already within the budget is returned unchanged with its true token count."""
+    from owcopilot.llm.tokenizer import count_tokens, truncate_to_token_budget
+
+    text = "hello world"
+    tokens = count_tokens(text)
+    head, kept = truncate_to_token_budget(text, tokens + 100)
+    assert head == text
+    assert kept == tokens
+
+
+def test_truncate_to_token_budget_zero_or_empty() -> None:
+    """Non-positive budget or empty text → ('', 0), never a crash."""
+    from owcopilot.llm.tokenizer import truncate_to_token_budget
+
+    assert truncate_to_token_budget("anything", 0) == ("", 0)
+    assert truncate_to_token_budget("anything", -5) == ("", 0)
+    assert truncate_to_token_budget("", 100) == ("", 0)
+
+
+def test_truncate_to_token_budget_fallback_no_tiktoken(monkeypatch) -> None:
+    """T5: with tiktoken forced unavailable, truncate falls back to a char-proportional head
+    (len ≤ max_tokens*4) consistent with count_tokens' ÷4 fallback, and never crashes."""
+    import owcopilot.llm.tokenizer as tok_mod
+    from owcopilot.llm.tokenizer import reset_encoder_cache, truncate_to_token_budget
+
+    reset_encoder_cache()
+    monkeypatch.setattr(tok_mod, "_ENCODER", tok_mod._FALLBACK_SENTINEL)
+    try:
+        text = "hello world " * 100
+        head, kept = truncate_to_token_budget(text, 10)
+        assert len(head) <= 10 * 4
+        assert kept == max(1, len(head) // 4)
+        assert kept >= 1
+    finally:
+        reset_encoder_cache()

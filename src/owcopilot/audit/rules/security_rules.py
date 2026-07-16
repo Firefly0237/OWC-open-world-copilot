@@ -1,3 +1,4 @@
+# 面向安全的内容检查（注入痕迹/越界引用等）。
 """Security-oriented content checks."""
 
 from __future__ import annotations

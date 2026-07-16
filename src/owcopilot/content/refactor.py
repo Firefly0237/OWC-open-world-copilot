@@ -1,3 +1,4 @@
+# canon 级安全重命名/重构：改显示名，或改 id 并级联更新所有引用（不留悬空引用）。
 """Safe canon-wide rename/refactor: change an object's display name, or change its id and update
 *every* reference to it (relations, quest giver/location/prereqs/stage-entities/logic, POI
 region/faction, dialogue speakers). The plan is computed first (dry-run), applied atomically on a

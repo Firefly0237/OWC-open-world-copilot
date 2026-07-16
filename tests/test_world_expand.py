@@ -135,6 +135,19 @@ def test_expand_grows_grounded_content_into_review_then_accept_merges(tmp_path) 
     assert all(q.origin.value == "ai_draft" for q in new_quests)
 
 
+def test_expand_action_surfaces_conversion_report(tmp_path) -> None:
+    # Parity with run_world_seed_action: the honest normalisation ledger rides on the action's
+    # return dict (serialized ConversionReport -> {"notes": [...]}), so a partial expand is visible
+    # to CLI/REST/web instead of silently completing.
+    root = tmp_path / "content"
+    _seed_world(root)
+    brief = {"focus_ref": "region:region_crown", "poi_count": 1, "npc_count": 1, "quest_count": 1}
+    result = run_world_expand_action(root, brief=brief)
+    assert "conversion_report" in result
+    assert isinstance(result["conversion_report"], dict)
+    assert "notes" in result["conversion_report"]
+
+
 def test_expand_emits_real_stages_and_quests_ground_on_canon_or_new(tmp_path) -> None:
     root = tmp_path / "content"
     existing = _seed_world(root)
@@ -222,11 +235,13 @@ def test_expand_unknown_focus_is_a_clear_error(tmp_path) -> None:
         run_world_expand_action(root, brief={"focus_ref": "region:region_ghost"})
 
 
-def test_expand_grounding_ledger_flags_dangling_but_stays_buildable(tmp_path) -> None:
-    """A reference the model invents (no such canon id) is recorded as dangling by the deterministic
-    ledger and flagged by the gaps check — yet the assembled bundle stays buildable, anchored to the
-    focus, exactly like creation's id-rescue. The honest measure is on the raw payload, not the
-    rescued bundle."""
+def test_expand_grounding_ledger_flags_dangling_and_preserves_raw_value_for_audit(tmp_path) -> None:
+    """A reference the model invents (no such canon id) is recorded as dangling by the
+    deterministic ledger AND kept VERBATIM in the assembled bundle — never round-robined onto a
+    real canon sibling. This is the scale-p0 batch-2 alignment with genesis's ``_grounded_ref``
+    (worldgen/service.py): the deterministic reference audit is the arbiter for a wrong reference,
+    not a silent id-rescue here. The honest measure is on the raw payload AND on the assembled
+    bundle now — they agree."""
     root = tmp_path / "content"
     existing = _seed_world(root)
     canon = _canon_id_sets(existing)
@@ -259,7 +274,7 @@ def test_expand_grounding_ledger_flags_dangling_but_stays_buildable(tmp_path) ->
 
     focus = _resolve_focus(existing, "region:region_crown")
     empty_pack = ContextPack(query="x", budget_tokens=10)
-    bundle, grounding = _expand_bundle_from_payload(
+    bundle, grounding, _conversion_report = _expand_bundle_from_payload(
         payload,
         draft_id="test",
         brief=WorldExpandBrief(focus_ref="region:region_crown"),
@@ -271,12 +286,29 @@ def test_expand_grounding_ledger_flags_dangling_but_stays_buildable(tmp_path) ->
     # the invented faction/npc references are recorded as dangling…
     assert any("fac_ghost" in ref for ref in grounding.dangling_refs)
     assert any("npc_ghost" in ref for ref in grounding.dangling_refs)
-    # …but the bundle still builds: the new POI grounded its region on real canon.
+    # …and kept verbatim in the assembled bundle: the VALID region ref still lands on real canon,
+    # but the INVALID faction/npc refs are preserved rather than silently replaced.
     assert len(bundle.pois) == 1
     poi = next(iter(bundle.pois.values()))
     assert poi.region_id == "region_crown"
-    # the faction fell back to the first real canon faction (never the invented fac_ghost)
-    assert poi.controlling_faction in canon["faction"]
+    assert poi.controlling_faction == "fac_ghost"  # never falls back to a real canon faction
+    quest = next(iter(bundle.quests.values()))
+    assert quest.giver_npc == "npc_ghost"  # never falls back to a real canon npc
+
+    # …which is the whole point: the deterministic audit (existing rules, unmodified) now actually
+    # catches what the ledger flagged, instead of it vanishing into an anchored substitute.
+    from owcopilot.app.actions import _merge_preview
+    from owcopilot.audit.context import AuditContext
+    from owcopilot.audit.rules.graph_rules import MissingRelationEndpointRule
+    from owcopilot.audit.rules.reference_rules import MissingEntityReferenceRule
+
+    merged = _merge_preview(existing, bundle)
+    ctx = AuditContext.from_bundle(merged)
+    entity_issues = {issue.target_ref for issue in MissingEntityReferenceRule().check(ctx)}
+    assert f"poi:{poi.id}" in entity_issues  # controlling_faction -> fac_ghost
+    assert f"quest:{quest.id}" in entity_issues  # giver_npc -> npc_ghost
+    relation_issues = list(MissingRelationEndpointRule().check(ctx))
+    assert any("fac_ghost" in issue.target_ref for issue in relation_issues)  # npc member_of
 
 
 def test_expand_grounding_ledger_counts_omitted_refs_as_unspecified(tmp_path) -> None:
@@ -295,7 +327,7 @@ def test_expand_grounding_ledger_counts_omitted_refs_as_unspecified(tmp_path) ->
         "quests": [],
         "relations": [],
     }
-    _bundle, grounding = _expand_bundle_from_payload(
+    _bundle, grounding, _conversion_report = _expand_bundle_from_payload(
         payload,
         draft_id="test",
         brief=WorldExpandBrief(focus_ref="region:region_crown"),
@@ -307,6 +339,85 @@ def test_expand_grounding_ledger_counts_omitted_refs_as_unspecified(tmp_path) ->
     assert grounding.dangling_refs == []  # nothing invented…
     assert grounding.unspecified_refs  # …but the blank refs are surfaced, not hidden
     assert grounding.is_trustworthy is False
+
+
+def test_expand_bundle_records_derived_stage_on_conversion_report(tmp_path) -> None:
+    """A quest that arrives with no ``stages`` gets one derived from its own ``objective`` (never a
+    preset placeholder beat) — same as genesis's identical derivation in ``_bundle_from_payload``.
+    This must be recorded on the returned ``ConversionReport``, not silently absorbed: expand used
+    to derive the stage without any bookkeeping at all (the scale-p0 batch-2 gap this closes)."""
+    root = tmp_path / "content"
+    existing = _seed_world(root)
+    focus = _resolve_focus(existing, "region:region_crown")
+    empty_pack = ContextPack(query="x", budget_tokens=10)
+    payload = {
+        "pois": [],
+        "npcs": [],
+        "quests": [
+            {
+                "id": "quest_new",
+                "title": "无阶段支线",
+                "objective": "调查冠门车站的能源中断复发。",
+                "giver_npc": "npc_sera",
+                "location": "loc_gate",
+                # no "stages" key at all — must be derived from objective, and recorded
+            }
+        ],
+        "relations": [],
+    }
+    bundle, _grounding, conversion_report = _expand_bundle_from_payload(
+        payload,
+        draft_id="test",
+        brief=WorldExpandBrief(focus_ref="region:region_crown"),
+        focus=focus,
+        existing=existing,
+        inspiration_pack=empty_pack,
+        project_pack=empty_pack,
+    )
+    quest = bundle.quests["quest_new"]
+    assert len(quest.stages) == 1
+    assert quest.stages[0].summary == quest.objective
+
+    assert conversion_report.is_clean is False
+    derived = conversion_report.by_kind("derived_stage")
+    assert len(derived) == 1
+    assert derived[0].ref == "quest:quest_new"
+    assert derived[0].detail == f"objective={quest.objective}"
+
+
+def test_expand_bundle_conversion_report_is_clean_when_quest_has_stages(tmp_path) -> None:
+    """The counterpart to the derived-stage test above: a quest that DOES carry stages must not be
+    flagged — the ledger only records what was actually completed, nothing else."""
+    root = tmp_path / "content"
+    existing = _seed_world(root)
+    focus = _resolve_focus(existing, "region:region_crown")
+    empty_pack = ContextPack(query="x", budget_tokens=10)
+    payload = {
+        "pois": [],
+        "npcs": [],
+        "quests": [
+            {
+                "id": "quest_new",
+                "title": "有阶段支线",
+                "objective": "调查冠门车站的能源中断复发。",
+                "giver_npc": "npc_sera",
+                "location": "loc_gate",
+                "stages": ["勘察现场", "对峙抉择"],
+            }
+        ],
+        "relations": [],
+    }
+    bundle, _grounding, conversion_report = _expand_bundle_from_payload(
+        payload,
+        draft_id="test",
+        brief=WorldExpandBrief(focus_ref="region:region_crown"),
+        focus=focus,
+        existing=existing,
+        inspiration_pack=empty_pack,
+        project_pack=empty_pack,
+    )
+    assert len(bundle.quests["quest_new"].stages) == 2
+    assert conversion_report.is_clean is True
 
 
 def test_expand_job_kind_runs_over_rest(tmp_path, monkeypatch) -> None:

@@ -1,3 +1,4 @@
+# 表达式语言的静态类型检查、求值与状态。
 """Static type checking, evaluation, and state for the quest logic expression language.
 
 Evaluation is explicit tree-walking over a parsed AST against a concrete state — there is no

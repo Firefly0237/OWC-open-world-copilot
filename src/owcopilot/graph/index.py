@@ -1,3 +1,4 @@
+# v2 内容图索引：从 canon 关系建图（检索/影响面/可视化共用）。
 """Content graph index for v2.
 
 Nodes use stable refs (`entity:npc_aldric`, `quest:quest_missing_caravan`) so audit evidence,

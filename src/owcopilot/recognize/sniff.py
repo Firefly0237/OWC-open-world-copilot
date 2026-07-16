@@ -1,3 +1,4 @@
+# 从文件名 + 内容样本猜源格式，供 UI 预选（可覆盖）。
 """Guess a source format from a filename + a content sample, so the UI can pre-select (overridable).
 
 Extension wins when it's unambiguous; otherwise we look at the content's shape. JSON is the tricky

@@ -1,3 +1,4 @@
+# 网关的客户端缓存后端：命中即短路请求（省钱省延迟）。
 """Client-side cache backends for the gateway — the layer that short-circuits a request
 *before* any API call, so we save the whole call (tokens + latency), not just a discount.
 

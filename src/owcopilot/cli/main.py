@@ -1,9 +1,11 @@
+# CLI 入口：v2 项目工作流全部子命令。JSON 输出、可进 CI。
 """Command-line entrypoint for the v2 project workflow."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from collections.abc import Sequence
@@ -11,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..assist.barks import BarkBatchService
+from ..assist.calibration import build_calibration_report
 from ..assist.drafts import QuestDraftService
 from ..assist.offline import OfflineBarksProvider, OfflineQuestDraftProvider
 from ..assist.review_queue import ReviewQueue
@@ -49,8 +52,30 @@ from ..readiness import assess_readiness
 from ..telemetry import deterministic_step, llm_step, summarize_workflow
 from ..util import load_dotenv
 
+logger = logging.getLogger(__name__)
+
+
+def _configure_output_encoding() -> None:
+    """Keep CLI output alive on non-UTF-8 consoles (e.g. Windows GBK).
+
+    Model output can contain characters outside the console encoding (emoji, variation
+    selectors). With the default errors='strict', one such character kills the whole command
+    with a raw UnicodeEncodeError (exit 2). backslashreplace degrades only the unencodable
+    characters to \\uXXXX escapes — CJK still renders, and the emitted JSON stays valid for
+    pipes/files. Streams without reconfigure (test capture shims) are left untouched.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="backslashreplace")
+        except Exception:  # noqa: BLE001 — an exotic stream must not break the CLI itself
+            pass
+
 
 def main(argv: Sequence[str] | None = None) -> int:
+    _configure_output_encoding()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -109,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     readiness = subparsers.add_parser(
         "readiness",
-        help="Score content against the production-ready standard (completeness, not correctness).",
+        help="Score content against the completeness standard (completeness, not correctness).",
     )
     _add_project_args(readiness)
     readiness.add_argument(
@@ -120,9 +145,148 @@ def build_parser() -> argparse.ArgumentParser:
     readiness.add_argument(
         "--only-incomplete",
         action="store_true",
-        help="List only items that are not yet production-ready.",
+        help="List only items that are not yet complete.",
     )
     readiness.set_defaults(handler=_cmd_readiness)
+
+    quest_explore = subparsers.add_parser(
+        "quest-explore",
+        help=(
+            "Bounded full-path exploration of one quest's branch graph (narrative model checking): "
+            "outcome reachability with replayable witnesses, dead branches, stage/branch coverage, "
+            "and dead ends. A $0 diagnostic report — never a pass/fail gate. `truncated` flags a "
+            "boundary hit."
+        ),
+    )
+    _add_project_args(quest_explore)
+    quest_explore.add_argument("quest_id", help="Quest id to explore (from the content bundle).")
+    quest_explore.add_argument(
+        "--max-states",
+        type=_nonneg_int,
+        default=100_000,
+        help="State-graph budget: stop after this many distinct (stage, var-state) nodes.",
+    )
+    quest_explore.add_argument(
+        "--max-depth",
+        type=_nonneg_int,
+        default=10_000,
+        help="Path-depth budget: stop expanding a path past this many transitions.",
+    )
+    quest_explore.set_defaults(handler=_cmd_quest_explore)
+
+    quest_simulate = subparsers.add_parser(
+        "quest-simulate",
+        help=(
+            "Deterministic single-path playtest of one quest (the $0 counterpart of "
+            "quest-explore): walk stages with a fixed choice script, applying stage and branch "
+            "effects, and report the path, per-step effects and final state."
+        ),
+    )
+    _add_project_args(quest_simulate)
+    quest_simulate.add_argument("quest_id", help="Quest id to simulate (from the content bundle).")
+    quest_simulate.add_argument(
+        "--choices",
+        help=(
+            "Comma-separated branch ids to prefer at decision stages (a witness from "
+            "quest-explore replays verbatim here)."
+        ),
+    )
+    quest_simulate.add_argument(
+        "--initial-state",
+        help=(
+            "Path to a JSON object of variable overrides — e.g. the final_state of a dialogue "
+            "walk, closing the dialogue-choice -> quest-path loop."
+        ),
+    )
+    quest_simulate.add_argument(
+        "--dialogue-tree",
+        help=(
+            "Walk this dialogue tree FIRST and feed its final_state into the simulation (the "
+            "composition contract: dialogue choices set variables, quest logic reads them). "
+            "--initial-state overrides walk values on key conflicts."
+        ),
+    )
+    quest_simulate.add_argument(
+        "--dialogue-choices",
+        help="Comma-separated '<node_id>:<index>' selectors for the pre-walk dialogue tree.",
+    )
+    quest_simulate.set_defaults(handler=_cmd_quest_simulate)
+
+    dialogue_walk = subparsers.add_parser(
+        "dialogue-walk",
+        help=(
+            "Walk one dialogue tree deterministically (conditions gate choices, chosen effects "
+            "mutate state) or, with --explore, enumerate every satisfiable path — the dialogue "
+            "counterpart of quest-simulate / quest-explore."
+        ),
+    )
+    _add_project_args(dialogue_walk)
+    dialogue_walk.add_argument("tree_id", help="Dialogue tree id (from the content bundle).")
+    dialogue_walk.add_argument(
+        "--choices", help="Comma-separated '<node_id>:<index>' selectors to prefer."
+    )
+    dialogue_walk.add_argument(
+        "--initial-state", help="Path to a JSON object of variable overrides."
+    )
+    dialogue_walk.add_argument(
+        "--explore",
+        action="store_true",
+        help="Enumerate every condition-satisfiable path (endings + choice coverage) instead.",
+    )
+    dialogue_walk.set_defaults(handler=_cmd_dialogue_walk)
+
+    prompts = subparsers.add_parser(
+        "prompts",
+        help=(
+            "Inspect the prompt registry: every model-facing prompt with purpose, task label, "
+            "output contract and source. `prompts` lists; `prompts --show <name>` prints one "
+            "prompt's full text and metadata."
+        ),
+    )
+    prompts.add_argument("--show", metavar="NAME", help="Print one prompt's metadata + text.")
+    prompts.add_argument("--output", help="Write the JSON result to this file as well as stdout.")
+    prompts.set_defaults(handler=_cmd_prompts)
+
+    memory_report = subparsers.add_parser(
+        "memory-report",
+        help=(
+            "Report the review feedback loop over a workspace: review-queue state, "
+            "reviewer calibration, and the lesson feedback path."
+        ),
+    )
+    _add_project_args(memory_report)
+    memory_report.add_argument(
+        "--write-lessons",
+        action="store_true",
+        help=(
+            "Also distill lessons from the calibration report and persist them to the lesson "
+            "archive (the same write path the REST calibration endpoint uses) — closes the "
+            "memory loop for CLI-only workflows."
+        ),
+    )
+    memory_report.set_defaults(handler=_cmd_memory_report)
+
+    lessons = subparsers.add_parser(
+        "lessons",
+        help=(
+            "Manage the cross-session lesson archive. `lessons revoke <id> --reason ...` "
+            "soft-deletes a wrong or harmful lesson so it stops being injected into prompts "
+            "(tombstoned, never physically deleted; idempotent)."
+        ),
+    )
+    _add_project_args(lessons)
+    lessons.add_argument(
+        "action",
+        choices=["revoke"],
+        help="The lesson operation to perform (currently only 'revoke').",
+    )
+    lessons.add_argument("lesson_id", help="The id of the lesson to revoke.")
+    lessons.add_argument(
+        "--reason",
+        default="",
+        help="Why the lesson is being revoked; recorded on the tombstone.",
+    )
+    lessons.set_defaults(handler=_cmd_lessons)
 
     harness = subparsers.add_parser(
         "quality-harness",
@@ -159,6 +323,26 @@ def build_parser() -> argparse.ArgumentParser:
             "Example: --skills audit_project list_issues"
         ),
     )
+    agent.add_argument(
+        "--no-recall",
+        action="store_true",
+        help=(
+            "Disable episodic memory recall (MemGPT recall storage + Reflexion buffer). "
+            "By default the agent retrieves similar past runs and reflections and injects them "
+            "as prompt context; this flag turns that read side off (writes still happen)."
+        ),
+    )
+    agent.add_argument(
+        "--early-stopping",
+        choices=["force", "generate"],
+        default="force",
+        help=(
+            "Step-budget-exhaustion behaviour (default: force = stop immediately, unchanged). "
+            "'generate' spends one extra LLM call asking for a real final answer from the "
+            "transcript collected so far (LangChain AgentExecutor's early_stopping_method="
+            "'generate'), instead of discarding it; stop_reason becomes 'max_steps_generate'."
+        ),
+    )
     _add_llm_args(agent)
     agent.set_defaults(handler=_cmd_agent)
 
@@ -178,6 +362,23 @@ def build_parser() -> argparse.ArgumentParser:
     _add_llm_args(multi_agent)
     multi_agent.set_defaults(handler=_cmd_multi_agent)
 
+    agent_history = subparsers.add_parser(
+        "agent-history",
+        help=(
+            "Inspect persisted agent runs (episodic/recall memory). Lists recent runs "
+            "newest-first; `--run-id` shows one run's full transcript. Read-only; never "
+            "writes canon."
+        ),
+    )
+    _add_project_args(agent_history)
+    agent_history.add_argument(
+        "--run-id", help="Show this run's full transcript by id (default: list recent runs)."
+    )
+    agent_history.add_argument(
+        "--limit", type=_nonneg_int, default=50, help="Max runs to list (ignored with --run-id)."
+    )
+    agent_history.set_defaults(handler=_cmd_agent_history)
+
     issues = subparsers.add_parser("issues", help="List persisted audit issues.")
     _add_project_args(issues)
     issues.add_argument("--severity", choices=["error", "warning", "info"])
@@ -195,6 +396,25 @@ def build_parser() -> argparse.ArgumentParser:
     _add_project_args(ask)
     ask.add_argument("--query", required=True)
     ask.add_argument("--budget-tokens", type=_nonneg_int, default=800)
+    ask.add_argument(
+        "--agentic",
+        action="store_true",
+        help=(
+            "Enable agentic retrieval (CRAG/Self-RAG-style sufficiency judge + query-rewrite "
+            "multi-hop) — extra LLM calls per hop, so opt-in."
+        ),
+    )
+    ask.add_argument(
+        "--faithfulness",
+        choices=["off", "offline", "llm"],
+        default=os.getenv("OWCOPILOT_QA_FAITHFULNESS", "off"),
+        help=(
+            "Opt-in RAGAS-style entailment gate on the answer (annotate, not block). off: "
+            "unchanged. offline: deterministic $0 lexical judge. llm: the answering model judges "
+            "each claim (requires --llm-mode real). Low faithfulness never suppresses the answer; "
+            "it flags unsupported claims for human review."
+        ),
+    )
     _add_llm_args(ask)
     ask.set_defaults(handler=_cmd_ask)
 
@@ -248,6 +468,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-depth", type=int, default=None, help="Plan-length cap (default: scales with errors)."
     )
     repair_plan.add_argument("--seed", type=int, default=0, help="RNG seed (reproducible search).")
+    repair_plan.add_argument(
+        "--llm-candidates",
+        action="store_true",
+        help=(
+            "Widen the MCTS move set with LLM-proposed fix candidates (LATS-style LM proposer, "
+            "arXiv:2310.04406). Off by default: the search stays $0/deterministic. Needs "
+            "--llm-mode real; each model candidate is still shadow-validated and non-worsening-"
+            "pruned like the deterministic fixers."
+        ),
+    )
+    repair_plan.add_argument(
+        "--max-llm-calls",
+        type=_nonneg_int,
+        default=32,
+        help=(
+            "Hard cap on LLM proposer calls when --llm-candidates is set (LATS budget knob). "
+            "Once spent, the search falls back to the deterministic fixers."
+        ),
+    )
+    _add_llm_args(repair_plan)
     repair_plan.set_defaults(handler=_cmd_repair_plan)
 
     apply_cmd = subparsers.add_parser(
@@ -369,12 +609,60 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[target.value for target in EngineTarget],
         default=EngineTarget.GENERIC.value,
         help=(
-            "Export target recorded in the manifest. Currently 'generic' only: a checksummed "
-            "content_bundle.json plus CSV/XLIFF localization. Per-engine script generation "
-            "(ink/Yarn/Ren'Py/Twine) was removed — engine schemas differ project to project."
+            "Export target recorded in the manifest. 'generic' (default) is the checksummed "
+            "content_bundle.json plus CSV/XLIFF localization. 'unreal' and 'unity' are supersets: "
+            "each also writes the generic bundle, then adds an engine-side projection under an "
+            "unreal/ (UE DataTable JSON + StringTable CSVs + row header) or unity/ "
+            "(unity_import_manifest.json for the UPM importer) subdir."
+        ),
+    )
+    export.add_argument(
+        "--unity-localization",
+        action="store_true",
+        help=(
+            "UNITY target only: also write an opt-in String Table Collection CSV under "
+            "unity/localization/ in Unity's official com.unity.localization CSV format "
+            "(Key + one column per locale), importable via the Localization Tables window's "
+            "CSV import. Off by default; the rest of the unity/ projection is unchanged."
         ),
     )
     export.set_defaults(handler=_cmd_export)
+
+    sync_back = subparsers.add_parser(
+        "sync-back",
+        help=(
+            "Controlled engine back-flow: engine-edited quest rows (v2-shaped JSON array, as "
+            "exchanged by the engine bridges) -> three-way diff vs canon + export baseline -> "
+            "review queue. Conflicts never stage. Raw DataTable JSON goes through `recognize "
+            "--source-format ue` instead."
+        ),
+    )
+    _add_project_args(sync_back)
+    sync_back.add_argument(
+        "--input", required=True, help="Engine-side quest rows (v2-shaped JSON array)."
+    )
+    sync_back.add_argument(
+        "--baseline",
+        help=(
+            "The engine JSON OWCopilot originally exported (the export-time snapshot). "
+            "Enables conflict detection: divergence on BOTH sides is reported, never staged."
+        ),
+    )
+    sync_back.add_argument(
+        "--apply",
+        action="store_true",
+        help="Stage new + safely-changed quests into review (otherwise just print the plan).",
+    )
+    sync_back.add_argument(
+        "--explain",
+        action="store_true",
+        help=(
+            "Attach guided explanations for conflicts/warnings: deterministic diagnosis + "
+            "nearest-id candidates always; an LLM narrative summary on top (fail-closed)."
+        ),
+    )
+    _add_llm_args(sync_back)
+    sync_back.set_defaults(handler=_cmd_sync_back)
 
     recognize = subparsers.add_parser(
         "recognize",
@@ -439,6 +727,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", help="Write the JSON result to this file as well as stdout."
     )
     eval_repair.set_defaults(handler=_cmd_eval_repair)
+
+    eval_agent = subparsers.add_parser(
+        "eval-agent",
+        help=(
+            "Five-dimension agent scorecard for task completion, character consistency, "
+            "narrative plausibility, tool-call effectiveness, and safety."
+        ),
+    )
+    eval_agent.add_argument(
+        "--output", help="Write the JSON result to this file as well as stdout."
+    )
+    eval_agent.set_defaults(handler=_cmd_eval_agent)
 
     return parser
 
@@ -650,6 +950,97 @@ def _cmd_readiness(args: argparse.Namespace) -> int:
         return _emit(payload, args)
 
 
+def _read_state_file(path: str | None) -> dict | None:
+    if not path:
+        return None
+    state = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(state, dict):
+        raise ValueError(f"--initial-state 应是 JSON 对象（变量名→值）：{path}")
+    return state
+
+
+def _split_choices(raw: str | None) -> list[str]:
+    return [c.strip() for c in (raw or "").split(",") if c.strip()]
+
+
+def _cmd_quest_simulate(args: argparse.Namespace) -> int:
+    from ..logic import simulate_quest, walk_dialogue_tree
+
+    initial_state = _read_state_file(args.initial_state)
+    choices = _split_choices(args.choices)
+    with _project(args) as project:
+        quest = project.bundle.quests.get(args.quest_id)
+        if quest is None:
+            raise ValueError(
+                f"任务「{args.quest_id}」不存在。"
+                "先用 `owcopilot readiness --content-root <root> --kind quest` 列出可用的任务 id。"
+            )
+        walk_dump = None
+        if args.dialogue_tree:
+            tree = project.bundle.dialogue_trees.get(args.dialogue_tree)
+            if tree is None:
+                raise ValueError(
+                    f"对白树「{args.dialogue_tree}」不存在。可用 id："
+                    f"{'、'.join(sorted(project.bundle.dialogue_trees)) or '（无）'}"
+                )
+            walk = walk_dialogue_tree(tree, choices=_split_choices(args.dialogue_choices) or None)
+            walk_dump = walk.model_dump(mode="json")
+            # composition contract: dialogue outcome seeds the quest; explicit overrides win
+            merged = dict(walk.final_state)
+            merged.update(initial_state or {})
+            initial_state = merged
+        run = simulate_quest(quest, choices=choices or None, initial_state=initial_state)
+        payload = {
+            **run.model_dump(mode="json"),
+            "cost_budget": _deterministic_cost_budget("quest_simulate"),
+        }
+        if walk_dump is not None:
+            payload["dialogue_walk"] = walk_dump
+        return _emit(payload, args)
+
+
+def _cmd_dialogue_walk(args: argparse.Namespace) -> int:
+    from ..logic import explore_dialogue_tree, walk_dialogue_tree
+
+    initial_state = _read_state_file(args.initial_state)
+    with _project(args) as project:
+        tree = project.bundle.dialogue_trees.get(args.tree_id)
+        if tree is None:
+            raise ValueError(
+                f"对白树「{args.tree_id}」不存在。可用 id："
+                f"{'、'.join(sorted(project.bundle.dialogue_trees)) or '（无）'}"
+            )
+        if args.explore:
+            result = explore_dialogue_tree(tree, initial_state=initial_state).model_dump(
+                mode="json"
+            )
+        else:
+            result = walk_dialogue_tree(
+                tree, choices=_split_choices(args.choices) or None, initial_state=initial_state
+            ).model_dump(mode="json")
+        return _emit({**result, "cost_budget": _deterministic_cost_budget("dialogue_walk")}, args)
+
+
+def _cmd_quest_explore(args: argparse.Namespace) -> int:
+    from ..logic import explore_quest
+
+    with _project(args) as project:
+        quest = project.bundle.quests.get(args.quest_id)
+        if quest is None:
+            raise ValueError(
+                f"任务「{args.quest_id}」不存在。"
+                "先用 `owcopilot readiness --content-root <root> --kind quest` 列出可用的任务 id。"
+            )
+        report = explore_quest(quest, max_states=args.max_states, max_depth=args.max_depth)
+        return _emit(
+            {
+                **report.model_dump(mode="json"),
+                "cost_budget": _deterministic_cost_budget("quest_explore"),
+            },
+            args,
+        )
+
+
 def _cmd_quality_harness(args: argparse.Namespace) -> int:
     with _project(args) as project:
         report = run_quality_harness(
@@ -667,11 +1058,41 @@ def _cmd_quality_harness(args: argparse.Namespace) -> int:
         )
 
 
+def _recall_agent_memory(
+    episodic: Any,
+    store: Any,
+    embedder: Any,
+    goal: str,
+    *,
+    enabled: bool,
+) -> list[str] | None:
+    """Assemble the recalled episodic context for one agent run, or ``None`` when there is none.
+
+    Combines the two recall channels into the single ``reflections`` list ``ReActAgent.run`` already
+    accepts: the MemGPT similar-run block first (as one context block), then the Reflexion buffer's
+    reflections. ``enabled=False`` (--no-recall) short-circuits WITHOUT calling recall at all, so
+    the read side is genuinely off. Fail-open: any recall error is logged and treated as no hits, so
+    memory retrieval can never break the agent run. Empty ⇒ ``None`` (byte-identical prompt)."""
+    if not enabled:
+        return None
+    blocks: list[str] = []
+    try:
+        run_hits = episodic.recall_similar_runs(store, embedder, goal)
+        if run_hits:
+            blocks.append(episodic.format_history_block(run_hits))
+        blocks.extend(hit.reflection for hit in episodic.recall_reflections(store, embedder, goal))
+    except Exception as exc:  # noqa: BLE001 — recall is best-effort; never break the run
+        logger.warning("agent memory recall failed (%s); running without recalled context", exc)
+        return None
+    return blocks or None
+
+
 def _cmd_agent(args: argparse.Namespace) -> int:
-    from ..agent import ReActAgent
+    from ..agent import ReActAgent, episodic, persist_agent_run
     from ..agent.offline import OfflineReactProvider
-    from ..core.skills import default_skill_registry
     from ..mcp_server import tools as tools_mod
+    from ..retrieval.embedding import resolve_embedder
+    from ..skills import default_skill_registry
 
     if not args.goal.strip():
         raise ValueError(
@@ -688,20 +1109,16 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     gateway, telemetry = _llm_gateway(
         args, task="agent_react", offline_provider=OfflineReactProvider(), real_json_mode=False
     )
-    # SCALE-P0 #2b: open ONE shared ProjectContext for the whole ReAct run and publish it via the
-    # tools._shared_project ContextVar. Every step's tool call reuses this context (one
-    # parse/graph/vector build per task instead of one per step) and sees writes from earlier steps
-    # via the one live SQLiteStore. ProjectContext.open already runs the (now incremental, 2a)
-    # replace_* sync, so the shared view is consistent with the latest persisted state at start.
-    # The var is set out of band (not a tool parameter) so handler signatures stay clean for MCP.
+    # Open one shared ProjectContext for the whole ReAct run so tool calls reuse the same
+    # parsed project state and see writes from earlier steps.
     project = ProjectContext.open(content_root, sqlite_path=sqlite_path)
     token = tools_mod._shared_project.set(project)
     try:
         registry = default_skill_registry(content_root=str(content_root), sqlite_path=sqlite_path)
-        # BE-9: wire --skills allowlist into ReActAgent so users can restrict tool access.
+        # Wire --skills allowlist into ReActAgent so users can restrict tool access.
         # None means "all skills"; an empty list would restrict to none.
         allowed_skills: set[str] | None = set(args.skills) if args.skills is not None else None
-        # BUG-8: cross-validate --skills against the registry; warn (not fail) on unknown names
+        # Cross-validate --skills against the registry; warn (not fail) on unknown names
         # so the user knows the typo/stale skill name is silently excluded from the manifest.
         if allowed_skills is not None:
             unknown_skills = sorted(allowed_skills - set(registry.names()))
@@ -718,12 +1135,35 @@ def _cmd_agent(args: argparse.Namespace) -> int:
                     ),
                     file=sys.stderr,
                 )
+        # Episodic-memory READ side: recall semantically-similar past runs (MemGPT recall storage)
+        # and reflections (Reflexion buffer) and hand them to the actor's reflection slot — the one
+        # existing episodic-memory injection channel (no new injection surface). Default on;
+        # --no-recall disables it. Empty recall ⇒ reflections=None ⇒ byte-identical prompt.
+        embedder = resolve_embedder()
+        reflections = _recall_agent_memory(
+            episodic, project.sqlite_store, embedder, args.goal, enabled=not args.no_recall
+        )
         result = ReActAgent(
             gateway=gateway,
             registry=registry,
             max_steps=args.max_steps,
             allowed_skills=allowed_skills,
-        ).run(args.goal)
+            early_stopping=args.early_stopping,
+        ).run(args.goal, reflections=reflections)
+        # T19: persist the run's full trajectory (episodic/recall memory WRITE side) while the
+        # project store is still open. Best-effort — a failure logs a WARNING and yields None,
+        # so the agent's already-completed result is emitted unchanged either way.
+        agent_run_id = persist_agent_run(project.sqlite_store, result)
+        # Recall WRITE side: embed (goal + outcome) so a FUTURE run can recall this one. Runs only
+        # once the transcript is stored (needs the run_id) and is fail-open on the embed.
+        if agent_run_id is not None:
+            episodic.persist_run_embedding(
+                project.sqlite_store,
+                embedder,
+                run_id=agent_run_id,
+                goal=result.goal,
+                final_answer=result.final_answer,
+            )
     finally:
         tools_mod._shared_project.reset(token)
         project.close()
@@ -734,6 +1174,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     return _emit(
         {
             **result.model_dump(mode="json"),
+            "agent_run_id": agent_run_id,
             "skills": registry.names(),
             "llm_mode": args.llm_mode,
             "telemetry": telemetry_summary,
@@ -745,9 +1186,10 @@ def _cmd_agent(args: argparse.Namespace) -> int:
 
 def _cmd_multi_agent(args: argparse.Namespace) -> int:
     from ..agent.offline import OfflineReactProvider
-    from ..core.skills import default_skill_registry
     from ..mcp_server import tools as tools_mod
     from ..multi_agent import MultiAgentSession
+    from ..retrieval.embedding import resolve_embedder
+    from ..skills import default_skill_registry
 
     if not args.goal.strip():
         raise ValueError(
@@ -766,18 +1208,22 @@ def _cmd_multi_agent(args: argparse.Namespace) -> int:
     gateway, telemetry = _llm_gateway(
         args, task="agent_react", offline_provider=OfflineReactProvider(), real_json_mode=False
     )
-    # SCALE-P0 #2b: open ONE shared ProjectContext for the whole multi-agent session and publish it
-    # via the tools._shared_project ContextVar. The Diag/Repair/Verifier workers run sequentially
-    # through one registry in this thread, so the var is visible to every tool call — one
-    # parse/graph/vector build for the session, and every worker sees the issues another worker
-    # (e.g. an audit) persisted via the one live SQLiteStore connection. ProjectContext.open runs
-    # the incremental (2a) replace_* sync, so the shared view starts consistent with disk. The var
-    # is set out of band (not a tool parameter) so handler signatures stay clean for MCP schema-gen.
+    # Open one shared ProjectContext for the whole multi-agent session so every worker sees the
+    # same parsed project state and any issues persisted by earlier workers.
     project = ProjectContext.open(content_root, sqlite_path=sqlite_path)
     token = tools_mod._shared_project.set(project)
     try:
         registry = default_skill_registry(content_root=str(content_root), sqlite_path=sqlite_path)
-        session = MultiAgentSession(gateway=gateway, registry=registry)
+        # Wire the project store + embedder so the Reflexion buffer persists across sessions: a
+        # retry's distilled reflection is saved to the runtime DB, and a later worker dispatched on
+        # a similar subtask recalls it into its reflection slot. Absent these, the session behaves
+        # exactly as before (no persistence, no recall).
+        session = MultiAgentSession(
+            gateway=gateway,
+            registry=registry,
+            store=project.sqlite_store,
+            embedder=resolve_embedder(),
+        )
         try:
             report = session.run(args.goal)
             # The blackboard message flow is the product-facing proof of true multi-agent
@@ -819,6 +1265,31 @@ def _cmd_multi_agent(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_agent_history(args: argparse.Namespace) -> int:
+    with _project(args) as project:
+        store = project.sqlite_store
+        if args.run_id:
+            run = store.get_agent_run(args.run_id)
+            if run is None:
+                raise ValueError(
+                    f"未找到 agent run '{args.run_id}'。"
+                    "先用 `owcopilot agent-history --content-root <root>` 列出可用的 run id。"
+                )
+            return _emit(
+                {"run": run, "cost_budget": _deterministic_cost_budget("agent_history")},
+                args,
+            )
+        runs = store.list_agent_runs(limit=args.limit)
+        return _emit(
+            {
+                "count": len(runs),
+                "runs": runs,
+                "cost_budget": _deterministic_cost_budget("agent_history"),
+            },
+            args,
+        )
+
+
 def _cmd_issues(args: argparse.Namespace) -> int:
     with _project(args) as project:
         issues = project.sqlite_store.list_issues(
@@ -852,6 +1323,13 @@ def _cmd_context_pack(args: argparse.Namespace) -> int:
 
 
 def _cmd_ask(args: argparse.Namespace) -> int:
+    if args.faithfulness == "llm" and args.llm_mode != "real":
+        # No silent downgrade: the llm judge would otherwise be the offline QA double, which is not
+        # an entailment judge and would mislabel good answers. Fail fast, before any work.
+        raise ValueError(
+            "--faithfulness llm 需要 --llm-mode real（用真实模型当判官）；"
+            "离线场景请改用 --faithfulness offline（确定性 $0 判官）。"
+        )
     with _project(args) as project:
         gateway, telemetry = _llm_gateway(
             args,
@@ -865,6 +1343,8 @@ def _cmd_ask(args: argparse.Namespace) -> int:
             context_builder=project.qa_context_builder(),
             bundle=project.bundle,
             expand=(args.llm_mode == "real"),
+            agentic=args.agentic,
+            faithfulness=args.faithfulness,
         )
         answer = service.ask(args.query, budget_tokens=args.budget_tokens)
         telemetry_summary = telemetry.summary()
@@ -918,6 +1398,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
             project.bundle,
             output_dir,
             target_engine=target_engine,
+            unity_localization=args.unity_localization,
         )
         return _emit(
             {
@@ -927,6 +1408,30 @@ def _cmd_export(args: argparse.Namespace) -> int:
             },
             args,
         )
+
+
+def _cmd_sync_back(args: argparse.Namespace) -> int:
+    from ..app.actions import sync_back_action
+    from ..assist.offline import OfflineEngineExplainProvider
+
+    gateway = None
+    if args.explain:
+        gateway, _telemetry = _llm_gateway(
+            args,
+            task="engine_explain",
+            offline_provider=OfflineEngineExplainProvider(),
+            real_json_mode=False,
+        )
+    result = sync_back_action(
+        args.content_root,
+        input_path=args.input,
+        baseline_path=args.baseline,
+        apply=args.apply,
+        explain=args.explain,
+        gateway=gateway,
+        sqlite_path=getattr(args, "sqlite_path", None),
+    )
+    return _emit(result, args)
 
 
 def _cmd_recognize(args: argparse.Namespace) -> int:
@@ -967,9 +1472,115 @@ def _cmd_eval_repair(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval_acceptance(args: argparse.Namespace) -> int:
-    report = run_acceptance_evaluation(args.workspace)
+    from ..qa.offline_entailment import OfflineEntailmentJudge
+
+    # Default the faithfulness gate to the deterministic offline judge so it runs without
+    # requiring a configured model provider.
+    report = run_acceptance_evaluation(args.workspace, faithfulness_judge=OfflineEntailmentJudge())
     _emit(report.model_dump(mode="json"), args)
     return 0 if report.passed else 1
+
+
+def _cmd_prompts(args: argparse.Namespace) -> int:
+    """List the prompt registry, or show one prompt's full text (+metadata) with --show."""
+    from ..prompts import prompt_registry
+
+    registry = prompt_registry()
+    if args.show:
+        spec = registry.get(args.show)
+        if spec is None:
+            known = ", ".join(sorted(registry))
+            raise ValueError(f"unknown prompt '{args.show}'. Registered prompts: {known}")
+        payload: dict[str, Any] = {
+            "name": spec.name,
+            "purpose": spec.purpose,
+            "task": spec.task,
+            "kind": spec.kind,
+            "output_contract": spec.output_contract,
+            "source": spec.source,
+            "version": spec.version,
+            "text": spec.text(),  # None for builders — the source function is authoritative
+        }
+        return _emit(payload, args)
+    return _emit(
+        {
+            "prompts": [
+                {
+                    "name": spec.name,
+                    "purpose": spec.purpose,
+                    "task": spec.task,
+                    "kind": spec.kind,
+                    "version": spec.version,
+                    "source": spec.source,
+                }
+                for spec in registry.values()
+            ],
+            "count": len(registry),
+        },
+        args,
+    )
+
+
+def _cmd_memory_report(args: argparse.Namespace) -> int:
+    """Surface review queue, reviewer calibration, and lesson feedback state for a workspace."""
+    with _project(args) as project:
+        queue = ReviewQueue(project.sqlite_store)
+        pending = queue.list_pending()
+        resolved = queue.list_resolved()
+        calibration = build_calibration_report(resolved)
+        payload = {
+            "agent_memory_loop": {
+                "stages": [
+                    "review_queue (the only canon-write path)",
+                    "human accept/reject decision",
+                    "calibration (Wilson false-pass rate over critic 'pass' verdicts)",
+                    "lessons (distilled from calibration, fed back into critic/generation prompts)",
+                    "retrieval over the versioned content store",
+                ],
+                "review_queue": {
+                    "pending": len(pending),
+                    "resolved": len(resolved),
+                    "accepted": sum(1 for item in resolved if item.status == "accepted"),
+                    "rejected": sum(1 for item in resolved if item.status == "rejected"),
+                },
+                "calibration": calibration.model_dump(mode="json"),
+            },
+            "cost_budget": _deterministic_cost_budget("memory_report"),
+        }
+        if args.write_lessons:
+            from ..assist.lessons import extract_lessons_from_report
+
+            payload["agent_memory_loop"]["lessons_written"] = extract_lessons_from_report(
+                calibration, project.sqlite_store
+            )
+        return _emit(payload, args)
+
+
+def _cmd_lessons(args: argparse.Namespace) -> int:
+    """Manage the cross-session lesson archive (currently: revoke one lesson).
+
+    Revocation soft-deletes a lesson so it is no longer injected into generation/critique prompts.
+    A missing id raises a guided error (surfaced by main() as a JSON error), never a silent no-op.
+    """
+    from ..app.actions import revoke_lesson_action
+
+    # args.action is constrained to "revoke" by the parser; branch kept explicit for future actions.
+    result = revoke_lesson_action(
+        args.content_root,
+        lesson_id=args.lesson_id,
+        reason=args.reason,
+        sqlite_path=args.sqlite_path,
+    )
+    return _emit(result, args)
+
+
+def _cmd_eval_agent(args: argparse.Namespace) -> int:
+    from ..evaluation.agent_eval import AGENT_EVAL_FLOOR, run_jd_dimension_scorecard
+
+    # The five dimensions are deterministic; a drop below the floor indicates a regression.
+    scorecard = run_jd_dimension_scorecard()
+    _emit(scorecard.model_dump(mode="json"), args)
+    return 0 if scorecard.overall >= AGENT_EVAL_FLOOR else 1
 
 
 def _cmd_impact(args: argparse.Namespace) -> int:
@@ -1056,20 +1667,46 @@ def _cmd_suggest(args: argparse.Namespace) -> int:
 
 
 def _cmd_repair_plan(args: argparse.Namespace) -> int:
-    from ..patches.search import plan_repairs
+    from ..patches import PatchSuggestService, deterministic_candidates
+    from ..patches.search import CandidateProvider, plan_repairs
 
     with _project(args) as project:
+        telemetry = TelemetryCollector()
+        candidate_provider: CandidateProvider = deterministic_candidates
+        used_llm = False
+        # Opt-in LATS-style widening: build the LLM proposer only in real mode (mirrors `suggest`,
+        # which has no offline double for patch_suggest — the deterministic fixers ARE its $0 path).
+        if args.llm_candidates and args.llm_mode == "real":
+            gateway, telemetry = _llm_gateway(args, task="patch_suggest", offline_provider=None)
+            candidate_provider = PatchSuggestService(
+                bundle=project.bundle,
+                audit_runner=project.audit_runner,
+                gateway=gateway,
+                context_builder=project.context_builder,
+            ).as_candidate_provider(max_llm_calls=args.max_llm_calls)
+            used_llm = True
         plan = plan_repairs(
             project.bundle,
             project.audit_runner,
             max_iterations=args.max_iterations,
             max_depth=args.max_depth,
             seed=args.seed,
+            candidate_provider=candidate_provider,
+        )
+        telemetry_summary = telemetry.summary()
+        cost_budget = (
+            summarize_workflow(
+                [llm_step("patch_suggest", telemetry_summary)], budget_usd=args.max_cost_usd
+            ).budget
+            if used_llm
+            else summarize_workflow([deterministic_step("repair_plan")]).budget
         )
         return _emit(
             {
                 **plan.model_dump(mode="json"),
-                "cost_budget": _deterministic_cost_budget("repair_plan"),
+                "used_llm": used_llm,
+                "llm_mode": args.llm_mode,
+                "cost_budget": cost_budget.model_dump(mode="json"),
             },
             args,
         )

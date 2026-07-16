@@ -1,3 +1,4 @@
+# Verifier：对 worker 产出做独立 ground-truth 复核——自己重跑确定性审计裁决，不信 worker 自评。
 """VerifierAgent — independent ground-truth verification of worker outputs.
 
 Architecture compliance (SUPERVISOR_rubric P3-5):
@@ -35,8 +36,8 @@ import re
 from typing import Any, Literal
 
 from ..agent.react import AgentResult, ReActAgent
-from ..core.skills import SkillError, SkillRegistry
 from ..llm.gateway import LLMGateway
+from ..skills import SkillError, SkillRegistry
 from .blackboard import AgentBlackboard
 from .messages import AgentMessage, TaskResultPayload, VerifyResultPayload
 from .skill_scope import scoped_registry
@@ -231,11 +232,7 @@ class VerifierAgent:
         if not isinstance(result, dict):
             return None, "audit-malformed"
         open_errors = result.get("open_errors")
-        if (
-            isinstance(open_errors, bool)
-            or not isinstance(open_errors, int)
-            or open_errors < 0
-        ):
+        if isinstance(open_errors, bool) or not isinstance(open_errors, int) or open_errors < 0:
             # Defensive: malformed tool output — fall back rather than trust a non-int or a
             # negative count.  A real audit returns ``len(...)`` (≥0); a negative value can only
             # come from a malformed/malicious tool and would also collide with the -1 "target not

@@ -1,8 +1,9 @@
+# 平台元数据的 SQLite 控制面存储（租户/用户/成员关系/审计日志）。
 """SQLite control-plane store for platform metadata (tenants / users / memberships / audit log).
 
 The canon stays file-backed; this small relational store holds only *who can touch what*. SQLite
-keeps dev/test/CI single-file and $0; a production deployment points the same schema at Postgres
-(see deploy/). It never stores canon content.
+keeps every deployment single-file and $0 — there is no other database backend. It never stores
+canon content.
 """
 
 from __future__ import annotations

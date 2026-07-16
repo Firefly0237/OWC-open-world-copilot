@@ -23,9 +23,9 @@ from owcopilot.audit.context import AuditContext
 from owcopilot.audit.rules.security_rules import PromptInjectionRule
 from owcopilot.content.injection import scan_for_injection
 from owcopilot.content.models import ContentBundle, Term
-from owcopilot.core.skills import CostTier, SideEffect, Skill, SkillError, SkillParameter
 from owcopilot.llm.gateway import lesson_injection_enabled
 from owcopilot.llm.telemetry import CallRecord
+from owcopilot.skills import CostTier, SideEffect, Skill, SkillError, SkillParameter
 from owcopilot.storage.sqlite import SQLiteStore
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -190,9 +190,20 @@ class TestDimensionWhitelist:
 
     def test_valid_dimensions_are_preserved(self) -> None:
         """All declared rubric dimensions must pass through unchanged."""
-        valid = ["intent", "grounding", "completeness", "craft", "voice",
-                 "branching", "coherence", "function", "flavor", "style",
-                 "variety", "topic"]
+        valid = [
+            "intent",
+            "grounding",
+            "completeness",
+            "craft",
+            "voice",
+            "branching",
+            "coherence",
+            "function",
+            "flavor",
+            "style",
+            "variety",
+            "topic",
+        ]
         for dim in valid:
             res = parse_critique(
                 f'{{"verdict":"pass","score":0.9,"dimensions":[{{"dimension":"{dim}",'
@@ -215,8 +226,7 @@ class TestDimensionWhitelist:
     def test_dimension_case_normalised(self) -> None:
         """Dimension matching is case-insensitive (LLM may capitalise)."""
         res = parse_critique(
-            '{"verdict":"pass","score":0.9,"dimensions":['
-            '{"dimension":"CRAFT","severity":"ok"}]}'
+            '{"verdict":"pass","score":0.9,"dimensions":[{"dimension":"CRAFT","severity":"ok"}]}'
         )
         assert res.dimensions[0].dimension == "craft"
 

@@ -1,3 +1,4 @@
+# 分阶段世界种子链的共享阶段契约。
 """Shared stage contract for the staged world-seed chain.
 
 The single big ``world_seed`` call became a *grounded chain*: premise → factions → regions →

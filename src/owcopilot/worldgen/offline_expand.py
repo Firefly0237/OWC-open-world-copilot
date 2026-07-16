@@ -1,3 +1,4 @@
+# 世界扩展的离线确定性 provider。
 """Deterministic offline provider for world EXPANSION.
 
 Expansion is a grounded chain (focus → pois → cast → quests) over an *existing* world, so unlike the

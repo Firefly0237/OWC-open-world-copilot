@@ -1,3 +1,4 @@
+# 每次调用的成本/用量记账：网关每调一次记一条 CallRecord。
 """Per-call cost/usage accounting. The gateway records one CallRecord per model call.
 
 Two different "caches" surface here — keep them straight (this is the core P2 distinction):
@@ -112,9 +113,7 @@ class TelemetryCollector:
         Raises IndexError when snapshot_idx is outside [0, len(records)].
         """
         if snapshot_idx < 0 or snapshot_idx > len(self.records):
-            raise IndexError(
-                f"snapshot_idx {snapshot_idx} out of range [0, {len(self.records)}]"
-            )
+            raise IndexError(f"snapshot_idx {snapshot_idx} out of range [0, {len(self.records)}]")
         return self.records[snapshot_idx:]
 
     @property

@@ -226,7 +226,7 @@ def test_readiness_endpoint_scores_content(client: TestClient) -> None:
     assert res.status_code == 200, res.text
     report = res.json()["readiness"]
     assert report["standard_version"] == "r1"
-    # the two fixture NPCs have no character sheets, so neither is production-ready
+    # the two fixture NPCs have no character sheets, so neither is complete
     chars = [it for it in report["items"] if it["kind"] == "character"]
     assert chars and all(it["ready"] is False for it in chars)
 

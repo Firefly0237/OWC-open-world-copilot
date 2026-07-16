@@ -1,3 +1,4 @@
+# Orchestrator：把高层目标拆成子任务、路由给 worker、汇总结果。只编排，不自己干活。
 """OrchestratorAgent — decomposes a high-level goal into subtasks, routes to workers, synthesizes.
 
 Architecture compliance (SUPERVISOR_rubric P3-1, P3-2, P3-6, P3-7):
@@ -39,8 +40,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..core.skills import SkillRegistry
 from ..llm.gateway import LLMGateway
+from ..skills import SkillRegistry
 from .blackboard import AgentBlackboard
 from .messages import AgentMessage, TaskAssignPayload, TaskResultPayload, VerifyResultPayload
 
@@ -51,10 +52,14 @@ logger = logging.getLogger(__name__)
 class SubTask:
     """One unit of work to dispatch to a worker."""
 
-    worker_role: str      # "diagnosis" | "repair_proposal"
-    description: str      # the subtask instruction for the worker
+    worker_role: str  # "diagnosis" | "repair_proposal"
+    description: str  # the subtask instruction for the worker
     allowed_skills: list[str]
-    worker_id: str        # the target agent_id (e.g. "diag_01", "repair_01")
+    worker_id: str  # the target agent_id (e.g. "diag_01", "repair_01")
+    # Anthropic effort scaling: the per-worker ReAct step (== tool-call) budget the
+    # orchestrator allocated for this subtask's complexity. ``None`` means the decomposition
+    # decided no budget → defer to ``TaskAssignPayload``'s own default (current behaviour).
+    max_steps: int | None = None
 
 
 @dataclass
@@ -63,10 +68,10 @@ class MultiAgentReport:
 
     session_id: str
     goal: str
-    participants: list[str]           # all agent_ids that participated
+    participants: list[str]  # all agent_ids that participated
     worker_summaries: list[dict[str, Any]]
     verifier_verdicts: list[dict[str, Any]]
-    synthesis: str                    # orchestrator's human-readable conclusion
+    synthesis: str  # orchestrator's human-readable conclusion
     # ② True when LLM decomposition failed and a static fallback template was used.
     # Callers MUST check this flag — silent downgrade is forbidden (no-silent-downgrade policy).
     decomposition_degraded: bool = field(default=False)
@@ -87,10 +92,15 @@ class OrchestratorAgent:
         agent_id: str = "orchestrator",
         gateway: LLMGateway,
         registry: SkillRegistry,
+        # role → registered worker agent_id. Injected into the decomposition prompt (the model
+        # must address real workers, not invent ids) and used to normalise near-miss ids after
+        # parsing. None keeps the legacy behaviour (no constraint, no normalisation).
+        registered_workers: dict[str, str] | None = None,
     ) -> None:
         self.agent_id = agent_id
         self._gateway = gateway
         self._registry = registry
+        self._registered_workers = dict(registered_workers or {})
 
     # ------------------------------------------------------------------
     # Public API
@@ -124,11 +134,24 @@ class OrchestratorAgent:
         posted: list[AgentMessage] = []
 
         for subtask in subtasks:
-            payload = TaskAssignPayload(
-                original_goal=goal,       # P3-4: always inject original_goal
-                subtask=subtask.description,
-                allowed_skills=subtask.allowed_skills,
-            )
+            # Anthropic effort scaling: the orchestrator allocates the per-worker step budget
+            # from the decomposition. When the decomposition decided no budget
+            # (subtask.max_steps is None), construct exactly as before so the payload defers to
+            # TaskAssignPayload's own default (byte-identical to the pre-effort-scaling path —
+            # no magic default duplicated here).
+            if subtask.max_steps is None:
+                payload = TaskAssignPayload(
+                    original_goal=goal,  # P3-4: always inject original_goal
+                    subtask=subtask.description,
+                    allowed_skills=subtask.allowed_skills,
+                )
+            else:
+                payload = TaskAssignPayload(
+                    original_goal=goal,  # P3-4: always inject original_goal
+                    subtask=subtask.description,
+                    allowed_skills=subtask.allowed_skills,
+                    max_steps=subtask.max_steps,
+                )
             msg = AgentMessage(
                 session_id=session_id,
                 from_agent=self.agent_id,
@@ -215,7 +238,9 @@ class OrchestratorAgent:
 
         # ② ⑥ Build synthesis text — surface decomposition degradation and needs_more verdicts
         synthesis = _build_synthesis(
-            goal, worker_summaries, verifier_verdicts,
+            goal,
+            worker_summaries,
+            verifier_verdicts,
             decomposition_degraded=decomposition_degraded,
         )
 
@@ -264,12 +289,31 @@ class OrchestratorAgent:
             (subtasks, degraded) — degraded=True means both passes failed and the static
             fallback template is being used.  ② This must NOT be silent.
         """
+        # Live finding: with only a format example ("string like 'diag_01'") the model invents
+        # worker ids (diag_02, rep_01…) that route nowhere and the subtask is dropped. Constrain
+        # the id vocabulary to the actual routing table when one was provided.
+        worker_constraint = (
+            "worker_id MUST be exactly one of: "
+            + ", ".join(f"'{wid}' (role={role})" for role, wid in self._registered_workers.items())
+            + ". Do not invent other worker ids — reuse the same worker for multiple subtasks "
+            "of its role instead. "
+            if self._registered_workers
+            else "worker_id (string like 'diag_01'). "
+        )
         system = (
             "You are a task-decomposition specialist for an open-world game content pipeline. "
             "Given a high-level goal, output a JSON array of subtasks. "
             "Each subtask must have: role (diagnosis|repair_proposal), description (string), "
-            "allowed_skills (array of skill names), worker_id (string like 'diag_01'). "
-            "Always include at least one diagnosis subtask and one repair_proposal subtask. "
+            "allowed_skills (array of skill names), worker_id, "
+            "max_steps (integer, the step/tool-call budget for that worker). "
+            + worker_constraint
+            + "Always include at least one diagnosis subtask and one repair_proposal subtask. "
+            # Anthropic effort scaling: complexity → budget guidance lives in the prompt so the
+            # model does not over-allocate simple subtasks (its common failure mode).
+            "Set max_steps to scale effort to the subtask's complexity, not a fixed default: "
+            "a narrow single-tool check needs a small budget (about 3); a broad multi-tool "
+            "investigation needs more (about 6-8). Do not over-allocate simple subtasks. "
+            f"Keep max_steps between {_MIN_SUBTASK_STEPS} and {_MAX_SUBTASK_STEPS}. "
             "Output ONLY valid JSON — no prose, no markdown fences."
         )
         user = (
@@ -284,7 +328,7 @@ class OrchestratorAgent:
         subtasks, degraded = _parse_subtasks(raw, goal)
 
         if not degraded:
-            return subtasks, False
+            return self._normalise_worker_ids(subtasks), False
 
         # Pass 2: honest second gateway call with a stricter JSON-only constraint.
         # No ReActAgent / no audit tools — those are irrelevant to JSON extraction and would
@@ -296,12 +340,12 @@ class OrchestratorAgent:
             "Output ONLY a raw JSON array. No prose. No explanation. No markdown code fences. "
             "Your entire response must start with '[' and end with ']'. "
             "Each element is an object with keys: role (diagnosis|repair_proposal), "
-            "description (string), allowed_skills (array of strings), worker_id (string). "
+            "description (string), allowed_skills (array of strings), worker_id (string), "
+            "max_steps (integer). "
+            f"Scale max_steps {_MIN_SUBTASK_STEPS}-{_MAX_SUBTASK_STEPS} to complexity. "
             "Include at least one diagnosis and one repair_proposal subtask."
         )
-        strict_user = (
-            f"Goal: {goal}\n\nReturn the JSON array of subtasks now. JSON only."
-        )
+        strict_user = f"Goal: {goal}\n\nReturn the JSON array of subtasks now. JSON only."
         try:
             raw2 = self._gateway.complete(
                 task="orchestrator_decompose", system=strict_system, user=strict_user
@@ -309,17 +353,70 @@ class OrchestratorAgent:
             subtasks2, degraded2 = _parse_subtasks(raw2, goal)
             if not degraded2:
                 logger.debug("orchestrator: pass-2 strict-JSON decomposition succeeded")
-                return subtasks2, False
+                return self._normalise_worker_ids(subtasks2), False
         except Exception as exc:  # noqa: BLE001
             logger.warning("orchestrator: pass-2 strict-JSON retry raised: %s", exc)
 
         # Both passes failed — return static fallback (degraded=True)
         return _FALLBACK_SUBTASKS, True
 
+    def _normalise_worker_ids(self, subtasks: list[SubTask]) -> list[SubTask]:
+        """Remap invented worker ids to the registered worker for the subtask's role.
+
+        Defence-in-depth behind the prompt constraint: even when told the exact id vocabulary,
+        a model can still emit near-misses (rep_01 for repair_01). A subtask whose worker_id is
+        not registered is re-addressed to the registered worker of its role — with a warning,
+        never silently — so the work is executed instead of dropped as UNROUTED. A subtask
+        whose role has no registered worker is left untouched (the session's honest UNROUTED
+        reporting remains the terminal fallback).
+        """
+        if not self._registered_workers:
+            return subtasks
+        known_ids = set(self._registered_workers.values())
+        normalised: list[SubTask] = []
+        for subtask in subtasks:
+            if subtask.worker_id in known_ids:
+                normalised.append(subtask)
+                continue
+            replacement = self._registered_workers.get(subtask.worker_role)
+            if replacement is None:
+                normalised.append(subtask)  # unknown role too — leave for UNROUTED reporting
+                continue
+            logger.warning(
+                "orchestrator: decomposition addressed unregistered worker '%s' "
+                "(role=%s) — remapped to registered '%s'",
+                subtask.worker_id,
+                subtask.worker_role,
+                replacement,
+            )
+            normalised.append(
+                SubTask(
+                    worker_role=subtask.worker_role,
+                    description=subtask.description,
+                    allowed_skills=subtask.allowed_skills,
+                    worker_id=replacement,
+                    # Preserve the allocated budget on an id remap — dropping it here would be a
+                    # silent budget downgrade (no-silent-downgrade policy).
+                    max_steps=subtask.max_steps,
+                )
+            )
+        return normalised
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# Anthropic effort-scaling clamp bounds for a per-subtask step (== tool-call) budget.
+# The prompt tells the model "keep max_steps between 2 and 12"; these are the code-side
+# guardrail so an over-scaling model (Anthropic's early versions spawned 50 subagents for a
+# trivial query) cannot blow up cost. The prompt bounds MUST equal these two constants — the
+# scaling-rules test asserts both numbers appear in the decompose prompt so they cannot drift.
+#   _MIN = 2: ReActAgent requires max_steps >= 1; 2 = at least one tool call + a final answer.
+#   _MAX = 12: conservative ceiling above the prompt's "complex ~8", well under runaway cost.
+_MIN_SUBTASK_STEPS = 2
+_MAX_SUBTASK_STEPS = 12
 
 
 _FALLBACK_SUBTASKS = [
@@ -365,13 +462,15 @@ def _coerce_allowed_skills(value: Any, *, worker_role: str) -> list[str]:
         logger.warning(
             "orchestrator: allowed_skills for role %r was a bare string %r; "
             "wrapping as a single-element list (an LLM formatting slip, not a per-char list).",
-            worker_role, value,
+            worker_role,
+            value,
         )
         return [value]
     if not isinstance(value, list):
         logger.warning(
             "orchestrator: allowed_skills for role %r had unexpected type %s; treating as empty.",
-            worker_role, type(value).__name__,
+            worker_role,
+            type(value).__name__,
         )
         return []
     cleaned = [s for s in value if isinstance(s, str)]
@@ -379,9 +478,50 @@ def _coerce_allowed_skills(value: Any, *, worker_role: str) -> list[str]:
         logger.warning(
             "orchestrator: allowed_skills for role %r contained %d non-string element(s); "
             "dropped them.",
-            worker_role, len(value) - len(cleaned),
+            worker_role,
+            len(value) - len(cleaned),
         )
     return cleaned
+
+
+def _coerce_subtask_steps(value: Any) -> int | None:
+    """Normalise an LLM-supplied ``max_steps`` budget into a clamped int (or ``None``).
+
+    Isolates the "defend against the model's weird budget value" concept behind the Anthropic
+    effort-scaling prompt, mirroring ``_coerce_allowed_skills``:
+      - ``None`` (missing field) → ``None``: no budget decided, fall back to the payload default
+        (regression-safe — this is the pre-effort-scaling behaviour).
+      - ``bool`` → ``None``: ``isinstance(True, int)`` is True, so ``max_steps: true`` would
+        otherwise become budget 1; reject it explicitly and fall back.
+      - ``int``/``float`` → ``int(value)`` CLAMPED to ``[_MIN_SUBTASK_STEPS, _MAX_SUBTASK_STEPS]``
+        (out-of-range is clamped, never rejected — the model still gets a runnable budget).
+      - anything else (str/list/dict) → ``None``: unusable, fall back to the default.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        logger.warning(
+            "orchestrator: max_steps was a bool %r; ignoring it (a bool is not a step budget) "
+            "and deferring to the default.",
+            value,
+        )
+        return None
+    if isinstance(value, int | float):
+        clamped = max(_MIN_SUBTASK_STEPS, min(_MAX_SUBTASK_STEPS, int(value)))
+        if clamped != int(value):
+            logger.warning(
+                "orchestrator: max_steps %r out of range; clamped to %d (bounds [%d, %d]).",
+                value,
+                clamped,
+                _MIN_SUBTASK_STEPS,
+                _MAX_SUBTASK_STEPS,
+            )
+        return clamped
+    logger.warning(
+        "orchestrator: max_steps had unexpected type %s; ignoring it and deferring to the default.",
+        type(value).__name__,
+    )
+    return None
 
 
 def _parse_subtasks(raw: str, goal: str) -> tuple[list[SubTask], bool]:
@@ -396,7 +536,7 @@ def _parse_subtasks(raw: str, goal: str) -> tuple[list[SubTask], bool]:
         text = raw.strip()
         for fence in ("```json", "```JSON", "```"):
             if text.startswith(fence):
-                text = text[len(fence):].strip()
+                text = text[len(fence) :].strip()
         if text.endswith("```"):
             text = text[:-3].strip()
 
@@ -418,12 +558,14 @@ def _parse_subtasks(raw: str, goal: str) -> tuple[list[SubTask], bool]:
             description = str(item.get("description", f"Handle subtask for: {goal}"))
             allowed = _coerce_allowed_skills(item.get("allowed_skills", []), worker_role=role)
             worker_id = str(item.get("worker_id", f"{role}_01"))
+            max_steps = _coerce_subtask_steps(item.get("max_steps"))
             subtasks.append(
                 SubTask(
                     worker_role=role,
                     description=description,
                     allowed_skills=allowed,
                     worker_id=worker_id,
+                    max_steps=max_steps,
                 )
             )
 
@@ -441,7 +583,8 @@ def _parse_subtasks(raw: str, goal: str) -> tuple[list[SubTask], bool]:
             logger.warning(
                 "orchestrator: decomposition is missing required role(s) %s "
                 "(got roles=%s) — treating as degraded so the gap is surfaced, not silent.",
-                missing, sorted(roles),
+                missing,
+                sorted(roles),
             )
             return _FALLBACK_SUBTASKS, True
 
@@ -484,8 +627,7 @@ def _build_synthesis(
     for ws in worker_summaries:
         stop = ws["stop_reason"]
         lines.append(
-            f"  [{ws['agent_id']}] role={ws['role']} "
-            f"open_errors={ws['open_errors']} stop={stop}"
+            f"  [{ws['agent_id']}] role={ws['role']} open_errors={ws['open_errors']} stop={stop}"
         )
         lines.append(f"    Answer: {ws['final_answer'][:200]}")
 

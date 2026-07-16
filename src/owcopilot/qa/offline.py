@@ -1,3 +1,4 @@
+# 离线确定性 QA provider（工具/测试用）。
 """Deterministic QA provider for offline tools and tests."""
 
 from __future__ import annotations

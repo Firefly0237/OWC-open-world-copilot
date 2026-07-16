@@ -1,3 +1,4 @@
+# 工作台的工作区簿记（多世界切换）。
 """Workspace bookkeeping for the Workbench.
 
 Two ways to hold a world, mirroring how shipped tools (LegendKeeper, NovelAI lorebooks)
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import zipfile
 from pathlib import Path
@@ -43,7 +45,14 @@ def _default_path() -> Path:
 
 
 def worlds_home(base: str | Path | None = None) -> Path:
-    return Path(base) if base is not None else Path.home() / ".owcopilot" / "worlds"
+    """The managed-worlds root: an explicit ``base`` wins, then ``OWCOPILOT_WORLDS_HOME``
+    (so a container can mount a data volume there), then the local per-user default."""
+    if base is not None:
+        return Path(base)
+    env_home = os.environ.get("OWCOPILOT_WORLDS_HOME")
+    if env_home:
+        return Path(env_home)
+    return Path.home() / ".owcopilot" / "worlds"
 
 
 def sanitize_world_name(name: str) -> str:
@@ -90,12 +99,12 @@ def open_managed_world(
 ) -> Any:
     """Open a managed world by NAME as a scoped ProjectContext -- the multi-world "switch".
 
-    Scale-P0 G2-C C6: managed worlds are already separate content roots under ``worlds_home``
+    Managed worlds are already separate content roots under ``worlds_home``
     (create/list/delete/import/export above), so their content is isolated by construction. This
     ties that identity to the ``(world_id, version)`` scope: the world's sanitized name becomes the
-    ProjectContext's ``world_id`` and ``version`` selects the copy-on-write line (C3), so the scope
+    ProjectContext's ``world_id`` and ``version`` selects the copy-on-write line, so the scope
     dimension reflects the actual world+version -- self-describing, and correct even if a future
-    deployment shares one runtime DB across worlds (the C1 ``world_id`` column keeps them apart)."""
+    deployment shares one runtime DB across worlds (the ``world_id`` column keeps them apart)."""
     from ..pipeline.project import ProjectContext
 
     world_name = sanitize_world_name(name)

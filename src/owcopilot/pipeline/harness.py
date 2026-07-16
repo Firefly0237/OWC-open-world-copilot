@@ -1,3 +1,4 @@
+# agent/工具调用工作流的项目质量 harness：跑一组确定性检查，给可复算的质量画像。
 """Project quality harness for agent/tool-calling workflows.
 
 The individual tools answer narrow questions. This harness answers the production question:

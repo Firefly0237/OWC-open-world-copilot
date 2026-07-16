@@ -1,3 +1,4 @@
+# 协作操作（WS-B）：指派、评论、加锁、并发控制。
 """Collaboration operations over the per-world ledger (WS-B): assign, comment, lock, concurrency.
 
 Pure functions over a CollabState (the action layer loads/saves). A lock held by another user blocks

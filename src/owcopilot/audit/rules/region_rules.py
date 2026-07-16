@@ -1,3 +1,4 @@
+# 区域与 POI 生产规则。
 """Region and POI production rules."""
 
 from __future__ import annotations
@@ -36,6 +37,42 @@ class RegionLevelBoundsRule:
                     evidence=[
                         Evidence(kind="field_path", target_ref=f"region:{region.id}", path="level")
                     ],
+                )
+
+
+class MissingRegionReferenceRule:
+    """POI→region reference integrity: mirrors :class:`~..rules.reference_rules.
+    MissingEntityReferenceRule`'s naming/severity/shape, scoped to ``POI.region_id``.
+
+    Neither ``reference_rules.py`` (which only walks ``poi.controlling_faction``) nor this file's
+    other POI/region rules ever checked whether a POI's ``region_id`` resolves to a real region —
+    a POI whose region reference is invalid silently skipped ``POILevelOutOfBoundsRule`` and
+    ``RegionBannedContentRule`` (both no-op via ``ctx.bundle.regions.get(poi.region_id or "")``)
+    without ever being flagged. This closes that gap: an empty region_id is "not yet specified"
+    (not an error — every other rule here treats it the same way); a non-empty one that names no
+    real region is a dangling reference, exactly like an unknown ``giver_npc``/``location``.
+
+    Checked against ``ctx.bundle.regions`` directly (not the looser ``ctx.has_object``) because
+    ``region_id`` specifically must resolve within the regions collection — the same collection
+    ``POILevelOutOfBoundsRule``/``RegionBannedContentRule`` key off of — not any canon object.
+    """
+
+    code = "POI_UNKNOWN_REGION_REF"
+    severity = Severity.ERROR
+    category = Category.REGION
+
+    def check(self, ctx: AuditContext) -> Iterable[Issue]:
+        for poi in ctx.bundle.pois.values():
+            region_id = (poi.region_id or "").strip()
+            if region_id and region_id not in ctx.bundle.regions:
+                target_ref = f"poi:{poi.id}"
+                yield Issue(
+                    rule_code=self.code,
+                    severity=self.severity,
+                    category=self.category,
+                    target_ref=target_ref,
+                    message=f"POI '{poi.id}' references unknown region '{region_id}'",
+                    evidence=[Evidence(kind="field_path", target_ref=target_ref, path="region_id")],
                 )
 
 

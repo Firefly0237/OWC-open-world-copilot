@@ -1,3 +1,5 @@
+# agent 推理模型的离线替身（$0 确定性，供测试/CI/eval，需 OWCOPILOT_ALLOW_OFFLINE_LLM）。
+# 按固定合理的 ReAct 轨迹走（审计→接地→质量 harness→报告），让整条 agent 链路无需真模型即可测。
 """Deterministic, $0 stand-in for the agent's reasoning model — the offline test/CI/eval double.
 
 Like every other offline provider in the project, this is a fixture, never a shipped product mode
@@ -28,7 +30,7 @@ class OfflineGoalAwareReActProvider:
     The last entry must be the Final Answer turn.
 
     $0 deterministic: no network, no LLM, cost_usd always 0.  Used only by
-    the C1 tool_selection_accuracy eval gate — not a product capability.
+    the tool_selection_accuracy eval gate — not a product capability.
     """
 
     def __init__(self, scripts: dict[str, list[str]]) -> None:
@@ -69,8 +71,7 @@ class OfflineGoalAwareReActProvider:
         "quality_harness": "{}",
         "build_context_pack": '{"query": "main entities"}',
         "impact_of": (
-            '{"changes": [{"change_type": "entity_delete",'
-            ' "target_ref": "entity:npc_r1_a"}]}'
+            '{"changes": [{"change_type": "entity_delete", "target_ref": "entity:npc_r1_a"}]}'
         ),
         "propose_fix": '{"issue_id": "__placeholder__"}',
     }

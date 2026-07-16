@@ -1,3 +1,4 @@
+# SQLite 黑板：append-only 消息板，多 agent 间唯一共享状态（可复盘、无隐藏内存态）。
 """SQLite-backed append-only blackboard for the multi-agent system.
 
 Architecture rationale (SUPERVISOR_rubric P3-3):
@@ -11,11 +12,26 @@ This class wraps the ``agent_messages`` table added to SQLiteStore.  The key inv
 - ``update_status`` only touches the ``status`` column — payload stays frozen.
 
 No business logic lives here.  Routing, decomposition, and synthesis belong to the agents.
+
+Thread-safety (parallel stage dispatch):
+    The parallel fan-out waves in :class:`~owcopilot.multi_agent.session.MultiAgentSession` drain
+    ONE shared connection from a pool of consumer threads.  Although SQLite is compiled SERIALIZED
+    (``threadsafety==3``), the Python ``sqlite3`` module's *implicit transaction* management is not
+    safe for genuinely concurrent use of a single connection object (concurrent
+    ``execute``/``commit`` race the connection's transaction state — "cannot start a transaction
+    within a transaction").  A ``threading.RLock`` therefore serialises each RAW statement here.
+    It is deliberately FINE-GRAINED: in ``claim_task`` the SELECT and the conditional UPDATE are
+    two SEPARATE locked sections, so the cross-thread TOCTOU window between them stays open and the
+    optimistic ``UPDATE ... WHERE status='pending'`` remains the genuinely contended claim arbiter
+    (its ``rowcount==0`` loss branch is reachable).  This is NOT a coarse board-serialising lock
+    (which would make SELECT+UPDATE atomic and the optimistic lock un-contendable) — it only makes
+    the shared connection safe for the Python driver.
 """
 
 from __future__ import annotations
 
 import sqlite3
+import threading
 from typing import Any
 
 from .messages import AgentMessage, MsgType
@@ -32,6 +48,10 @@ class AgentBlackboard:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
         self._conn.row_factory = sqlite3.Row
+        # Serialises each raw statement so a pool of consumer threads may share this one
+        # connection (see the module docstring: the Python sqlite3 transaction manager is not
+        # concurrency-safe). Fine-grained by design — it does NOT wrap the claim decision.
+        self._lock = threading.RLock()
         self._ensure_table()
 
     # ------------------------------------------------------------------
@@ -39,8 +59,9 @@ class AgentBlackboard:
     # ------------------------------------------------------------------
 
     def _ensure_table(self) -> None:
-        self._conn.executescript(
-            """
+        with self._lock:
+            self._conn.executescript(
+                """
             CREATE TABLE IF NOT EXISTS agent_messages (
                 id           TEXT PRIMARY KEY,
                 session_id   TEXT NOT NULL,
@@ -61,8 +82,8 @@ class AgentBlackboard:
             CREATE INDEX IF NOT EXISTS idx_agent_messages_created
                 ON agent_messages(created_at);
             """
-        )
-        self._conn.commit()
+            )
+            self._conn.commit()
 
     # ------------------------------------------------------------------
     # Write path — payload is immutable after this call
@@ -70,25 +91,26 @@ class AgentBlackboard:
 
     def post_message(self, msg: AgentMessage) -> str:
         """Insert a new message.  Returns ``msg.id``.  Never updates an existing row."""
-        self._conn.execute(
-            """
-            INSERT INTO agent_messages
-                (id, session_id, from_agent, to_agent, msg_type, payload_json,
-                 created_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                msg.id,
-                msg.session_id,
-                msg.from_agent,
-                msg.to_agent,
-                msg.msg_type,
-                msg.payload_json(),
-                msg.created_at,
-                msg.status,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO agent_messages
+                    (id, session_id, from_agent, to_agent, msg_type, payload_json,
+                     created_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    msg.id,
+                    msg.session_id,
+                    msg.from_agent,
+                    msg.to_agent,
+                    msg.msg_type,
+                    msg.payload_json(),
+                    msg.created_at,
+                    msg.status,
+                ),
+            )
+            self._conn.commit()
         return msg.id
 
     # ------------------------------------------------------------------
@@ -103,33 +125,37 @@ class AgentBlackboard:
         This prevents two workers that share the same agent_id from both picking up the
         same task (though in practice each worker has a unique agent_id).
         """
-        # Find the oldest pending task for this agent
-        row = self._conn.execute(
-            """
-            SELECT id FROM agent_messages
-            WHERE session_id = ? AND to_agent = ? AND msg_type = 'task_assign'
-              AND status = 'pending'
-            ORDER BY created_at ASC
-            LIMIT 1
-            """,
-            (session_id, agent_id),
-        ).fetchone()
+        # Find the oldest pending task for this agent (locked section 1 — raw SELECT only).
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id FROM agent_messages
+                WHERE session_id = ? AND to_agent = ? AND msg_type = 'task_assign'
+                  AND status = 'pending'
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (session_id, agent_id),
+            ).fetchone()
 
         if row is None:
             return None
 
         msg_id = str(row["id"])
 
-        # Optimistic update: only succeeds if still pending (no TOCTOU gap in WAL mode)
-        changed = self._conn.execute(
-            """
-            UPDATE agent_messages
-            SET status = 'claimed'
-            WHERE id = ? AND status = 'pending'
-            """,
-            (msg_id,),
-        ).rowcount
-        self._conn.commit()
+        # Optimistic update (locked section 2 — SEPARATE from the SELECT above, so the cross-thread
+        # TOCTOU window stays open): only succeeds if still pending. Two consumers that both read
+        # this row as pending race here; exactly one UPDATE flips it and the other sees rowcount 0.
+        with self._lock:
+            changed = self._conn.execute(
+                """
+                UPDATE agent_messages
+                SET status = 'claimed'
+                WHERE id = ? AND status = 'pending'
+                """,
+                (msg_id,),
+            ).rowcount
+            self._conn.commit()
 
         if changed == 0:
             return None  # someone else claimed it first
@@ -165,10 +191,11 @@ class AgentBlackboard:
             clauses.append("status = ?")
             values.append(status)
         where = " AND ".join(clauses)
-        rows = self._conn.execute(
-            f"SELECT * FROM agent_messages WHERE {where} ORDER BY created_at ASC",  # noqa: S608
-            values,
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM agent_messages WHERE {where} ORDER BY created_at ASC",  # noqa: S608
+                values,
+            ).fetchall()
         return [AgentMessage.from_row(dict(row)) for row in rows]
 
     def get_message(self, msg_id: str) -> AgentMessage | None:
@@ -188,20 +215,22 @@ class AgentBlackboard:
         allowed = {"claimed", "done", "failed"}
         if status not in allowed:
             raise ValueError(f"status must be one of {allowed}, got {status!r}")
-        self._conn.execute(
-            "UPDATE agent_messages SET status = ? WHERE id = ?",
-            (status, msg_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE agent_messages SET status = ? WHERE id = ?",
+                (status, msg_id),
+            )
+            self._conn.commit()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _get_by_id(self, msg_id: str) -> AgentMessage | None:
-        row = self._conn.execute(
-            "SELECT * FROM agent_messages WHERE id = ?", (msg_id,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM agent_messages WHERE id = ?", (msg_id,)
+            ).fetchone()
         if row is None:
             return None
         return AgentMessage.from_row(dict(row))

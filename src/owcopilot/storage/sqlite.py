@@ -1,3 +1,5 @@
+# SQLite 运行时存储：FTS5 全文 + vec0 向量 + WAL + scope 分片。
+# 关键：面向长线叙事的大语料——磁盘量化/增量/分片而非全量进内存；索引与真源分离（真源仍是文件）。
 """SQLite runtime storage.
 
 Content files remain the source of truth. This store holds rebuildable runtime state:
@@ -33,10 +35,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Scale-P0 G2-C C1: the canonical default scope. A single-world project (every project today)
+# The canonical default scope. A single-world project (every project today)
 # lives entirely under this scope, so a store opened without an explicit scope behaves exactly as
 # before — same rows, same retrieval, same audit. The dimension is threaded everywhere now so the
-# later units (C2 scope filtering, C3 version inheritance) only have to *use* it, not add it.
+# later layers (scope filtering, version inheritance) only have to *use* it, not add it.
 DEFAULT_WORLD_ID = "default"
 DEFAULT_VERSION = "v1"
 
@@ -53,11 +55,14 @@ class SQLiteStore:
         # The store's *current* scope. Writes stamp rows with it; the vector/blob-cache reads are
         # scoped to it (a retriever only caches within its own scope), and vec0 PARTITION KEY search
         # is constrained to it — all of which keep the single-world default behaviour unchanged.
-        # Broad scope-aware filtering of the content/audit read paths is C2.
+        # Broad scope-aware filtering of the content/audit read paths happens in retrieval.
         self.world_id = world_id
         self.version = version
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
+        # CJK bigram rewrite as a SQL function, so INSERT...SELECT repopulation paths can apply
+        # the same transform as the parameterized write paths (one definition, no drift).
+        self.conn.create_function("cjk_fts", 1, cjk_fts_text, deterministic=True)
         # WAL lets the Workbench read while the CLI writes (and vice versa); busy_timeout keeps
         # short lock contention from surfacing as immediate "database is locked" errors.
         # On :memory: databases WAL is a no-op and SQLite just reports "memory".
@@ -68,7 +73,7 @@ class SQLiteStore:
     def set_scope(self, world_id: str, version: str) -> None:
         """Point the store at a (world_id, version) scope for subsequent writes/reads.
 
-        C1 carrier only: ProjectContext sets this to its current scope. With the default
+        Carrier only: ProjectContext sets this to its current scope. With the default
         ("default", "v1") this is a no-op vs the historical behaviour."""
         self.world_id = world_id
         self.version = version
@@ -76,9 +81,10 @@ class SQLiteStore:
     def close(self) -> None:
         self.conn.close()
 
-    # --- version registry (Scale-P0 G2-C C1) ---------------------------------------------------
-    # C1 delivers the table + basic CRUD only. The base_version column records a version's parent
-    # for the C3 inheritance work; C1 stores it but does NOT resolve the base chain (that is C3).
+    # --- version registry -----------------------------------------------------------------------
+    # The table + basic CRUD. The base_version column records a version's parent for the
+    # copy-on-write inheritance; this layer stores it but does NOT resolve the base chain -- the
+    # content store's overlay resolution does that.
 
     def register_version(
         self, world_id: str, version: str, *, base_version: str | None = None
@@ -86,7 +92,7 @@ class SQLiteStore:
         """Create or update a (world_id, version) registry row. Idempotent on the composite key.
 
         ``base_version`` is the parent version this one branches from (``None`` for a root line).
-        C1 only persists it; the inheritance/fork semantics are C3."""
+        This layer only persists it; the inheritance/fork semantics live in the content store."""
         self.conn.execute(
             """
             INSERT INTO version_registry (world_id, version, base_version, created_at)
@@ -137,7 +143,7 @@ class SQLiteStore:
         ]
 
     def delete_version(self, world_id: str, version: str) -> None:
-        """Remove a (world_id, version) registry row (no-op if absent). C1: registry only — this
+        """Remove a (world_id, version) registry row (no-op if absent). Registry only — this
         does NOT cascade to the scope's content/vector rows (that lifecycle is later units)."""
         self.conn.execute(
             "DELETE FROM version_registry WHERE world_id = ? AND version = ?",
@@ -242,6 +248,17 @@ class SQLiteStore:
                 PRIMARY KEY (world_id, version, ref, model_id)
             );
 
+            CREATE TABLE IF NOT EXISTS community_vectors (
+                ref TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                text_hash TEXT NOT NULL,
+                dim INTEGER NOT NULL,
+                vector BLOB NOT NULL,
+                world_id TEXT NOT NULL DEFAULT 'default',
+                version TEXT NOT NULL DEFAULT 'v1',
+                PRIMARY KEY (world_id, version, ref, model_id)
+            );
+
             CREATE TABLE IF NOT EXISTS graph_edges (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source TEXT NOT NULL,
@@ -317,13 +334,15 @@ class SQLiteStore:
             );
 
             CREATE TABLE IF NOT EXISTS community_reports (
-                id TEXT PRIMARY KEY,             -- community id (c0…) or "_global"
+                id TEXT PRIMARY KEY,             -- community id (c0…, c0.1…) or "_global"
                 level TEXT NOT NULL,             -- community | global
                 title TEXT NOT NULL,
                 summary TEXT NOT NULL,
                 member_refs_json TEXT NOT NULL,  -- provenance: the canon ids this report covers
                 fingerprint TEXT NOT NULL,       -- cache key (members + their content hash)
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                parent_id TEXT,                  -- hierarchical: parent id (NULL at level 0)
+                hier_level INTEGER NOT NULL DEFAULT 0  -- Leiden hierarchy level (0 = coarsest)
             );
 
             CREATE TABLE IF NOT EXISTS lessons (
@@ -366,6 +385,46 @@ class SQLiteStore:
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (world_id, version)
             );
+
+            CREATE TABLE IF NOT EXISTS agent_runs (
+                id              TEXT PRIMARY KEY,
+                goal            TEXT NOT NULL,
+                stop_reason     TEXT NOT NULL,
+                step_count      INTEGER NOT NULL,
+                cost_usd        REAL NOT NULL,
+                latency_ms      REAL NOT NULL,
+                agent_name      TEXT NOT NULL,
+                transcript_json TEXT NOT NULL,
+                created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_runs_created
+                ON agent_runs(created_at);
+
+            CREATE TABLE IF NOT EXISTS agent_run_embeddings (
+                run_id     TEXT PRIMARY KEY,
+                model_id   TEXT NOT NULL,
+                goal       TEXT NOT NULL,
+                summary    TEXT NOT NULL,
+                vector     BLOB NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_run_embeddings_model
+                ON agent_run_embeddings(model_id);
+
+            CREATE TABLE IF NOT EXISTS reflections (
+                id         TEXT PRIMARY KEY,
+                goal       TEXT NOT NULL,
+                reflection TEXT NOT NULL,
+                source     TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                vector     BLOB,
+                model_id   TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_reflections_model
+                ON reflections(model_id);
             """
         )
         # Older runtime DBs predate the rollback column; content files are the source of truth,
@@ -377,8 +436,25 @@ class SQLiteStore:
         # it with the human decision later. Older runtime DBs upgrade in place.
         self._ensure_column("review_items", "critic_verdict", "TEXT")
         self._ensure_column("review_items", "critic_score", "REAL")
-        # IN-B1 M2: primary failing dimension from last critique (dimension-aware lessons).
+        # Primary failing dimension from last critique (dimension-aware lessons).
         self._ensure_column("review_items", "critic_primary_dim", "TEXT")
+        # Episodic exemplars (T18): JSON array of rejected-draft object_refs attached to a lesson,
+        # so a lesson carries concrete past instances (LangMem few-shot / Reflexion failure detail),
+        # not only an aggregate count. Ensure-only (not in CREATE TABLE) mirrors critic_primary_dim;
+        # legacy rows back-fill to NULL, i.e. today's exact behaviour.
+        self._ensure_column("lessons", "exemplar_ids", "TEXT")
+        # Lesson revocation (soft delete): a wrong/harmful lesson would otherwise be injected into
+        # prompts forever. revoked_at tombstones it (get_lessons_for_type filters it out) and
+        # revoked_reason records why — never a physical DELETE, matching the tombstone convention
+        # used elsewhere. Ensure-only (same as exemplar_ids); legacy rows back-fill to NULL, i.e.
+        # not revoked, so existing behaviour is unchanged.
+        self._ensure_column("lessons", "revoked_at", "TEXT")
+        self._ensure_column("lessons", "revoked_reason", "TEXT")
+        # Hierarchical GraphRAG (T13) added a parent link + level to community reports. Older
+        # runtime DBs predate them; the NULL parent / 0 level defaults back-fill existing
+        # single-level rows to their (correct) flat semantics, so a legacy index keeps working.
+        self._ensure_column("community_reports", "parent_id", "TEXT")
+        self._ensure_column("community_reports", "hier_level", "INTEGER NOT NULL DEFAULT 0")
         # P0 #2a incremental sync: content_index/graph_edges grew a content-derived hash/fingerprint
         # so re-opening a project diffs (upsert changed + prune removed) instead of dropping and
         # re-inserting the whole table. Older runtime DBs upgrade in place; the empty-string default
@@ -393,7 +469,7 @@ class SQLiteStore:
             # open/reload, so clear it once here rather than back-filling fingerprints for rows we
             # are about to re-diff anyway.
             self.conn.execute("DELETE FROM graph_edges")
-        # Scale-P0 G2-C C1: the (world_id, version) scope columns. Older runtime DBs predate them,
+        # The (world_id, version) scope columns. Older runtime DBs predate them,
         # so upgrade in place; the 'default'/'v1' defaults back-fill every existing row to the
         # canonical scope, losing no data and keeping single-world behaviour unchanged. The scope
         # indexes are created *after* the columns exist (a legacy DB's CREATE TABLE IF NOT EXISTS
@@ -402,6 +478,7 @@ class SQLiteStore:
             "content_index",
             "content_vectors",
             "reference_vectors",
+            "community_vectors",
             "graph_edges",
             "reference_sources",
             "reference_chunks",
@@ -411,7 +488,7 @@ class SQLiteStore:
             self._ensure_column(table, "version", "TEXT NOT NULL DEFAULT 'v1'")
         # The authoritative relational tables key on the object id; with scope, that id is only
         # unique *within* a scope, so the primary key must include (world_id, version). A legacy DB
-        # (and a DB from the first, buggy C1 cut) still has the pre-scope single-column PK — SQLite
+        # (and a DB from an early cut) still has the pre-scope single-column PK — SQLite
         # cannot ALTER a PK, so rebuild those tables under the composite PK, carrying every existing
         # row across (back-filled to the canonical scope). This is what makes a write to one scope
         # physically unable to collide with / delete another scope's rows. Runs *before* the index
@@ -419,12 +496,11 @@ class SQLiteStore:
         self._ensure_scoped_pk("content_index", ("world_id", "version", "ref"))
         self._ensure_scoped_pk("reference_sources", ("world_id", "version", "id"))
         self._ensure_scoped_pk("reference_chunks", ("world_id", "version", "ref"))
-        # G2 acceptance fix: the vector blob caches keyed on (ref, model_id) only, so a shared DB
-        # would let the same ref in another scope collide on upsert and thrash the embedding cache.
-        # Scope their PK too, so a ref's fp32 blob is cached per (world, version) like every other
-        # authoritative table.
+        # Scope vector blob caches too, so a shared DB cannot let the same ref in another scope
+        # collide on upsert and thrash the embedding cache.
         self._ensure_scoped_pk("content_vectors", ("world_id", "version", "ref", "model_id"))
         self._ensure_scoped_pk("reference_vectors", ("world_id", "version", "ref", "model_id"))
+        self._ensure_scoped_pk("community_vectors", ("world_id", "version", "ref", "model_id"))
         # graph_edges keeps its AUTOINCREMENT id; its per-edge uniqueness (the incremental-sync
         # ON CONFLICT key) becomes scope-qualified so the same fingerprint can exist once per scope.
         # Drop the legacy single-column unique index and (re)create the scoped one.
@@ -452,35 +528,57 @@ class SQLiteStore:
         # Repopulating here (not relying on the next replace_* sync) is required for correctness:
         # the incremental sync skips unchanged content_index rows, so it would otherwise leave the
         # rebuilt FTS empty whenever a row's hash already matched — a silent search outage.
-        rebuilt_content_fts = self._rebuild_fts_if_unscoped(
-            "content_fts",
-            "ref UNINDEXED, object_type UNINDEXED, world_id UNINDEXED, version UNINDEXED, "
-            "title, body",
-        )
+        rebuilt_content_fts = self._rebuild_fts_if_unscoped("content_fts", CONTENT_FTS_COLUMNS_DDL)
         if rebuilt_content_fts:
-            self.conn.execute(
-                "INSERT INTO content_fts (ref, object_type, world_id, version, title, body) "
-                "SELECT ref, object_type, world_id, version, title, body FROM content_index"
-            )
+            self._repopulate_content_fts()
         rebuilt_reference_fts = self._rebuild_fts_if_unscoped(
-            "reference_fts",
-            "ref UNINDEXED, source_id UNINDEXED, source_title UNINDEXED, "
-            "world_id UNINDEXED, version UNINDEXED, title, body",
+            "reference_fts", REFERENCE_FTS_COLUMNS_DDL
         )
         if rebuilt_reference_fts:
-            self.conn.execute(
-                """
-                INSERT INTO reference_fts (
-                    ref, source_id, source_title, world_id, version, title, body
+            self._repopulate_reference_fts()
+        # CJK bigram FTS generation (PRAGMA user_version = 1). A DB indexed before the bigram
+        # rewrite holds whole-run CJK tokens that the bigram MATCH queries can no longer hit, so
+        # rebuild+repopulate once. Tables just rebuilt by the scope migration above are already
+        # bigram-indexed (the repopulate helpers apply cjk_fts) and are skipped. A fresh DB simply
+        # repopulates empty tables and stamps the version.
+        if int(self.conn.execute("PRAGMA user_version").fetchone()[0]) < 1:
+            if not rebuilt_content_fts:
+                self.conn.execute("DROP TABLE IF EXISTS content_fts")
+                self.conn.execute(
+                    f"CREATE VIRTUAL TABLE content_fts USING fts5({CONTENT_FTS_COLUMNS_DDL})"
                 )
-                SELECT c.ref, c.source_id, COALESCE(s.title, ''), c.world_id, c.version,
-                       c.title, c.body
-                FROM reference_chunks AS c
-                LEFT JOIN reference_sources AS s
-                    ON s.id = c.source_id AND s.world_id = c.world_id AND s.version = c.version
-                """
-            )
+                self._repopulate_content_fts()
+            if not rebuilt_reference_fts:
+                self.conn.execute("DROP TABLE IF EXISTS reference_fts")
+                self.conn.execute(
+                    f"CREATE VIRTUAL TABLE reference_fts USING fts5({REFERENCE_FTS_COLUMNS_DDL})"
+                )
+                self._repopulate_reference_fts()
+            self.conn.execute("PRAGMA user_version = 1")
         self.conn.commit()
+
+    def _repopulate_content_fts(self) -> None:
+        """Refill content_fts from the authoritative content_index (bigram-rewritten)."""
+        self.conn.execute(
+            "INSERT INTO content_fts (ref, object_type, world_id, version, title, body) "
+            "SELECT ref, object_type, world_id, version, cjk_fts(title), cjk_fts(body) "
+            "FROM content_index"
+        )
+
+    def _repopulate_reference_fts(self) -> None:
+        """Refill reference_fts from the authoritative reference tables (bigram-rewritten)."""
+        self.conn.execute(
+            """
+            INSERT INTO reference_fts (
+                ref, source_id, source_title, world_id, version, title, body
+            )
+            SELECT c.ref, c.source_id, COALESCE(s.title, ''), c.world_id, c.version,
+                   cjk_fts(c.title), cjk_fts(c.body)
+            FROM reference_chunks AS c
+            LEFT JOIN reference_sources AS s
+                ON s.id = c.source_id AND s.world_id = c.world_id AND s.version = c.version
+            """
+        )
 
     def _ensure_column(self, table: str, column: str, column_type: str) -> bool:
         """Add ``column`` to ``table`` if missing. Returns ``True`` when it was just added."""
@@ -632,13 +730,11 @@ class SQLiteStore:
             self.conn.execute("UPDATE issues SET status = 'fixed' WHERE status = 'open'")
         self.conn.commit()
 
-    def list_issues(
-        self,
-        *,
-        severity: str | None = None,
-        rule_code: str | None = None,
-        status: str | None = None,
-    ) -> list[Issue]:
+    def _issues_where(
+        self, *, severity: str | None, rule_code: str | None, status: str | None
+    ) -> tuple[str, list[Any]]:
+        """The shared filter clause + bind values for the issues table (one source for
+        ``list_issues`` and ``count_issues`` so a paged listing and its total can never diverge)."""
         clauses: list[str] = []
         values: list[Any] = []
         if severity is not None:
@@ -651,8 +747,39 @@ class SQLiteStore:
             clauses.append("status = ?")
             values.append(status)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        rows = self.conn.execute(f"SELECT * FROM issues{where} ORDER BY id", values).fetchall()
+        return where, values
+
+    def list_issues(
+        self,
+        *,
+        severity: str | None = None,
+        rule_code: str | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Issue]:
+        """Persisted issues matching the filters, ordered by id. ``limit=None`` (default) returns
+        every match — byte-for-byte identical SQL/result to before; a non-None ``limit`` pages with
+        ``LIMIT/OFFSET`` for the token-bounded MCP surface."""
+        where, values = self._issues_where(severity=severity, rule_code=rule_code, status=status)
+        sql = f"SELECT * FROM issues{where} ORDER BY id"
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            values = [*values, limit, offset]
+        rows = self.conn.execute(sql, values).fetchall()
         return [_issue_from_row(row) for row in rows]
+
+    def count_issues(
+        self,
+        *,
+        severity: str | None = None,
+        rule_code: str | None = None,
+        status: str | None = None,
+    ) -> int:
+        """Total issues matching the same filters as :meth:`list_issues` (the un-paged total)."""
+        where, values = self._issues_where(severity=severity, rule_code=rule_code, status=status)
+        row = self.conn.execute(f"SELECT COUNT(*) FROM issues{where}", values).fetchone()
+        return int(row[0])
 
     def save_patch(self, patch: dict[str, Any]) -> None:
         """Persist a patch proposal/decision. `patch` uses plain-dict keys:
@@ -757,7 +884,7 @@ class SQLiteStore:
                 item.get("decided_at"),
                 item.get("critic_verdict"),
                 item.get("critic_score"),
-                item.get("critic_primary_dim"),  # IN-B1 M2
+                item.get("critic_primary_dim"),
             ),
         )
         self.conn.commit()
@@ -818,26 +945,35 @@ class SQLiteStore:
         item_type: str,
         lesson_text: str,
         *,
-        dimension: str = "general",  # IN-B1 M2: keyword-only; default "general" for compat
+        dimension: str = "general",  # keyword-only; default "general" for compat
+        exemplar_ids: list[str] | None = None,  # episodic exemplars (T18); None → NULL, no-op
     ) -> None:
         """Upsert a lesson for (item_type, dimension). Increments false_pass_count on repeat writes.
 
-        IN-B1 M2: added dimension parameter. Callers that omit it get dimension='general',
+        Added dimension parameter. Callers that omit it get dimension='general',
         preserving exact backward-compatible behaviour.
+
+        exemplar_ids (T18): a small list of rejected-draft object_refs to attach as episodic
+        exemplars. None/empty writes NULL — byte-identical to a pre-T18 save. On conflict the
+        column is REPLACED (mirrors lesson_text = excluded.lesson_text): each extract run
+        regenerates from the full current report, so the latest concrete instances win.
         """
         import uuid
+
         now = datetime.now(UTC).isoformat()
+        exemplars_json = json.dumps(exemplar_ids) if exemplar_ids else None
         self.conn.execute(
             """
             INSERT INTO lessons (id, item_type, dimension, lesson_text, false_pass_count,
-                                 created_at, last_seen_at)
-            VALUES (?, ?, ?, ?, 1, ?, ?)
+                                 created_at, last_seen_at, exemplar_ids)
+            VALUES (?, ?, ?, ?, 1, ?, ?, ?)
             ON CONFLICT(item_type, dimension) DO UPDATE SET
                 false_pass_count = false_pass_count + 1,
                 lesson_text = excluded.lesson_text,
-                last_seen_at = excluded.last_seen_at
+                last_seen_at = excluded.last_seen_at,
+                exemplar_ids = excluded.exemplar_ids
             """,
-            (str(uuid.uuid4()), item_type, dimension, lesson_text, now, now),
+            (str(uuid.uuid4()), item_type, dimension, lesson_text, now, now, exemplars_json),
         )
         self.conn.commit()
 
@@ -845,13 +981,13 @@ class SQLiteStore:
         self,
         item_type: str,
         *,
-        dimension: str | None = None,  # IN-B1 M2: None = all dimensions (backward compat)
+        dimension: str | None = None,  # None = all dimensions (backward compat)
         max_count: int = 3,
         cutoff_days: int = 90,
     ) -> list[dict[str, Any]]:
         """Return lessons for item_type, most-recent first.
 
-        IN-B1 M2: added dimension parameter.
+        Added dimension parameter.
         dimension=None (default): return all dimensions — preserves backward-compatible behaviour.
         dimension=<str>: filter to that specific dimension only.
 
@@ -859,12 +995,14 @@ class SQLiteStore:
         last_seen_at DESC within their tier. The hard limit is max_count rows returned.
         """
         from datetime import timedelta
+
         cutoff = (datetime.now(UTC) - timedelta(days=cutoff_days)).isoformat()
+        # revoked_at IS NULL: a revoked (soft-deleted) lesson must never be injected again.
         if dimension is not None:
             rows = self.conn.execute(
                 """
                 SELECT * FROM lessons
-                WHERE item_type = ? AND dimension = ?
+                WHERE item_type = ? AND dimension = ? AND revoked_at IS NULL
                 ORDER BY
                     CASE WHEN last_seen_at >= ? THEN 0 ELSE 1 END ASC,
                     last_seen_at DESC
@@ -876,7 +1014,7 @@ class SQLiteStore:
             rows = self.conn.execute(
                 """
                 SELECT * FROM lessons
-                WHERE item_type = ?
+                WHERE item_type = ? AND revoked_at IS NULL
                 ORDER BY
                     CASE WHEN last_seen_at >= ? THEN 0 ELSE 1 END ASC,
                     last_seen_at DESC
@@ -885,6 +1023,33 @@ class SQLiteStore:
                 (item_type, cutoff, max_count),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def revoke_lesson(self, lesson_id: str, reason: str = "") -> bool:
+        """Soft-delete a lesson so ``get_lessons_for_type`` stops returning it.
+
+        A wrong or harmful lesson would otherwise be injected into generation/critique prompts
+        forever. This tombstones it (records revoked_at + revoked_reason) rather than physically
+        deleting the row, matching the store's tombstone convention elsewhere.
+
+        Idempotent: revoking an already-revoked lesson keeps the ORIGINAL revoked_at/reason
+        (via COALESCE) and still returns True. Returns False when no lesson has this id, so the
+        caller can surface a guided error instead of silently succeeding.
+        """
+        row = self.conn.execute("SELECT id FROM lessons WHERE id = ?", (lesson_id,)).fetchone()
+        if row is None:
+            return False
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            """
+            UPDATE lessons
+            SET revoked_at = COALESCE(revoked_at, ?),
+                revoked_reason = COALESCE(revoked_reason, ?)
+            WHERE id = ?
+            """,
+            (now, reason or None, lesson_id),
+        )
+        self.conn.commit()
+        return True
 
     # --- telemetry persistence (Item 8) -------------------------------------------------------
 
@@ -951,6 +1116,209 @@ class SQLiteStore:
             for row in rows
         ]
 
+    # --- agent run transcripts (T19: episodic / recall memory WRITE side) ---------------------
+    # Persist each ReAct run's full trajectory so no run is lost and it can be listed/replayed by
+    # id. Mirrors the audit_runs precedent (TEXT PK + a JSON transcript column) and the telemetry
+    # precedent (newest-first query). The runtime table lives in the project's always-on
+    # runtime.sqlite; this is the store experience-from-earlier-decision-cycles primitive (CoALA
+    # episodic memory / MemGPT recall storage). The retrieval half (reading a run back into an
+    # agent's working context) is deliberately not built here.
+
+    def save_agent_run(
+        self,
+        *,
+        run_id: str,
+        goal: str,
+        stop_reason: str,
+        step_count: int,
+        cost_usd: float,
+        latency_ms: float,
+        agent_name: str,
+        transcript_json: str,
+        created_at: str | None = None,
+    ) -> None:
+        """Persist one agent run. Idempotent on ``run_id`` (INSERT OR REPLACE: a re-save with the
+        same id overwrites in place). ``transcript_json`` is the full serialized ``AgentResult``;
+        the scalar columns are lifted out for cheap listing without loading the transcript."""
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO agent_runs (
+                id, goal, stop_reason, step_count, cost_usd, latency_ms,
+                agent_name, transcript_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                goal,
+                stop_reason,
+                step_count,
+                cost_usd,
+                latency_ms,
+                agent_name,
+                transcript_json,
+                created_at or _now_iso(),
+            ),
+        )
+        self.conn.commit()
+
+    def list_agent_runs(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Recent agent runs, newest first (created_at DESC, rowid DESC tiebreak).
+
+        Lightweight: the heavy ``transcript_json`` is intentionally NOT selected — call
+        :meth:`get_agent_run` to load one run's full transcript."""
+        rows = self.conn.execute(
+            """
+            SELECT id, goal, stop_reason, step_count, cost_usd, latency_ms, agent_name, created_at
+            FROM agent_runs
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "goal": str(row["goal"]),
+                "stop_reason": str(row["stop_reason"]),
+                "step_count": int(row["step_count"]),
+                "cost_usd": float(row["cost_usd"]),
+                "latency_ms": float(row["latency_ms"]),
+                "agent_name": str(row["agent_name"]),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def get_agent_run(self, run_id: str) -> dict[str, Any] | None:
+        """One run by id with its full transcript (``transcript`` = parsed JSON), or ``None``."""
+        row = self.conn.execute("SELECT * FROM agent_runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": str(row["id"]),
+            "goal": str(row["goal"]),
+            "stop_reason": str(row["stop_reason"]),
+            "step_count": int(row["step_count"]),
+            "cost_usd": float(row["cost_usd"]),
+            "latency_ms": float(row["latency_ms"]),
+            "agent_name": str(row["agent_name"]),
+            "created_at": str(row["created_at"]),
+            "transcript": json.loads(str(row["transcript_json"])),
+        }
+
+    # --- episodic recall (MemGPT recall storage) ----------------------------------------------
+    # The READ half of episodic memory: a per-run embedding of (goal + outcome) so a later run can
+    # retrieve semantically-similar past runs and inject them as prompt context (MemGPT recall
+    # storage, Packer et al. 2023). The embedding lives beside the full transcript (agent_runs);
+    # recall joins the two so only a *finished* run (stop_reason == 'finished') is ever surfaced.
+
+    def save_agent_run_embedding(
+        self,
+        *,
+        run_id: str,
+        model_id: str,
+        goal: str,
+        summary: str,
+        vector: bytes,
+        created_at: str | None = None,
+    ) -> None:
+        """Persist the recall embedding for one run. Idempotent on ``run_id`` (INSERT OR REPLACE).
+
+        ``model_id`` records the embedding space the vector was produced in — recall only ever
+        compares vectors sharing the current embedder's id, since two embedders' vectors are not
+        comparable. ``vector`` is a float32 blob (see ``agent.episodic._to_blob``)."""
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO agent_run_embeddings (
+                run_id, model_id, goal, summary, vector, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (run_id, model_id, goal, summary, vector, created_at or _now_iso()),
+        )
+        self.conn.commit()
+
+    def query_agent_run_embeddings(self, *, model_id: str) -> list[dict[str, Any]]:
+        """Recall candidates: every FINISHED run's embedding in the ``model_id`` embedding space.
+
+        Joins ``agent_runs`` so only runs whose ``stop_reason == 'finished'`` are returned (a
+        run that ran out of step budget carries no trustworthy conclusion to recall). The blob is
+        returned raw; the cosine ranking happens in the retrieval layer (``agent.episodic``)."""
+        rows = self.conn.execute(
+            """
+            SELECT e.run_id, e.goal, e.summary, e.vector, e.created_at
+            FROM agent_run_embeddings AS e
+            JOIN agent_runs AS r ON r.id = e.run_id
+            WHERE e.model_id = ? AND r.stop_reason = 'finished'
+            """,
+            (model_id,),
+        ).fetchall()
+        return [
+            {
+                "run_id": str(row["run_id"]),
+                "goal": str(row["goal"]),
+                "summary": str(row["summary"]),
+                "vector": bytes(row["vector"]),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    # --- Reflexion cross-trial buffer ---------------------------------------------------------
+    # Verbal reflections distilled from failed trials, persisted so a later run at a similar goal
+    # can prepend them to the actor's reflection slot (Reflexion episodic buffer, Shinn et al.
+    # 2023). Each row carries a goal embedding so recall is semantic, not exact-match.
+
+    def save_reflection(
+        self,
+        *,
+        reflection_id: str,
+        goal: str,
+        reflection: str,
+        source: str,
+        vector: bytes | None = None,
+        model_id: str | None = None,
+        created_at: str | None = None,
+    ) -> None:
+        """Persist one distilled reflection. Idempotent on ``reflection_id``.
+
+        ``vector`` is the goal embedding (float32 blob) and ``model_id`` its embedding space; both
+        are nullable so a reflection can still be recorded when the embedder is unavailable (it is
+        then simply not recallable — recall filters ``vector IS NOT NULL``)."""
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO reflections (
+                id, goal, reflection, source, created_at, vector, model_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (reflection_id, goal, reflection, source, created_at or _now_iso(), vector, model_id),
+        )
+        self.conn.commit()
+
+    def query_reflections(self, *, model_id: str) -> list[dict[str, Any]]:
+        """Recall candidates: every embedded reflection in the ``model_id`` embedding space.
+
+        Rows without a vector (embedder was unavailable at write time) are excluded — they cannot
+        be ranked. Cosine ranking happens in the retrieval layer (``agent.episodic``)."""
+        rows = self.conn.execute(
+            """
+            SELECT id, goal, reflection, source, created_at, vector
+            FROM reflections
+            WHERE model_id = ? AND vector IS NOT NULL
+            """,
+            (model_id,),
+        ).fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "goal": str(row["goal"]),
+                "reflection": str(row["reflection"]),
+                "source": str(row["source"]),
+                "created_at": str(row["created_at"]),
+                "vector": bytes(row["vector"]),
+            }
+            for row in rows
+        ]
+
     # ------------------------------------------------------------------------------------------
 
     def replace_content_index(self, bundle: ContentBundle) -> None:
@@ -985,9 +1353,7 @@ class SQLiteStore:
         # A legacy/back-filled row carries row_hash='' (never a real sha1), so it always counts as
         # changed and gets re-stamped on the first incremental sync -- correctness over the mtime
         # fast path.
-        changed = [
-            ref for ref, h in desired_hash.items() if existing_hash.get(ref) != h
-        ]
+        changed = [ref for ref, h in desired_hash.items() if existing_hash.get(ref) != h]
 
         try:
             for ref in removed:
@@ -1033,7 +1399,14 @@ class SQLiteStore:
                 self.conn.execute(
                     "INSERT INTO content_fts (ref, object_type, world_id, version, title, body) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
-                    (ref, object_type, self.world_id, self.version, title, body),
+                    (
+                        ref,
+                        object_type,
+                        self.world_id,
+                        self.version,
+                        cjk_fts_text(title),
+                        cjk_fts_text(body),
+                    ),
                 )
         except Exception:
             self.conn.rollback()
@@ -1049,7 +1422,7 @@ class SQLiteStore:
         text_hash lets a retriever embed only rows whose text (or the model) changed, so
         re-opening a project never re-runs the embedder over unchanged rows.
 
-        Scale-P0 G2-C C1: scoped to the store's current (world_id, version) — a retriever only ever
+        Scoped to the store's current (world_id, version) — a retriever only ever
         caches/embeds within its own scope. In the single default scope this returns exactly the
         same rows as before."""
         table = _vectors_table(table)
@@ -1101,10 +1474,10 @@ class SQLiteStore:
 
         With ``quantized=False`` (default) this builds the fp32 ``SqliteVecBackend`` (lossless,
         bit-identical to numpy). With ``quantized=True`` it builds the int8 two-stage
-        ``SqliteVecInt8Backend`` (G2-A): a ~4× smaller int8 coarse index plus an fp32 rerank
-        sidecar, recall ~0.999. The two use distinct vec0 table names so both can coexist in one DB.
+        ``SqliteVecInt8Backend``: a ~4× smaller int8 coarse index plus an fp32 rerank sidecar,
+        recall ~0.999. The two use distinct vec0 table names so both can coexist in one DB.
 
-        **Tier selection (G2-B).** With ``ann=True`` *and* a corpus already at or above
+        **Tier selection.** With ``ann=True`` *and* a corpus already at or above
         ``USEARCH_MIN_N`` persisted vectors, this builds the on-disk usearch HNSW
         ``UsearchBackend`` instead — a sub-linear ANN index for the large-N case, two-stage
         fp32-reranked to ~0.99 recall. The threshold is the safety valve: a small / eval corpus
@@ -1129,13 +1502,11 @@ class SQLiteStore:
 
         _vectors_table(table)  # validate the blob table name
 
-        # G2-B tier selection: only an explicit opt-in AND a large-enough corpus switch to the ANN
+        # Tier selection: only an explicit opt-in AND a large-enough corpus switch to the ANN
         # backend. The N check is what keeps small / eval corpora on the exact scan; it reads the
         # persisted blob-cache count (cheap COUNT, no vectors loaded).
         if ann and self._corpus_size(model_id, table=table) >= USEARCH_MIN_N:
-            usearch_backend = self._make_usearch_backend(
-                model_id, dim=int(dim), table=table
-            )
+            usearch_backend = self._make_usearch_backend(model_id, dim=int(dim), table=table)
             if usearch_backend is not None:
                 return usearch_backend
             # usearch unavailable / failed -> fall through to the exact sqlite-vec backend below.
@@ -1225,7 +1596,7 @@ class SQLiteStore:
         deterministic temp path keyed by the DB id — it is rebuildable from the (in-memory) fp32
         table anyway, so a transient temp file is fine.
 
-        Scale-P0 G2-C C1: each scope gets its own per-scope HNSW file (the index is not partitioned
+        Each scope gets its own per-scope HNSW file (the index is not partitioned
         the way vec0 is). The canonical default scope keeps the exact pre-scope filename so an
         existing single-world ``.usearch`` index opens in place; only non-default scopes add a
         ``.{world_id}.{version}`` suffix."""
@@ -1238,9 +1609,7 @@ class SQLiteStore:
             return f"{self.path}.{table}{suffix}.usearch"
         import tempfile
 
-        return str(
-            Path(tempfile.gettempdir()) / f"owcopilot_{id(self)}_{table}{suffix}.usearch"
-        )
+        return str(Path(tempfile.gettempdir()) / f"owcopilot_{id(self)}_{table}{suffix}.usearch")
 
     def _backfill_usearch(
         self,
@@ -1316,7 +1685,7 @@ class SQLiteStore:
         false refusal."""
         if not entity_ids:
             return []
-        # Scale-P0 G2-C C2: scope-aware read. This is a full scan of the scope's relation rows, so
+        # Scope-aware read. This is a full scan of the scope's relation rows, so
         # the (world_id, version) filter both keeps relation completion within the current scope and
         # is a concrete "降N" win — the scan now touches only this scope's relations, not the whole
         # multi-world table. The composite scope index serves the predicate.
@@ -1340,7 +1709,7 @@ class SQLiteStore:
         if not refs:
             return {}
         placeholders = ",".join("?" for _ in refs)
-        # Scale-P0 G2-C C2: scope-aware read. Materialise only this scope's chunks (and join the
+        # Scope-aware read. Materialise only this scope's chunks (and join the
         # source within the same scope, so a same-id source in another scope cannot supply the
         # title). In the single default scope this is the same rows as before.
         rows = self.conn.execute(
@@ -1362,8 +1731,9 @@ class SQLiteStore:
         self.conn.execute(
             """
             INSERT OR REPLACE INTO community_reports (
-                id, level, title, summary, member_refs_json, fingerprint, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                id, level, title, summary, member_refs_json, fingerprint, created_at,
+                parent_id, hier_level
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(report["id"]),
@@ -1373,6 +1743,8 @@ class SQLiteStore:
                 _json(list(report.get("member_refs", []))),
                 str(report["fingerprint"]),
                 _now_iso(),
+                None if report.get("parent_id") is None else str(report["parent_id"]),
+                int(report.get("hier_level", 0)),
             ),
         )
         self.conn.commit()
@@ -1412,7 +1784,7 @@ class SQLiteStore:
         drop-and-reinsert (same edges, same multiplicity); only the AUTOINCREMENT ``id`` values may
         differ, and nothing reads that column. Runs in a single transaction.
 
-        Scale-P0 G2-C C1: the existing-fingerprint read and the removed DELETE are scope-filtered to
+        The existing-fingerprint read and the removed DELETE are scope-filtered to
         the current (world_id, version), and inserts stamp it — so a write to one scope never
         deletes another scope's edges (INV-2). The fingerprint uniqueness is scope-qualified."""
         desired: dict[str, tuple[str, str, str, str, int | None, int | None]] = {}
@@ -1478,15 +1850,19 @@ class SQLiteStore:
         match_query = build_fts_match_query(query)
         if match_query is None:
             return []
-        # Scale-P0 G2-C C2: scope-aware read. content_fts carries world_id/version as UNINDEXED
+        # Scope-aware read. content_fts carries world_id/version as UNINDEXED
         # columns, so the MATCH is constrained to the store's current (world_id, version) — search
-        # only sees this scope's rows. In the single default scope this matches the pre-C2 result
+        # only sees this scope's rows. In the single default scope this matches the un-scoped result
         # exactly (every row is in that scope), while a multi-scope DB no longer scans foreign rows.
+        # Display text comes from the authoritative content_index join: the FTS columns hold the
+        # CJK-bigram rewrite (index tokens), which must never leak into displayed results.
         rows = self.conn.execute(
             """
-            SELECT ref, object_type, title, body
-            FROM content_fts
-            WHERE content_fts MATCH ? AND world_id = ? AND version = ?
+            SELECT f.ref, f.object_type, c.title, c.body
+            FROM content_fts AS f
+            JOIN content_index AS c
+                ON c.ref = f.ref AND c.world_id = f.world_id AND c.version = f.version
+            WHERE content_fts MATCH ? AND f.world_id = ? AND f.version = ?
             LIMIT ?
             """,
             (match_query, self.world_id, self.version, limit),
@@ -1518,7 +1894,7 @@ class SQLiteStore:
         For a single-scope (default) project the end state matches the old drop-and-reinsert:
         same reference_sources / reference_chunks / reference_fts rows. One transaction.
 
-        Scale-P0 G2-C C1: every existing-source read and every delete is scope-filtered to the
+        Every existing-source read and every delete is scope-filtered to the
         current (world_id, version), and inserts stamp it — so a write to one scope never reads or
         prunes another scope's reference rows (INV-2)."""
         source_titles = {source.id: source.title for source in sources}
@@ -1610,8 +1986,8 @@ class SQLiteStore:
                             source_titles.get(chunk.source_id, ""),
                             self.world_id,
                             self.version,
-                            chunk.title,
-                            chunk.body,
+                            cjk_fts_text(chunk.title),
+                            cjk_fts_text(chunk.body),
                         ),
                     )
         except Exception:
@@ -1637,8 +2013,7 @@ class SQLiteStore:
                 (ref, self.world_id, self.version),
             )
         self.conn.execute(
-            "DELETE FROM reference_chunks "
-            "WHERE source_id = ? AND world_id = ? AND version = ?",
+            "DELETE FROM reference_chunks WHERE source_id = ? AND world_id = ? AND version = ?",
             (source_id, self.world_id, self.version),
         )
         self.conn.execute(
@@ -1647,7 +2022,7 @@ class SQLiteStore:
         )
 
     def list_reference_sources(self) -> list[dict[str, Any]]:
-        # Scale-P0 G2-C C2: scope-aware read — only the current scope's reference sources.
+        # Scope-aware read — only the current scope's reference sources.
         rows = self.conn.execute(
             "SELECT * FROM reference_sources WHERE world_id = ? AND version = ? "
             "ORDER BY created_at, id",
@@ -1672,17 +2047,17 @@ class SQLiteStore:
         if match_query is None:
             return self._fallback_reference_search(query, limit=limit)
         # bm25 weights are positional, one per reference_fts column. Column order is now
-        # (ref, source_id, source_title, world_id, version, title, body) after the C1 scope columns
+        # (ref, source_id, source_title, world_id, version, title, body) after the scope columns
         # were added, so the title boost (4.0) and body (1.0) weights moved to positions 6/7; the
         # leading metadata columns stay at 0.0. Keeping this aligned preserves the original ranking.
-        # Scale-P0 G2-C C2: scope-aware read. reference_fts carries world_id/version as UNINDEXED
+        # Scope-aware read. reference_fts carries world_id/version as UNINDEXED
         # columns, so the MATCH is constrained to the current scope, and the chunk join is scope-
         # qualified so a same-ref chunk in another scope cannot be paired in. Single default scope:
-        # identical rows to pre-C2.
+        # identical rows to the un-scoped path.
         rows = self.conn.execute(
             """
             SELECT
-                f.ref, f.source_id, f.source_title, f.title, f.body,
+                f.ref, f.source_id, f.source_title, c.title, c.body,
                 c.chunk_index, c.metadata_json,
                 bm25(reference_fts, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 1.0) AS rank
             FROM reference_fts AS f
@@ -1705,10 +2080,11 @@ class SQLiteStore:
         return hits[:limit]
 
     def _fallback_reference_search(self, query: str, *, limit: int) -> list[dict[str, Any]]:
-        # Scale-P0 G2-C C2: scope-aware read. The lexical fallback is a full scan of the chunk
+        # Scope-aware read. The lexical fallback is a full scan of the chunk
         # table, so scoping it to the current (world_id, version) both isolates the scope and is a
         # reduce-N win: it scans only this scope's chunks. The source join is scope-qualified for
-        # the same reason as the FTS path. Single default scope: identical scan/result to pre-C2.
+        # the same reason as the FTS path. Single default scope: identical scan/result to the
+        # un-scoped path.
         rows = self.conn.execute(
             """
             SELECT
@@ -1755,8 +2131,40 @@ FTS_STOP_WORDS = {
 }
 
 
+# The FTS column shapes, shared by the executescript DDL, the scope migration and the CJK bigram
+# migration (one source, three consumers — the rebuilds must recreate the exact same shape).
+CONTENT_FTS_COLUMNS_DDL = (
+    "ref UNINDEXED, object_type UNINDEXED, world_id UNINDEXED, version UNINDEXED, title, body"
+)
+REFERENCE_FTS_COLUMNS_DDL = (
+    "ref UNINDEXED, source_id UNINDEXED, source_title UNINDEXED, "
+    "world_id UNINDEXED, version UNINDEXED, title, body"
+)
+
+# Same CJK range as util.slugify (U+3400–U+9FFF: Extension A + the main block).
+_CJK_RUN = re.compile(r"[㐀-鿿]{2,}")
+
+
+def cjk_fts_text(text: str) -> str:
+    """Rewrite CJK runs as space-joined bigrams for FTS indexing and matching.
+
+    fts5's unicode61 tokenizer treats a consecutive CJK run as ONE token, so "雾隐盟" in a body
+    only ever matched the identical full run — Chinese queries missed the FTS index and dropped
+    into the O(N) lexical fallback on every search. Indexing and querying through this same
+    bigram rewrite makes 2+ char Chinese queries first-class FTS citizens (the standard
+    CJK-on-FTS5 practice) with zero effect on Latin text. Adjacent bigrams reassemble the
+    original string, so a bigram *phrase* query is an exact substring match. Single CJK chars
+    stay as-is (they still fall back to the bounded lexical scan)."""
+    return _CJK_RUN.sub(
+        lambda m: " ".join(m.group(0)[i : i + 2] for i in range(len(m.group(0)) - 1)), text
+    )
+
+
 def build_fts_match_query(query: str) -> str | None:
-    """Turn natural-language input into a safe FTS5 MATCH expression."""
+    """Turn natural-language input into a safe FTS5 MATCH expression.
+
+    A CJK token expands to its bigram *phrase* (see :func:`cjk_fts_text`) so it matches the
+    bigram-indexed rows as an exact substring; other tokens stay quoted terms as before."""
     tokens = [
         token
         for token in re.findall(r"[\w]+", query, flags=re.UNICODE)
@@ -1764,7 +2172,7 @@ def build_fts_match_query(query: str) -> str | None:
     ]
     if not tokens:
         return None
-    return " OR ".join(f'"{token}"' for token in tokens)
+    return " OR ".join(f'"{cjk_fts_text(token)}"' for token in tokens)
 
 
 def _lexical_score(query: str, fields: list[str]) -> float:
@@ -1811,7 +2219,7 @@ def _review_item_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "critic_verdict": row["critic_verdict"],
         "critic_score": row["critic_score"],
     }
-    # IN-B1 M2: critic_primary_dim may not exist on older DBs (added via _ensure_column)
+    # critic_primary_dim may not exist on older DBs (added via _ensure_column)
     if "critic_primary_dim" in keys:
         result["critic_primary_dim"] = row["critic_primary_dim"]
     return result
@@ -2036,23 +2444,31 @@ def _reference_source_unchanged(prior: sqlite3.Row, source: Any) -> bool:
     )
 
 
-# G2-B tier threshold: the minimum persisted-vector count at which ``make_vector_backend(ann=True)``
+# Tier threshold: the minimum persisted-vector count at which ``make_vector_backend(ann=True)``
 # switches from the exact sqlite-vec scan to the on-disk usearch HNSW ANN backend. Below this, even
 # an opt-in caller stays on the exact scan — that is what guarantees small / eval corpora (a few
 # hundred rows) keep recall 1.0 and never see ANN approximation. 5_000 is the order where the O(N)
-# brute scan starts to dominate latency (P0_G2_RESEARCH §4) while the HNSW build cost stays modest.
+# brute scan starts to dominate latency while the HNSW build cost stays modest.
 USEARCH_MIN_N = 5_000
 
-_VECTOR_TABLES = {"content_vectors", "reference_vectors"}
+_VECTOR_TABLES = {"content_vectors", "reference_vectors", "community_vectors"}
 
 # The vec0 virtual table that backs each blob cache table. The blob table stays the authoritative
 # fp32 source (and the cross-backend fallback); the vec0 table is the disk-resident search index.
-_VEC0_TABLES = {"content_vectors": "content_vec", "reference_vectors": "reference_vec"}
+_VEC0_TABLES = {
+    "content_vectors": "content_vec",
+    "reference_vectors": "reference_vec",
+    "community_vectors": "community_vec",
+}
 
-# The int8 (G2-A) vec0 index table per blob cache table. Distinct from the fp32 ``_VEC0_TABLES`` so
+# The int8 vec0 index table per blob cache table. Distinct from the fp32 ``_VEC0_TABLES`` so
 # a project can hold both the fp32 and the int8 search index side by side without name collision;
 # the int8 backend additionally creates its own ``{name}_fp32`` rerank sidecar.
-_VEC0_INT8_TABLES = {"content_vectors": "content_vec_i8", "reference_vectors": "reference_vec_i8"}
+_VEC0_INT8_TABLES = {
+    "content_vectors": "content_vec_i8",
+    "reference_vectors": "reference_vec_i8",
+    "community_vectors": "community_vec_i8",
+}
 
 
 def _vectors_table(table: str) -> str:
@@ -2091,6 +2507,9 @@ def _reference_hit_from_row(row: sqlite3.Row, *, score: float) -> dict[str, Any]
 
 
 def _community_report_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    keys = set(row.keys())
+    parent_id = row["parent_id"] if "parent_id" in keys else None
+    hier_level = row["hier_level"] if "hier_level" in keys else 0
     return {
         "id": str(row["id"]),
         "level": str(row["level"]),
@@ -2098,6 +2517,8 @@ def _community_report_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "summary": str(row["summary"]),
         "member_refs": json.loads(str(row["member_refs_json"])),
         "fingerprint": str(row["fingerprint"]),
+        "parent_id": None if parent_id is None else str(parent_id),
+        "hier_level": 0 if hier_level is None else int(hier_level),
     }
 
 

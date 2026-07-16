@@ -1,3 +1,4 @@
+# 把非结构化文稿提炼成内容草稿：分块→抽取→接地→进审阅。
 """Distill an unstructured manuscript (novel chapter, script, notes) into a content draft.
 
 The pipeline is: chunk → per-chunk LLM extraction (JSON) → name-keyed merge → id mapping →
@@ -305,6 +306,9 @@ def decode_document_bytes(data: bytes, filename: str) -> str:
     return text
 
 
+# Kept off complete_structured: returns a loose per-chunk dict fed into _MergedFacts' name-keyed
+# coercion/merge (a multi-entity content-pipeline intake, not one model), and an unparsable chunk is
+# SKIPPED-and-reported by the caller, never raised — so the run survives one bad chunk of many.
 def parse_extraction_payload(raw: str) -> dict[str, Any]:
     """Parse one chunk's extraction JSON, tolerating prose and markdown fences.
 
@@ -694,6 +698,8 @@ def _gap_context(draft: ExtractionDraft, gap: ExtractionGap) -> str:
 
 
 def _parse_suggestion(raw: str) -> str:
+    # Kept off complete_structured: the output is a bare suggestion string with a lossy fallback
+    # (on non-JSON, keep the first 200 chars of the raw text), not a single validated model.
     text = raw.strip()
     try:
         if text.startswith("```"):

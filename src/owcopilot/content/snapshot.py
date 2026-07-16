@@ -1,3 +1,4 @@
+# canon 快照 + 两个世界的结构化 diff。
 """Canon snapshots and a structural diff between two worlds.
 
 The content store is already canonical, file-backed JSON — so "what changed" is answerable without
@@ -45,9 +46,9 @@ class SnapshotMeta(BaseModel):
     label: str = ""
     created_at: str
     content_hash: str
-    # Scale-P0 G2-C C4b: the (world, version) scope this snapshot froze (INV-4: a snapshot is an
+    # The (world, version) scope this snapshot froze (INV-4: a snapshot is an
     # immutable point-in-time freeze OF A SCOPE, distinct from the mutable version line). Defaults
-    # keep pre-C4 snapshots (which have no scope fields) loading as the canonical default scope.
+    # keep older snapshots (which have no scope fields) loading as the canonical default scope.
     world_id: str = "default"
     version: str = "v1"
 
@@ -77,7 +78,7 @@ def write_snapshot(
 ) -> SnapshotMeta:
     """Freeze a ``(world_id, version)`` scope's effective world to ``<root>/.snapshots/<id>.json``.
 
-    Scale-P0 G2-C C4b: the snapshot captures that version's copy-on-write effective bundle
+    The snapshot captures that version's copy-on-write effective bundle
     (``load_scoped``) and records the scope, so a snapshot of a derived version differs from the
     baseline. The default scope freezes ``load()`` exactly as before (INV-1)."""
     bundle = store.load_scoped(world_id=world_id, version=version)
@@ -108,7 +109,7 @@ def list_snapshots(store: ContentStore) -> list[SnapshotMeta]:
     metas: list[SnapshotMeta] = []
     for path in directory.glob("*.json"):
         data = json.loads(path.read_text(encoding="utf-8"))
-        # Only carry keys actually present, so a pre-C4 snapshot (no world_id/version) falls back to
+        # Only carry keys actually present, so an older snapshot (no world_id/version) falls back to
         # the SnapshotMeta defaults instead of validating a missing key as None.
         fields = {key: data[key] for key in SnapshotMeta.model_fields if key in data}
         metas.append(SnapshotMeta.model_validate(fields))
@@ -190,7 +191,7 @@ def version_diff(
 ) -> CanonDiff:
     """Structural diff between two versions' effective (copy-on-write resolved) bundles.
 
-    Scale-P0 G2-C C4a: reuses ``bundle_diff`` over ``ContentStore.load_scoped`` of each version, so
+    Reuses ``bundle_diff`` over ``ContentStore.load_scoped`` of each version, so
     it reports what ``to_version`` added / removed / changed relative to ``from_version`` (e.g. a
     version vs its base). ``world_id`` is threaded for the (world, version) scope."""
     old = store.load_scoped(world_id=world_id, version=from_version)
@@ -226,7 +227,7 @@ _MERGE_DICT_KINDS = (
 def merge_versions(
     store: ContentStore, *, ours: str, theirs: str, world_id: str = "default"
 ) -> MergeResult:
-    """Three-way merge of version ``theirs`` into ``ours`` over their common base (C4c).
+    """Three-way merge of version ``theirs`` into ``ours`` over their common base.
 
     For each object: if both sides agree, or only one side changed vs the merge base, that value is
     taken automatically; if both sides changed it differently (add/add, both-changed, or

@@ -1,3 +1,4 @@
+# v2 内容摄取服务：外部素材→规范化→入内容模型。
 """v2 content ingestion service.
 
 Ingestion defaults to dry-run: parse, normalize, compare and report. Writing is explicit and

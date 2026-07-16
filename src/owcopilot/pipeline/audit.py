@@ -1,3 +1,4 @@
+# 审计流水线入口。
 """Audit pipeline entrypoints."""
 
 from __future__ import annotations

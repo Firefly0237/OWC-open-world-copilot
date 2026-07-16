@@ -15,8 +15,10 @@ from owcopilot.retrieval.models import RetrievalHit
 from owcopilot.retrieval.neural_rerank import (
     NeuralReranker,
     _STCrossEncoderWrapper,
+    reranker_for_corpus,
     resolve_reranker,
 )
+from owcopilot.retrieval.policy import RERANK_MIN_SIZE
 
 
 def _hit(ref: str, title: str, body: str = "", *, score: float = 0.5) -> RetrievalHit:
@@ -224,6 +226,47 @@ def test_resolve_reranker_uses_custom_model(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 # Docstring / architecture description regression tests (RT5)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# reranker_for_corpus -- the two-gate production combinator
+# ---------------------------------------------------------------------------
+
+
+def test_reranker_for_corpus_size_gate_off_returns_none_even_in_neural_mode() -> None:
+    """SIZE gate: a small corpus returns None regardless of the env/mode gate.
+
+    Below RERANK_MIN_SIZE the size gate short-circuits, so even an explicit ``neural`` mode
+    (which resolve_reranker would honour) yields None -- the default lexical path is kept.
+    """
+    assert reranker_for_corpus(RERANK_MIN_SIZE - 1, mode="neural") is None
+    assert reranker_for_corpus(0, mode="neural") is None
+
+
+def test_reranker_for_corpus_both_gates_on_returns_neural_instance() -> None:
+    """Size gate passed (large corpus) + env/mode gate 'neural' → a real NeuralReranker."""
+    reranker = reranker_for_corpus(RERANK_MIN_SIZE, mode="neural")
+    assert isinstance(reranker, NeuralReranker)
+
+
+def test_reranker_for_corpus_size_on_but_env_gate_off_returns_none() -> None:
+    """ENV gate: large corpus but lexical/none/unset mode → None (env gate off wins)."""
+    assert reranker_for_corpus(RERANK_MIN_SIZE, mode="lexical") is None
+    assert reranker_for_corpus(RERANK_MIN_SIZE, mode="none") is None
+
+
+def test_reranker_for_corpus_reads_env_when_mode_unset(monkeypatch) -> None:
+    """With mode=None the env gate is read via resolve_reranker; unset defaults to lexical→None."""
+    monkeypatch.delenv("OWCOPILOT_RERANKER", raising=False)
+    assert reranker_for_corpus(RERANK_MIN_SIZE) is None
+    monkeypatch.setenv("OWCOPILOT_RERANKER", "neural")
+    assert isinstance(reranker_for_corpus(RERANK_MIN_SIZE), NeuralReranker)
+
+
+def test_reranker_for_corpus_auto_none_when_library_missing() -> None:
+    """Size gate on + auto mode but the model library missing → None (availability gate)."""
+    with patch("importlib.util.find_spec", return_value=None):
+        assert reranker_for_corpus(RERANK_MIN_SIZE, mode="auto") is None
 
 
 def test_neural_rerank_docstring_says_classification_head_not_lora() -> None:

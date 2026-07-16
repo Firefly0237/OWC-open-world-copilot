@@ -1,3 +1,4 @@
+# v2 内容图的查询助手。
 """Query helpers for the v2 content graph."""
 
 from __future__ import annotations

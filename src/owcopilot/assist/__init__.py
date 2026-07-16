@@ -1,3 +1,4 @@
+# 受约束的辅助生成包：草稿/bark/lint。
 """Constrained assist package for drafts, barks and lint."""
 
 from .barks import BarkBatchResult, BarkBatchService, BarkVariant, RejectedBark, parse_bark_texts

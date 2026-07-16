@@ -1,3 +1,4 @@
+# 导入期审计规则：摄取时就地把关，不让脏数据进 canon。
 """Import-time audit rules."""
 
 from __future__ import annotations

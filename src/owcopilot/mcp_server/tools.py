@@ -1,10 +1,14 @@
+# MCP 工具处理器：不硬依赖 MCP 传输 SDK。
+# 刻意只暴露安全子集（诊断/提议），与 skills 面镜像；canon 写入不在此。
 """MCP tool handlers without a hard dependency on an MCP transport SDK."""
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +16,8 @@ from ..content.hash import content_hash
 from ..exporters import EngineTarget, export_content_bundle
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
 from ..llm.cache import NoOpCache
-from ..llm.gateway import LLMGateway
+from ..llm.gateway import LLMGateway, require_offline_llm_allowed
+from ..llm.resilience import build_real_provider
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
 from ..pipeline.audit import run_full_audit
@@ -24,8 +29,40 @@ from ..qa.offline import OfflineQAProvider
 from ..qa.service import LoreQAService
 from ..storage import SQLiteStore
 from ..telemetry import deterministic_step, llm_step, summarize_workflow
+from ..trust.security import PathSecurityError, resolve_under_root
+from ..util import load_dotenv
 
-# SCALE-P0 #2b / F-1: session-level shared ProjectContext injection.
+
+@dataclass(frozen=True)
+class ToolSafety:
+    """MCP-annotation facts for one tool, kept SDK-free (plain booleans; transport.py maps these to
+    ``mcp.types.ToolAnnotations``). ``read_only`` follows the LITERAL MCP definition — a tool that
+    persists runtime-DB rows or writes files is NOT read-only, regardless of the agent-side
+    "never writes canon" intent axis. ``destructive`` is True only for irreversible deletes/
+    overwrites of non-re-derivable data (none of ours qualify); ``idempotent`` only where proven;
+    ``open_world`` True when the tool can reach an external system (the real-model LLM path)."""
+
+    read_only: bool
+    destructive: bool = False
+    idempotent: bool = False
+    open_world: bool = False
+
+
+#: Safety facts per registered MCP tool (keyed by handler name). Read tools are read-only; the four
+#: that persist rows / write files are not. None is destructive (all effects are re-derivable from
+#: canon); none of the writers claim idempotency (fresh run ids / timestamps make repeats differ).
+TOOL_SAFETY: dict[str, ToolSafety] = {
+    "list_issues": ToolSafety(read_only=True),
+    "build_context_pack": ToolSafety(read_only=True),
+    "impact_of": ToolSafety(read_only=True),
+    "ask_lore": ToolSafety(read_only=True, open_world=True),  # real mode hits the external LLM API
+    "audit_project": ToolSafety(read_only=False),  # persists an audit run + issue rows by default
+    "propose_fix": ToolSafety(read_only=False),  # persists proposal rows
+    "quality_harness": ToolSafety(read_only=False),  # persists audit + proposals
+    "export_project": ToolSafety(read_only=False),  # writes engine files
+}
+
+# Session-level shared ProjectContext injection.
 #
 # The shared context is passed *out of band* via this ContextVar rather than as a handler
 # parameter. That keeps every handler signature clean for FastMCP: ``func_metadata`` builds a
@@ -43,9 +80,7 @@ from ..telemetry import deterministic_step, llm_step, summarize_workflow
 # visible to every tool call in the task. If a future caller runs a worker on a *new* thread the
 # ContextVar simply will not propagate there, so that worker falls back to the self-managed open
 # path — still correct, only missing the reuse optimisation.
-_shared_project: ContextVar[ProjectContext | None] = ContextVar(
-    "owc_shared_project", default=None
-)
+_shared_project: ContextVar[ProjectContext | None] = ContextVar("owc_shared_project", default=None)
 
 
 def audit_project(
@@ -53,17 +88,32 @@ def audit_project(
     content_root: str,
     sqlite_path: str | None = None,
     persist: bool = True,
+    limit: int | None = None,
 ) -> dict[str, Any]:
-    """Run the default deterministic audit rules for a project."""
+    """Run the default deterministic audit rules for a project.
+
+    ``limit=None`` (default) returns every issue — unchanged keys. A non-None ``limit`` bounds the
+    returned ``issues`` list for the token-limited MCP surface: ``open_errors`` still reports the
+    real (un-paged) total and a ``truncation_notice`` points the caller at ``list_issues`` for the
+    rest — a bounded page is never a silent drop."""
     with _project(content_root, sqlite_path) as project:
         result = run_full_audit(project, persist=persist)
-        return {
+        issues = list(result.issues)
+        payload: dict[str, Any] = {
             "content_hash": content_hash(project.bundle),
             "audit_run": result.run.model_dump(mode="json"),
-            "issues": [issue.model_dump(mode="json") for issue in result.issues],
+            "issues": [issue.model_dump(mode="json") for issue in issues],
             "open_errors": len(result.open_errors),
             "cost_budget": _deterministic_cost_budget("audit_project"),
         }
+        if limit is not None and len(issues) > limit:
+            payload["issues"] = payload["issues"][:limit]
+            payload["total"] = len(issues)
+            payload["truncation_notice"] = (
+                f"showing {limit} of {len(issues)} issues; use list_issues with "
+                f"limit/offset to page the rest"
+            )
+        return payload
 
 
 def list_issues(
@@ -73,6 +123,8 @@ def list_issues(
     severity: str | None = None,
     rule_code: str | None = None,
     status: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """List persisted audit issues for a project.
 
@@ -82,20 +134,36 @@ def list_issues(
     ``SQLiteStore.initialize`` (i.e. on connect), so querying an as-yet-unpopulated runtime DB is
     safe and returns an empty list rather than failing. When a shared ctx *is* set the call reuses
     its already-open store (so issues another tool just persisted are visible).
+
+    ``limit=None`` (default) returns every match with the original ``{count, issues, cost_budget}``
+    keys. A non-None ``limit`` pages the results (SQL ``LIMIT/OFFSET``) and adds ``total`` plus,
+    when the page omits later rows, a ``truncation_notice`` with the ``next_offset`` — the caller
+    is always told how to reach the rest, never silently cut off.
     """
     with _issues_store(content_root, sqlite_path) as store:
         # Treat an empty-string filter as "no filter" — a tool-calling model commonly passes ""
         # to mean "unset" (real DeepSeek did exactly this), which would otherwise match no rows.
-        issues = store.list_issues(
-            severity=severity or None,
-            rule_code=rule_code or None,
-            status=status or None,
-        )
-        return {
+        filters = {
+            "severity": severity or None,
+            "rule_code": rule_code or None,
+            "status": status or None,
+        }
+        issues = store.list_issues(**filters, limit=limit, offset=offset)
+        payload: dict[str, Any] = {
             "count": len(issues),
             "issues": [issue.model_dump(mode="json") for issue in issues],
             "cost_budget": _deterministic_cost_budget("list_issues"),
         }
+        if limit is not None:
+            total = store.count_issues(**filters)
+            payload["total"] = total
+            if offset + len(issues) < total:
+                payload["next_offset"] = offset + len(issues)
+                payload["truncation_notice"] = (
+                    f"showing {len(issues)} of {total} issues from offset {offset}; "
+                    f"call again with offset={offset + len(issues)} for the next page"
+                )
+        return payload
 
 
 def build_context_pack(
@@ -117,6 +185,35 @@ def build_context_pack(
         }
 
 
+def _qa_gateway() -> tuple[LLMGateway, TelemetryCollector]:
+    """QA gateway honouring the deployment-level LLM mode (same convention as CLI/REST/app).
+
+    MCP tools carry no per-call llm flags — the *calling agent* must never choose the provider —
+    so the mode comes from the server's environment: ``OWCOPILOT_LLM_MODE=real`` serves real
+    answers via the configured provider; anything else is the offline double, which stays
+    fail-closed behind ``OWCOPILOT_ALLOW_OFFLINE_LLM`` exactly like every other runtime surface.
+    """
+    telemetry = TelemetryCollector()
+    real = os.getenv("OWCOPILOT_LLM_MODE", "offline") == "real"
+    if real:
+        load_dotenv()  # pick up provider keys from .env; shell env wins
+        provider: Any = build_real_provider(
+            model=os.getenv("OWCOPILOT_CHEAP_MODEL", "deepseek-v4-flash")
+        )
+    else:
+        require_offline_llm_allowed()  # offline fakes are a test/CI fixture, not a product mode
+        provider = OfflineQAProvider()
+    gateway = LLMGateway(
+        providers={"cheap": provider},
+        router=StaticRouter(mapping={"qa_answer": "cheap", "qa_expand": "cheap"}),
+        cache=NoOpCache(),
+        telemetry=telemetry,
+        max_retries=1 if real else 0,
+        retry_backoff_seconds=1.0 if real else 0.0,
+    )
+    return gateway, telemetry
+
+
 def ask_lore(
     *,
     content_root: str,
@@ -127,14 +224,9 @@ def ask_lore(
 ) -> dict[str, Any]:
     """Answer a lore question with grounded citations."""
     with _project(content_root, sqlite_path) as project:
-        telemetry = TelemetryCollector()
+        gateway, telemetry = _qa_gateway()
         answer = LoreQAService(
-            gateway=LLMGateway(
-                providers={"cheap": OfflineQAProvider()},
-                router=StaticRouter(mapping={"qa_answer": "cheap", "qa_expand": "cheap"}),
-                cache=NoOpCache(),
-                telemetry=telemetry,
-            ),
+            gateway=gateway,
             context_builder=project.qa_context_builder(),
             bundle=project.bundle,
         ).ask(query, budget_tokens=budget_tokens)
@@ -250,10 +342,25 @@ def export_project(
     target_engine: str = EngineTarget.GENERIC.value,
     sqlite_path: str | None = None,
 ) -> dict[str, Any]:
-    """Export project content to engine-friendly JSON files."""
+    """Export project content to engine-friendly JSON files.
+
+    ``output_dir`` is confined to an export root — ``$OWCOPILOT_EXPORT_ROOT`` if set, else
+    ``<content_root>/.owcopilot/exports`` — via :func:`resolve_under_root`, so a model/client
+    supplying a traversal or absolute sibling path cannot write outside the sandbox (the same guard
+    the REST export uses). An escape raises a guided ``ValueError``, never a silent write."""
     with _project(content_root, sqlite_path) as project:
         engine = EngineTarget(target_engine)
-        actual_output = Path(output_dir) / engine.value
+        export_root = os.getenv("OWCOPILOT_EXPORT_ROOT") or str(
+            Path(content_root) / ".owcopilot" / "exports"
+        )
+        try:
+            confined = resolve_under_root(export_root, output_dir)
+        except PathSecurityError as exc:
+            raise ValueError(
+                f"export output_dir {output_dir!r} escapes the allowed export root "
+                f"{export_root!r}; pass a path inside it, or set OWCOPILOT_EXPORT_ROOT to widen it."
+            ) from exc
+        actual_output = confined / engine.value
         assert_export_ready(project)
         manifest = export_content_bundle(project.bundle, actual_output, target_engine=engine)
         return {

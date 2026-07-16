@@ -79,6 +79,21 @@ def test_generic_export_leaves_canon_untouched(client: TestClient, tmp_path) -> 
     assert bundle.quests  # canon untouched by export
 
 
+def test_unity_export_localization_optin_flows_through_request(client: TestClient) -> None:
+    off = client.post("/projects/demo/exports", json={"target_engine": "unity"})
+    assert off.status_code == 200, off.text
+    off_kinds = {f["kind"] for f in off.json()["manifest"]["files"]}
+    assert not any(k.startswith("unity_localization") for k in off_kinds)
+
+    on = client.post(
+        "/projects/demo/exports",
+        json={"target_engine": "unity", "unity_localization": True},
+    )
+    assert on.status_code == 200, on.text
+    on_kinds = {f["kind"] for f in on.json()["manifest"]["files"]}
+    assert {"unity_localization_csv", "unity_localization_readme"} <= on_kinds
+
+
 def test_engine_import_queues_changes_for_review(client: TestClient) -> None:
     resp = client.post(
         "/projects/demo/engine:import",

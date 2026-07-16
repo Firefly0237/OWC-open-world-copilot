@@ -30,18 +30,27 @@ def test_create_mcp_server_registers_tools_when_fastmcp_is_available(monkeypatch
         def __init__(self, name: str) -> None:
             self.name = name
             self.tools: list[str] = []
+            self.annotations: dict[str, Any] = {}
 
-        def tool(self):
+        def tool(self, **kwargs: Any):
             def decorator(func):
                 self.tools.append(func.__name__)
+                self.annotations[func.__name__] = kwargs.get("annotations")
                 return func
 
             return decorator
 
+    class FakeToolAnnotations:
+        def __init__(self, **kwargs: Any) -> None:
+            self.__dict__.update(kwargs)
+
+    types_module = types.ModuleType("mcp.types")
+    types_module.ToolAnnotations = FakeToolAnnotations
     fastmcp_module.FastMCP = FakeFastMCP
     monkeypatch.setitem(sys.modules, "mcp", types.ModuleType("mcp"))
     monkeypatch.setitem(sys.modules, "mcp.server", types.ModuleType("mcp.server"))
     monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp_module)
+    monkeypatch.setitem(sys.modules, "mcp.types", types_module)
 
     server = create_mcp_server("owcopilot-test")
 
@@ -58,3 +67,11 @@ def test_create_mcp_server_registers_tools_when_fastmcp_is_available(monkeypatch
     ]
     # The human write path must never be exposed over MCP.
     assert "apply" not in " ".join(server.tools)
+    # Every tool carries annotations mapped from TOOL_SAFETY; read vs write hint is correct.
+    assert server.annotations["list_issues"].readOnlyHint is True
+    assert server.annotations["ask_lore"].readOnlyHint is True
+    assert server.annotations["ask_lore"].openWorldHint is True
+    assert server.annotations["audit_project"].readOnlyHint is False
+    assert server.annotations["export_project"].readOnlyHint is False
+    assert server.annotations["export_project"].destructiveHint is False
+    assert server.annotations["export_project"].idempotentHint is False

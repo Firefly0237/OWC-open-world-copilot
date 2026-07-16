@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from owcopilot.content.models import (
@@ -10,9 +12,13 @@ from owcopilot.content.models import (
     Relation,
 )
 from owcopilot.graph.index import build_content_graph
+from owcopilot.llm.cache import HashingEmbedder
 from owcopilot.retrieval.bm25 import BM25Retriever
 from owcopilot.retrieval.context_pack import ContextPackBuilder
 from owcopilot.retrieval.graph_expand import GraphExpansionRetriever
+from owcopilot.retrieval.models import RetrievalHit
+from owcopilot.retrieval.neural_rerank import NeuralReranker
+from owcopilot.retrieval.rerank import rerank_hits
 from owcopilot.retrieval.vector import VectorRetriever
 from owcopilot.storage import SQLiteStore
 
@@ -164,6 +170,169 @@ def test_relation_completion_surfaces_relations_of_recalled_entities() -> None:
         refs = builder.build("Iron Legion Sand Walkers", budget_tokens=2000).refs
 
         assert any(r.startswith("relation:") and "enemy_of" in r for r in refs)
+    finally:
+        store.close()
+
+
+class _CountingSemanticEmbedder(HashingEmbedder):
+    """A deterministic embedder that advertises a semantic id (``st:*`` → ``is_semantic`` True, so
+    the rerank similarity leg runs) and counts every text it encodes through either entry point."""
+
+    def __init__(self) -> None:
+        super().__init__(dim=64)
+        self.model_id = "st:counting-64"
+        self.encoded = 0
+
+    def embed(self, text: str) -> list[float]:
+        self.encoded += 1
+        return super().embed(text)
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        self.encoded += len(texts)
+        return super().embed_many(texts)
+
+
+def test_build_encodes_the_query_exactly_once_on_the_semantic_path() -> None:
+    # On the semantic path both the dense recall leg and the rerank similarity leg use the query
+    # embedding. Before the QueryBundle single-encode they each embedded the query (2×); now the
+    # query is encoded once and reused. bm25/graph/relation-completion never embed, so build()'s
+    # only encode is the query itself.
+    store = SQLiteStore()
+    try:
+        bundle = ContentBundle(
+            entities={
+                "fac_iron": Entity(id="fac_iron", name="Iron Legion", type=EntityType.FACTION),
+                "fac_sand": Entity(id="fac_sand", name="Sand Walkers", type=EntityType.FACTION),
+            },
+            relations=[Relation(source="fac_iron", target="fac_sand", kind="enemy_of")],
+        )
+        store.replace_content_index(bundle)
+        embedder = _CountingSemanticEmbedder()
+        vector = VectorRetriever(store, embedder=embedder)
+        assert vector.is_semantic  # the similarities rerank leg will run
+        builder = ContextPackBuilder(bm25=BM25Retriever(store), vector=vector)
+
+        embedder.encoded = 0  # ignore the corpus embed done while indexing
+        builder.build("Iron Legion enemies", budget_tokens=2000)
+
+        assert embedder.encoded == 1  # was 2 before single-encode (search + similarities)
+    finally:
+        store.close()
+
+
+def test_build_many_is_bit_identical_to_per_query_build() -> None:
+    store = SQLiteStore()
+    try:
+        bundle = _flooded_bundle()
+        store.replace_content_index(bundle)
+        graph = build_content_graph(bundle)
+        builder = ContextPackBuilder(
+            bm25=BM25Retriever(store),
+            vector=VectorRetriever(store),
+            graph=GraphExpansionRetriever(graph),
+        )
+        queries = ["Mistspine Pass beacon patrol", "watch member sentinel", "high mountain pass"]
+
+        batched = builder.build_many(queries, budget_tokens=2000, limit=10)
+        per_query = [builder.build(q, budget_tokens=2000, limit=10) for q in queries]
+
+        # Batching only collapses the query encodes; every pack must match its per-query build
+        # field-for-field (query text, hit refs/scores/order).
+        assert [p.model_dump() for p in batched] == [p.model_dump() for p in per_query]
+    finally:
+        store.close()
+
+
+def test_build_many_without_vector_leg_matches_per_query_build() -> None:
+    # No vector leg → nothing to batch; build_many must still equal the per-query builds.
+    store = SQLiteStore()
+    try:
+        store.replace_content_index(_flooded_bundle())
+        builder = ContextPackBuilder(bm25=BM25Retriever(store))
+        queries = ["beacon patrol", "sentinel watch"]
+
+        batched = builder.build_many(queries, budget_tokens=2000)
+        per_query = [builder.build(q, budget_tokens=2000) for q in queries]
+
+        assert [p.model_dump() for p in batched] == [p.model_dump() for p in per_query]
+    finally:
+        store.close()
+
+
+def _fused_hit(ref: str, *, score: float) -> RetrievalHit:
+    return RetrievalHit(
+        ref=ref,
+        object_type=ref.split(":", 1)[0],
+        title=ref,
+        body="",
+        score=score,
+        source="rrf",
+    )
+
+
+def _neural_reranker_returning(scores: list[float]) -> NeuralReranker:
+    """A real NeuralReranker whose cross-encoder is mocked (no ML load), reusing the production
+    rerank() -- the test only supplies the joint scores the model would emit."""
+    reranker = NeuralReranker("mock-model")
+    model = MagicMock()
+    model.predict.return_value = scores
+    reranker._model = model
+    return reranker
+
+
+def test_neural_rerank_bounds_window_reorders_and_never_drops() -> None:
+    """When a neural reranker is wired in, only the top-K candidate window is cross-encoded; the
+    tail keeps its fused order and nothing is dropped (budget trim is the only stage that drops)."""
+    store = SQLiteStore()
+    try:
+        builder = ContextPackBuilder(
+            bm25=BM25Retriever(store),
+            # Window of 2: only the first two fused hits reach the cross-encoder.
+            neural_reranker=_neural_reranker_returning([0.1, 0.9]),
+            rerank_candidate_window=2,
+        )
+        fused = [
+            _fused_hit("entity:a", score=0.9),
+            _fused_hit("entity:b", score=0.8),
+            _fused_hit("entity:c", score=0.7),
+            _fused_hit("entity:d", score=0.6),
+        ]
+
+        ranked = builder._rerank("anchor query", fused)
+
+        # Window [a, b] scored [0.1, 0.9] → reordered to [b, a] and marked neural.
+        assert [h.ref for h in ranked[:2]] == ["entity:b", "entity:a"]
+        assert all(h.source == "reranked_neural" for h in ranked[:2])
+        # Tail [c, d] keeps fused order and its fused source untouched.
+        assert [h.ref for h in ranked[2:]] == ["entity:c", "entity:d"]
+        assert all(h.source == "rrf" for h in ranked[2:])
+        # Reorder never drops: same set of refs, same count.
+        assert {h.ref for h in ranked} == {h.ref for h in fused}
+        assert len(ranked) == len(fused)
+    finally:
+        store.close()
+
+
+def test_default_rerank_is_byte_identical_to_lexical_rescorer() -> None:
+    """Default construction (no neural reranker, both gates off) leaves the precision stage exactly
+    the lexical re-scorer -- proving the change keeps the default path unchanged."""
+    store = SQLiteStore()
+    try:
+        # vector=None → the semantic leg is off, matching the historical default on the stub.
+        builder = ContextPackBuilder(bm25=BM25Retriever(store))
+        assert builder.neural_reranker is None
+
+        fused = [
+            _fused_hit("quest:q_patrol", score=0.4),
+            _fused_hit("entity:npc_a", score=0.9),
+            _fused_hit("entity:npc_b", score=0.5),
+        ]
+
+        got = builder._rerank("patrol beacon", fused)
+        expected = rerank_hits("patrol beacon", fused, semantic_scores=None)
+
+        # Element-wise equality of the pydantic hits: same order, score, and source.
+        assert got == expected
     finally:
         store.close()
 

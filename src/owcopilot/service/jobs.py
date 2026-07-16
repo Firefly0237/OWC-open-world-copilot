@@ -1,3 +1,4 @@
+# 进程内任务运行器 + SSE 友好的事件缓冲（长任务进度推前端）。
 """In-process job runner with SSE-friendly event buffers.
 
 Long actions (world seed, extraction, theme sweep) run in a worker thread; progress

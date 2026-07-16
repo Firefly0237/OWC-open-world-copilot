@@ -1,3 +1,4 @@
+# MCP 服务器包。
 """MCP server package."""
 
 from .tools import (

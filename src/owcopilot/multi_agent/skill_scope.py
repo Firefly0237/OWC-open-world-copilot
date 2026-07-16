@@ -1,3 +1,4 @@
+# 执行期工具作用域：限定每个 worker 能调的工具面（最小权限）。
 """Execution-time tool scoping for multi-agent workers.
 
 Background:
@@ -10,7 +11,7 @@ Background:
     enforced at dispatch.
 
 This module closes that gap *inside the multi_agent package only* (it does not edit the
-shared ``core.skills`` registry or the ``agent.react`` loop).  ``scoped_registry`` returns a
+shared ``skills`` registry or the ``agent.react`` loop).  ``scoped_registry`` returns a
 thin proxy that quacks like a ``SkillRegistry`` but DENIES, at ``run()`` time, any skill not
 in the allowed set — turning the whitelist into a real execution-layer sandbox.  A denied
 call raises ``SkillError`` (the same type an unknown skill raises), so the ReAct loop already
@@ -23,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from ..core.skills import Skill, SkillError, SkillRegistry
+from ..skills import Skill, SkillError, SkillRegistry
 
 
 class ScopedSkillRegistry:
@@ -53,8 +54,7 @@ class ScopedSkillRegistry:
     def get(self, name: str) -> Skill:
         if name not in self._allowed:
             raise SkillError(
-                f"skill '{name}' is not in this agent's allowed tool set "
-                f"({sorted(self._allowed)})."
+                f"skill '{name}' is not in this agent's allowed tool set ({sorted(self._allowed)})."
             )
         return self._base.get(name)
 
@@ -75,6 +75,13 @@ class ScopedSkillRegistry:
         # advertise a tool the execution gate would deny.
         effective = self._allowed if allowed is None else (set(allowed) & self._allowed)
         return self._base.manifest(allowed=effective)
+
+    def openai_tools(self, allowed: set[str] | None = None) -> list[dict[str, Any]]:
+        # The native function-calling twin of ``manifest`` — same intersection semantics, so
+        # the tools schema shown to a native-tool-calling model can never advertise a skill
+        # the execution gate would deny.
+        effective = self._allowed if allowed is None else (set(allowed) & self._allowed)
+        return self._base.openai_tools(allowed=effective)
 
 
 def scoped_registry(base: SkillRegistry, allowed: set[str] | None) -> SkillRegistry:

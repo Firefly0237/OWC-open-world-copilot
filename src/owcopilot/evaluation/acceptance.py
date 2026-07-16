@@ -1,3 +1,4 @@
+# 验收级评测：双语 ~65 实体世界 + 25 个植入错误 + 基准。评测即 CI 的 ground truth。
 """Acceptance-grade evaluation: a bilingual ~65-entity world, 25 seeded errors, and benchmarks.
 
 This is the half of the project that proves the other half. It builds 雾脊行省/Mistridge
@@ -45,11 +46,12 @@ from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
 from ..pipeline.audit import run_full_audit
 from ..pipeline.project import ProjectContext
-from ..qa.faithfulness import judge_qa_faithfulness
+from ..qa.faithfulness import FaithfulnessJudge, judge_qa_faithfulness
 from ..qa.offline import OfflineQAProvider
 from ..qa.service import LoreQAService
+from .blind_spots import evaluate_blind_spots
 
-# C1: gate constant — sanity threshold for tool-selection F1.
+# Gate constant — sanity threshold for tool-selection F1.
 # 手工标注 10 个场景，集合 F1，不计顺序。这是 sanity gate 而非统计基准。
 TOOL_ACCURACY_GATE: float = 0.80
 
@@ -147,7 +149,7 @@ class GoldReActScenario(BaseModel):
 def _build_gold_react_scenarios() -> list[GoldReActScenario]:
     """Return the 10 hand-labelled ReAct scenarios for the acceptance world.
 
-    Covers all 6 built-in skills at least once (C1-H6):
+    Covers all 6 built-in skills at least once:
     audit_project / list_issues / build_context_pack / impact_of / propose_fix / quality_harness
     """
     return [
@@ -617,8 +619,8 @@ def retrieval_eval_queries() -> list[tuple[str, str | None]]:
 
     unanswerable_queries: list[tuple[str, str | None]] = [
         # These topics do not exist in the acceptance world
-        ("铁卫军团的军歌歌词", None),        # No entity for military songs
-        ("雾脊山道的鱼类分布", None),          # No biology content
+        ("铁卫军团的军歌歌词", None),  # No entity for military songs
+        ("雾脊山道的鱼类分布", None),  # No biology content
     ]
 
     return paraphrase_queries + indirect_queries + unanswerable_queries
@@ -690,12 +692,16 @@ def run_semantic_retrieval_benchmark(
     paraphrase_indices = list(range(10))  # first 10 are paraphrase (see retrieval_eval_queries)
 
     def _hit_rate(project: ProjectContext, queries: list[tuple[str, str]]) -> float:
-        hits = sum(
-            1
-            for q, ref in queries
-            if ref in project.context_builder.build(q, budget_tokens=800).refs
-        )
-        return hits / len(queries) if queries else 0.0
+        # This is the real embedding hotspot: the bge-m3 arm encodes every query on a neural model.
+        # Batch all queries into one embed_many (build_many) instead of one embed per query. Under a
+        # per-item embedder this is bit-identical to the per-query build; under bge-m3 it is the
+        # standard batched encode (BEIR encode_queries), and this benchmark is an opt-in dated live
+        # report, never the $0 deterministic gate.
+        if not queries:
+            return 0.0
+        packs = project.context_builder.build_many([q for q, _ref in queries], budget_tokens=800)
+        hits = sum(1 for (_q, ref), pack in zip(queries, packs, strict=True) if ref in pack.refs)
+        return hits / len(queries)
 
     # --- bge-m3 hybrid path ---
     semantic_hit_rate = 0.0
@@ -840,7 +846,7 @@ def _retrieval_hit_rate(
 def run_acceptance_evaluation(
     workspace: str | Path,
     *,
-    faithfulness_judge: LLMGateway | None = None,
+    faithfulness_judge: FaithfulnessJudge | None = None,
 ) -> AcceptanceReport:
     """Run the full acceptance benchmark.
 
@@ -1006,6 +1012,41 @@ def run_acceptance_evaluation(
             )
         )
 
+        # 4c. Rule blind-spot NEGATIVE control (mutation-testing specificity half).
+        # ``detection_rate`` above is the POSITIVE control (rules catch faults they encode); on its
+        # own it invites the "target painted around the arrow" objection. This injects 6 narrative-
+        # semantic mutations the deterministic rules provably CANNOT express (personality drift,
+        # tone/register, self-contradictory motivation, emotional-continuity break, un-modeled fact
+        # contradiction, prose sentiment vs the relation graph) and asserts the audit stays SILENT:
+        # zero NEW issues vs the clean world. ``blind_spot_rate`` (surviving / injected) is reported
+        # alongside ``detection_rate`` as the honest specificity number — the boundary handed off to
+        # the opt-in qa_faithfulness_entailment judge. See evaluation/blind_spots.py.
+        blind_report = evaluate_blind_spots(clean, root, baseline_open_issues=open_clean)
+        metrics["blind_spot_rate"] = blind_report.blind_spot_rate
+        metrics["blind_spots_injected"] = blind_report.injected
+        metrics["blind_spot_categories"] = blind_report.categories
+        checks.append(
+            AcceptanceCheck(
+                name="blind_spot_negative_control",
+                # Valid negative control: no new structural issue AND every defect survived.
+                passed=not blind_report.new_issues and blind_report.blind_spot_rate == 1.0,
+                details={
+                    "blind_spot_rate": blind_report.blind_spot_rate,
+                    "injected": blind_report.injected,
+                    "categories": blind_report.categories,
+                    "survived": blind_report.survived,
+                    "caught": blind_report.caught,
+                    "new_issues": blind_report.new_issues,
+                    "per_spot": blind_report.per_spot,
+                    "scope": "mutation-testing NEGATIVE control (specificity): narrative-semantic "
+                    "mutations the deterministic rules provably cannot catch; the surviving "
+                    "fraction (blind_spot_rate) is the honest flip-side of detection_rate. These "
+                    "defects are the boundary handed off to the opt-in qa_faithfulness_entailment "
+                    "judge.",
+                },
+            )
+        )
+
         # 4b. QA faithfulness (ENTAILMENT) gate — opt-in, $0-skippable, COEXISTS with 4.
         # This is the separate entailment verifier the existence check deliberately leaves to a
         # judge (see qa/verify.py + qa/faithfulness.py). With no judge (the default, and what CI
@@ -1074,7 +1115,7 @@ def run_acceptance_evaluation(
         )
     )
 
-    # 6. tool_selection_accuracy sanity gate (C1)
+    # 6. tool_selection_accuracy sanity gate
     # 10 个手工标注场景，OfflineGoalAwareReActProvider 确保 $0 确定性运行。
     # 诚实声明：F1 基于集合语义（不计顺序），样本量 10 个，是 sanity gate 而非统计基准。
     # OfflineGoalAwareReActProvider 被设计成精确返回 gold 序列，offline F1=1.0 是设计预期，
@@ -1091,7 +1132,7 @@ def run_acceptance_evaluation(
 def _run_faithfulness_gate(
     answered: list[tuple[str, Any, Any]],
     *,
-    judge: LLMGateway | None,
+    judge: FaithfulnessJudge | None,
 ) -> AcceptanceCheck:
     """Opt-in, $0-skippable QA faithfulness (entailment) gate.
 
@@ -1169,10 +1210,7 @@ class _NullSkillRegistry:
             names: tuple[str, ...] = self._SKILL_NAMES
         else:
             names = tuple(n for n in self._SKILL_NAMES if n in allowed)
-        lines = [
-            f"- {n}(): offline eval stub [deterministic; read_only]"
-            for n in names
-        ]
+        lines = [f"- {n}(): offline eval stub [deterministic; read_only]" for n in names]
         return "\n".join(lines)
 
     def run(self, name: str, args: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
@@ -1180,21 +1218,13 @@ class _NullSkillRegistry:
         return {"status": "ok", "tool": name, "note": "offline eval stub"}
 
 
-def _run_tool_selection_accuracy_gate(
-    clean_root: Path,
-    root: Path,
-    metrics: dict[str, Any],
-) -> AcceptanceCheck:
-    """Run the tool-selection-accuracy sanity gate (C1).
+def evaluate_tool_selection() -> dict[str, Any]:
+    """Score set-F1 tool selection over the 10 gold ReAct scenarios via the deterministic offline
+    provider. Shared by the acceptance ``tool_selection_accuracy_gate`` and the JD-dimension
+    scorecard (``evaluation/agent_eval.py``). $0/deterministic; offline F1==1.0 is by design (the
+    provider returns the gold sequence — it measures action *selection*, not live-provider skill).
 
-    Uses OfflineGoalAwareReActProvider (deterministic, $0, no LLM) and
-    _NullSkillRegistry (stub tool execution so is_error stays False for all
-    gold actions regardless of argument validity).
-
-    诚实说明：此 gate 测量的是「offline provider 是否按设计返回 gold action 序列」，
-    不是真实 LLM 的工具选择精度。10 个手工标注场景，集合 F1，sanity gate 而非统计基准。
-
-    Adds 'tool_selection_accuracy_mean_f1' to metrics dict.
+    Returns ``{"mean_f1": float, "scenarios": [per-scenario detail dicts]}``.
     """
     from ..agent.offline import OfflineGoalAwareReActProvider
     from ..agent.react import ReActAgent
@@ -1206,7 +1236,6 @@ def _run_tool_selection_accuracy_gate(
 
     scenario_f1s: list[float] = []
     scenario_details: list[dict[str, Any]] = []
-
     for scenario in gold_scenarios:
         gw = LLMGateway(
             providers={"react": provider},
@@ -1231,16 +1260,37 @@ def _run_tool_selection_accuracy_gate(
                 **acc,
             }
         )
-
     mean_f1 = sum(scenario_f1s) / len(scenario_f1s) if scenario_f1s else 0.0
-    metrics["tool_selection_accuracy_mean_f1"] = round(mean_f1, 4)
+    return {"mean_f1": round(mean_f1, 4), "scenarios": scenario_details}
+
+
+def _run_tool_selection_accuracy_gate(
+    clean_root: Path,
+    root: Path,
+    metrics: dict[str, Any],
+) -> AcceptanceCheck:
+    """Run the tool-selection-accuracy sanity gate.
+
+    Uses OfflineGoalAwareReActProvider (deterministic, $0, no LLM) and
+    _NullSkillRegistry (stub tool execution so is_error stays False for all
+    gold actions regardless of argument validity).
+
+    诚实说明：此 gate 测量的是「offline provider 是否按设计返回 gold action 序列」，
+    不是真实 LLM 的工具选择精度。10 个手工标注场景，集合 F1，sanity gate 而非统计基准。
+
+    Adds 'tool_selection_accuracy_mean_f1' to metrics dict.
+    """
+    result = evaluate_tool_selection()
+    mean_f1 = result["mean_f1"]
+    scenario_details = result["scenarios"]
+    metrics["tool_selection_accuracy_mean_f1"] = mean_f1
 
     return AcceptanceCheck(
         name="tool_selection_accuracy_gate",
         passed=mean_f1 >= TOOL_ACCURACY_GATE,
         details={
             "eval_type": "offline_pipeline_sanity",  # BE-7: machine-readable eval type tag
-            "is_sanity_gate": True,                  # BE-7: explicit gate classification
+            "is_sanity_gate": True,  # BE-7: explicit gate classification
             "mean_f1": mean_f1,
             "gate": TOOL_ACCURACY_GATE,
             "scenarios": scenario_details,

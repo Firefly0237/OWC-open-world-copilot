@@ -1,3 +1,4 @@
+# 编年视图：把任务/事件排到一条有序时间轴上，暴露时间线违例。
 """Chronology view: lay quests and events on one ordered axis and surface timeline violations.
 
 The data is already here — ``Quest.timeline_order``, events as ``Entity(type=event)`` with an order

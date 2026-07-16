@@ -29,6 +29,7 @@ from owcopilot.llm.router import StaticRouter
 # Test helpers
 # ---------------------------------------------------------------------------
 
+
 class _MockProvider:
     """Returns fixed text for any complete() call."""
 
@@ -71,6 +72,7 @@ def _big_turn(n_tokens: int = 100) -> str:
 # _is_checkpoint
 # ---------------------------------------------------------------------------
 
+
 def test_is_checkpoint_final_answer() -> None:
     assert _is_checkpoint("Thought: done\nFinal Answer: all good")
 
@@ -94,6 +96,7 @@ def test_is_checkpoint_normal_turn() -> None:
 # ---------------------------------------------------------------------------
 # compress_transcript: no-op when under threshold
 # ---------------------------------------------------------------------------
+
 
 def test_compress_transcript_no_trigger_when_under_threshold() -> None:
     """When total tokens < budget * threshold, no compression occurs."""
@@ -129,6 +132,7 @@ def test_compress_transcript_empty_transcript() -> None:
 # compress_transcript: real compaction triggered
 # ---------------------------------------------------------------------------
 
+
 def test_compress_transcript_triggers_llm_summary() -> None:
     """P4A-1: When tokens exceed threshold, LLM is called and summary injected."""
     provider = _MockProvider("Summary: the world has consistency issues.")
@@ -140,7 +144,7 @@ def test_compress_transcript_triggers_llm_summary() -> None:
     view, stats = compress_transcript(
         gateway=gw,
         transcript=turns,
-        token_budget=200,       # threshold = 200 * 0.70 = 140 tokens
+        token_budget=200,  # threshold = 200 * 0.70 = 140 tokens
         keep_recent=1,
         compression_threshold=0.70,
     )
@@ -250,9 +254,7 @@ def test_compress_transcript_keep_recent_preserved_verbatim() -> None:
         pytest.skip("Compression did not trigger — adjust sizes")
 
     # The last turn (most recent) must appear verbatim in the view
-    assert turns[-1] in view, (
-        f"Most recent turn not in view. view={view}"
-    )
+    assert turns[-1] in view, f"Most recent turn not in view. view={view}"
 
 
 def test_compress_transcript_checkpoint_turns_preserved() -> None:
@@ -261,8 +263,7 @@ def test_compress_transcript_checkpoint_turns_preserved() -> None:
     gw = _make_gateway(provider)
 
     checkpoint_turn = (
-        "Thought: done\nFinal Answer: 3 open errors found.\n"
-        "Action: audit_project\nAction Input: {}"
+        "Thought: done\nFinal Answer: 3 open errors found.\nAction: audit_project\nAction Input: {}"
     )
     normal_turns = [_big_turn(100)] * 3
 
@@ -277,9 +278,7 @@ def test_compress_transcript_checkpoint_turns_preserved() -> None:
     )
 
     # Checkpoint turn must appear in view verbatim regardless of compression
-    assert checkpoint_turn in view, (
-        f"Checkpoint turn not found in view. view={view}"
-    )
+    assert checkpoint_turn in view, f"Checkpoint turn not found in view. view={view}"
 
 
 def test_compress_transcript_task_compact_in_telemetry() -> None:
@@ -312,6 +311,7 @@ def test_compress_transcript_task_compact_in_telemetry() -> None:
 # Graceful fallback on gateway failure
 # ---------------------------------------------------------------------------
 
+
 def test_compress_transcript_gateway_failure_fallback() -> None:
     """When gateway.complete() raises, compress_transcript falls back to uncompressed view."""
     gw = _make_gateway(_ErrorProvider())
@@ -335,10 +335,11 @@ def test_compress_transcript_gateway_failure_fallback() -> None:
 # AgentResult integration: compression fields set correctly
 # ---------------------------------------------------------------------------
 
+
 def test_agent_result_compression_fields(monkeypatch) -> None:
     """AgentResult.context_compressions >= 1 and pre/post tokens set when compression fires."""
     from owcopilot.agent.react import ReActAgent
-    from owcopilot.core.skills import SkillRegistry
+    from owcopilot.skills import SkillRegistry
 
     # Build a provider that returns a scripted ReAct turn then a Final Answer
     class _ScriptedProvider:
@@ -406,6 +407,7 @@ def test_agent_result_compression_fields(monkeypatch) -> None:
 # R3-Team-C ②: incremental / memoised compaction — no O(steps) re-summarisation
 # ---------------------------------------------------------------------------
 
+
 def _compactable_count_from_calls(provider) -> list[int]:
     """For each compact call, how many '---'-joined turn blocks were in the *new turns* section."""
     counts = []
@@ -427,8 +429,12 @@ def test_cache_exact_hit_makes_zero_extra_calls() -> None:
     turns = [_big_turn(100) for _ in range(4)]  # keep_recent=1 → 3 compactable head turns
 
     view1, stats1 = compress_transcript(
-        gateway=gw, transcript=turns, token_budget=200, keep_recent=1,
-        compression_threshold=0.70, cache=cache,
+        gateway=gw,
+        transcript=turns,
+        token_budget=200,
+        keep_recent=1,
+        compression_threshold=0.70,
+        cache=cache,
     )
     assert stats1.triggered
     calls_after_first = len(provider.calls)
@@ -436,8 +442,12 @@ def test_cache_exact_hit_makes_zero_extra_calls() -> None:
 
     # Identical transcript again — exact cache hit, no new call.
     view2, stats2 = compress_transcript(
-        gateway=gw, transcript=turns, token_budget=200, keep_recent=1,
-        compression_threshold=0.70, cache=cache,
+        gateway=gw,
+        transcript=turns,
+        token_budget=200,
+        keep_recent=1,
+        compression_threshold=0.70,
+        cache=cache,
     )
     assert stats2.triggered
     assert len(provider.calls) == calls_after_first, (
@@ -459,8 +469,12 @@ def test_cache_incremental_only_compresses_new_turns() -> None:
 
     # Round 1: full compaction of the initial head.
     compress_transcript(
-        gateway=gw, transcript=base, token_budget=200, keep_recent=1,
-        compression_threshold=0.70, cache=cache,
+        gateway=gw,
+        transcript=base,
+        token_budget=200,
+        keep_recent=1,
+        compression_threshold=0.70,
+        cache=cache,
     )
     assert len(provider.calls) == 1
     # First-round prompt has no "New turns:" section → whole head counted.
@@ -469,8 +483,12 @@ def test_cache_incremental_only_compresses_new_turns() -> None:
     # Round 2: append ONE new turn. Head grows by exactly one compactable turn.
     grown = base + [_big_turn(100)]
     compress_transcript(
-        gateway=gw, transcript=grown, token_budget=200, keep_recent=1,
-        compression_threshold=0.70, cache=cache,
+        gateway=gw,
+        transcript=grown,
+        token_budget=200,
+        keep_recent=1,
+        compression_threshold=0.70,
+        cache=cache,
     )
     assert len(provider.calls) == 2, "A grown head should still trigger one (incremental) call"
 
@@ -488,6 +506,7 @@ def test_cache_incremental_only_compresses_new_turns() -> None:
 def test_cache_failed_incremental_does_not_poison_prefix() -> None:
     """If an incremental round's gateway call fails, the cache keeps the valid prior prefix
     (fallback is uncompressed, not a silent downgrade)."""
+
     class _FlakyProvider:
         def __init__(self) -> None:
             self.calls: list[dict] = []
@@ -505,8 +524,12 @@ def test_cache_failed_incremental_does_not_poison_prefix() -> None:
 
     base = [_big_turn(100) for _ in range(4)]
     _v1, s1 = compress_transcript(
-        gateway=gw, transcript=base, token_budget=200, keep_recent=1,
-        compression_threshold=0.70, cache=cache,
+        gateway=gw,
+        transcript=base,
+        token_budget=200,
+        keep_recent=1,
+        compression_threshold=0.70,
+        cache=cache,
     )
     assert s1.triggered
 
@@ -514,8 +537,12 @@ def test_cache_failed_incremental_does_not_poison_prefix() -> None:
     provider.fail_next = True
     grown = base + [_big_turn(100)]
     v2, s2 = compress_transcript(
-        gateway=gw, transcript=grown, token_budget=200, keep_recent=1,
-        compression_threshold=0.70, cache=cache,
+        gateway=gw,
+        transcript=grown,
+        token_budget=200,
+        keep_recent=1,
+        compression_threshold=0.70,
+        cache=cache,
     )
     assert s2.triggered is False, "Gateway failure → graceful uncompressed fallback"
     assert v2 == list(grown)
@@ -525,8 +552,12 @@ def test_cache_failed_incremental_does_not_poison_prefix() -> None:
     provider.fail_next = False
     calls_before = len(provider.calls)
     _v3, s3 = compress_transcript(
-        gateway=gw, transcript=base, token_budget=200, keep_recent=1,
-        compression_threshold=0.70, cache=cache,
+        gateway=gw,
+        transcript=base,
+        token_budget=200,
+        keep_recent=1,
+        compression_threshold=0.70,
+        cache=cache,
     )
     assert s3.triggered
     assert len(provider.calls) == calls_before, "Prefix cache survived the failed round"
@@ -539,11 +570,17 @@ def test_compress_without_cache_keeps_stateless_behaviour() -> None:
     turns = [_big_turn(100) for _ in range(4)]
 
     compress_transcript(
-        gateway=gw, transcript=turns, token_budget=200, keep_recent=1,
+        gateway=gw,
+        transcript=turns,
+        token_budget=200,
+        keep_recent=1,
         compression_threshold=0.70,
     )
     compress_transcript(
-        gateway=gw, transcript=turns, token_budget=200, keep_recent=1,
+        gateway=gw,
+        transcript=turns,
+        token_budget=200,
+        keep_recent=1,
         compression_threshold=0.70,
     )
     # Without a cache, both rounds call the LLM (no memoisation), each over the full head.

@@ -93,15 +93,9 @@ def test_content_hash_matches_pre_scope_baseline_4013691() -> None:
     e = Entity(id="x", name="X", type=EntityType.NPC, description="d")
     q = Quest(id="q", title="Q", objective="o")
     r = Relation(source="a", target="b", kind="knows")
-    assert content_hash(e) == (
-        "fd212c3eb828986069b169b7eda47218a387a4d3189ceb565ee0e003bc700032"
-    )
-    assert content_hash(q) == (
-        "2b0b47ec093199872e5e3adfdef0a70a25411c4fde889d953cc0aef7e0e56dfe"
-    )
-    assert content_hash(r) == (
-        "66ae7df11e65921c18719874fdd7aa8f47e1ac85d5acd0cac1099fa3add16a57"
-    )
+    assert content_hash(e) == ("fd212c3eb828986069b169b7eda47218a387a4d3189ceb565ee0e003bc700032")
+    assert content_hash(q) == ("2b0b47ec093199872e5e3adfdef0a70a25411c4fde889d953cc0aef7e0e56dfe")
+    assert content_hash(r) == ("66ae7df11e65921c18719874fdd7aa8f47e1ac85d5acd0cac1099fa3add16a57")
 
 
 # --------------------------------------------------------------------------- schema
@@ -117,9 +111,7 @@ def test_scope_columns_exist_on_all_indexed_tables() -> None:
         # the composite scope indexes exist too.
         idx = {
             row["name"]
-            for row in store.conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'index'"
-            )
+            for row in store.conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
         }
         for table in _SCOPE_TABLES:
             assert f"idx_{table}_scope" in idx
@@ -236,13 +228,9 @@ def test_replace_writes_stamp_the_store_scope() -> None:
         bundle = _bundle()
         store.replace_content_index(bundle)
         store.replace_graph_edges(build_content_graph(bundle))
-        rows = store.conn.execute(
-            "SELECT DISTINCT world_id, version FROM content_index"
-        ).fetchall()
+        rows = store.conn.execute("SELECT DISTINCT world_id, version FROM content_index").fetchall()
         assert {(r["world_id"], r["version"]) for r in rows} == {("w2", "v3")}
-        edges = store.conn.execute(
-            "SELECT DISTINCT world_id, version FROM graph_edges"
-        ).fetchall()
+        edges = store.conn.execute("SELECT DISTINCT world_id, version FROM graph_edges").fetchall()
         assert {(r["world_id"], r["version"]) for r in edges} == {("w2", "v3")}
     finally:
         store.close()
@@ -252,9 +240,7 @@ def test_default_scope_write_is_canonical() -> None:
     store = SQLiteStore()
     try:
         store.replace_content_index(_bundle())
-        rows = store.conn.execute(
-            "SELECT DISTINCT world_id, version FROM content_index"
-        ).fetchall()
+        rows = store.conn.execute("SELECT DISTINCT world_id, version FROM content_index").fetchall()
         assert {(r["world_id"], r["version"]) for r in rows} == {("default", "v1")}
     finally:
         store.close()
@@ -263,9 +249,7 @@ def test_default_scope_write_is_canonical() -> None:
 def test_upsert_vectors_stamps_scope() -> None:
     store = SQLiteStore(world_id="w2", version="v1")
     try:
-        store.upsert_vectors(
-            "hashing-4", [("r0", "h", 4, np.zeros(4, dtype=np.float32).tobytes())]
-        )
+        store.upsert_vectors("hashing-4", [("r0", "h", 4, np.zeros(4, dtype=np.float32).tobytes())])
         r = store.conn.execute(
             "SELECT world_id, version FROM content_vectors WHERE ref = 'r0'"
         ).fetchone()
@@ -470,9 +454,7 @@ def test_vec0_partition_key_isolates_scopes() -> None:
 def test_int8_vec0_partition_key_isolates_scopes() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    a = SqliteVecInt8Backend(
-        conn, dim=4, table="content_vec_i8", world_id="default", version="v1"
-    )
+    a = SqliteVecInt8Backend(conn, dim=4, table="content_vec_i8", world_id="default", version="v1")
     b = SqliteVecInt8Backend(conn, dim=4, table="content_vec_i8", world_id="w2", version="v1")
     q = np.asarray([1, 0, 0, 0], dtype=np.float32)
     a.upsert("only_in_default", q)

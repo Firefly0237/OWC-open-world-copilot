@@ -1,3 +1,4 @@
+# v2 内容中枢的统一数据模型（Entity/Quest/Relation… 全项目真源结构）。
 """Unified content models for the v2 content hub.
 
 These models are the file-backed facts that later pipeline stages index, audit, retrieve, patch,
@@ -9,7 +10,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer
 
 
 class Origin(str, Enum):
@@ -52,7 +53,7 @@ class ProvenanceMixin(BaseModel):
     origin: Origin = Origin.HUMAN
     source_ref: SourceRef | None = None
     review_status: ReviewStatus = ReviewStatus.APPROVED
-    # Scale-P0 G2-C C1: the (world_id, version) scope is a *storage / sharding* dimension, NOT a
+    # The (world_id, version) scope is a *storage / sharding* dimension, NOT a
     # content field. It is deliberately absent from the content models, so content files and their
     # serialization (model_dump / content_hash / snapshot payloads / ContentStore.save round-trip)
     # stay byte-for-byte identical to the pre-scope baseline. Sharding is applied at the SQLite
@@ -232,11 +233,29 @@ class DialogueRef(ProvenanceMixin):
 
 
 class DialogueChoice(BaseModel):
-    """A player option leading to another node (or ending the tree when next_node is None)."""
+    """A player option leading to another node (or ending the tree when next_node is None).
+
+    ``effects`` are the state mutations applied when the player picks this choice — the structural
+    home for "a dialogue choice changes the world" (the Detroit/BG3 mechanic), reusing the frozen
+    ``Effect`` type from the WS-A logic contract so dialogue and quest logic share one effect
+    vocabulary. Consumed by ``logic/dialogue.py`` (walk/explore) and validated by the dialogue
+    audit rules (effect vars must be declared in the bound quest's logic).
+    """
 
     text: str
     next_node: str | None = None
     condition: str = ""
+    effects: list[Effect] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_effects(self, handler: Any) -> Any:
+        # An EMPTY effects list is omitted from dumps so every pre-existing bundle, export and
+        # content hash stays byte-identical (the golden-fixture byte tests are the sentinel);
+        # a missing key round-trips back to the default empty list.
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("effects"):
+            data.pop("effects", None)
+        return data
 
 
 class DialogueNode(BaseModel):

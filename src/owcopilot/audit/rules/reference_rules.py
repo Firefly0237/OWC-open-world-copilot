@@ -1,3 +1,4 @@
+# 引用完整性规则（悬空引用/指向不存在对象等）。
 """Reference integrity rules."""
 
 from __future__ import annotations

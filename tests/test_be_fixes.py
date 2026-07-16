@@ -17,6 +17,7 @@ from __future__ import annotations
 # BE-1: e2e integration — calibration -> lesson write -> draft prompt injection
 # ---------------------------------------------------------------------------
 
+
 def _make_store_and_queue():
     from owcopilot.assist.review_queue import ReviewQueue
     from owcopilot.storage.sqlite import SQLiteStore
@@ -28,6 +29,7 @@ def _make_store_and_queue():
 
 def _add_resolved(queue, *, verdict: str, human: str, n: int = 1) -> None:
     from owcopilot.assist.review_queue import ReviewItem, ReviewItemType
+
     for i in range(n):
         item = queue.add(
             ReviewItem(
@@ -72,6 +74,7 @@ def test_be1_draft_prompt_contains_lesson_when_lessons_present() -> None:
 
     # Directly test _system_prompt with a lesson
     from owcopilot.retrieval.models import ContextPack
+
     pack = ContextPack(hits=[], query="test", budget_tokens=800)
     lessons = [
         {"lesson_text": "此类 quest_draft 内容历史有 3 次被拒。", "dimension": "completeness"}
@@ -143,6 +146,7 @@ def test_be1_e2e_calibration_to_draft_injection(tmp_path) -> None:
 # BE-2: worldgen/critic.py term injection
 # ---------------------------------------------------------------------------
 
+
 def test_be2_worldgen_critic_system_prompt_contains_term_block() -> None:
     """[BE-2 硬] _critic_system_prompt in worldgen/critic.py injects term constraints."""
     from owcopilot.content.models import Term
@@ -188,8 +192,11 @@ def test_be2_run_quest_refine_loop_passes_terms_to_critique() -> None:
             captured_terms.extend(kwargs.get("terms") or [])
             # Return immediate pass so loop exits in round 0
             from owcopilot.assist.critic import CritiqueResult
+
             return CritiqueResult(
-                verdict="pass", score=1.0, summary="ok",
+                verdict="pass",
+                score=1.0,
+                summary="ok",
                 raw='{"verdict":"pass","score":1.0,"summary":"ok","dimensions":[]}',
                 parse_ok=True,
             )
@@ -198,8 +205,15 @@ def test_be2_run_quest_refine_loop_passes_terms_to_critique() -> None:
     run_quest_refine_loop(
         critic=_SpyCritic(),  # type: ignore[arg-type]
         max_rounds=1,
-        quests=[{"title": "q", "objective": "o", "stages": ["s1", "s2"],
-                 "giver_npc": "npc_a", "location": "loc_a"}],
+        quests=[
+            {
+                "title": "q",
+                "objective": "o",
+                "stages": ["s1", "s2"],
+                "giver_npc": "npc_a",
+                "location": "loc_a",
+            }
+        ],
         relations=[],
         reference_rows=[],
         npc_refs={"npc_a"},
@@ -217,6 +231,7 @@ def test_be2_run_quest_refine_loop_passes_terms_to_critique() -> None:
 # ---------------------------------------------------------------------------
 # BE-3: _system_prompt ordering — quality_bar -> lesson -> term
 # ---------------------------------------------------------------------------
+
 
 def test_be3_prompt_ordering_quality_bar_before_lesson_before_term() -> None:
     """[BE-3 硬] In _system_prompt: quality_bar comes before lesson_section, lesson before term."""
@@ -249,6 +264,7 @@ def test_be3_prompt_ordering_quality_bar_before_lesson_before_term() -> None:
 # ---------------------------------------------------------------------------
 # BE-4: build_critic_lesson_block rewrites "生成时请" to "评判时请"
 # ---------------------------------------------------------------------------
+
 
 def test_be4_critic_lesson_block_rewrites_wording() -> None:
     """[BE-4 硬] Critic lesson block rewrites generation-side wording to eval-side wording."""
@@ -309,6 +325,7 @@ def test_be4_generation_lesson_block_keeps_original_wording() -> None:
 # BE-5: build_term_block >20 terms includes forbidden-word hits
 # ---------------------------------------------------------------------------
 
+
 def test_be5_build_term_block_includes_forbidden_hit_terms() -> None:
     """[BE-5 硬] When >20 terms and a forbidden word in context_hits, the term is included."""
     from owcopilot.assist.term_injection import build_term_block
@@ -343,8 +360,7 @@ def test_be5_no_hits_filters_all_terms_above_20() -> None:
     from owcopilot.content.models import Term
 
     terms = [
-        Term(id=f"t_{i}", canonical=f"c_{i}", forbidden=[f"f_{i}"], aliases=[])
-        for i in range(25)
+        Term(id=f"t_{i}", canonical=f"c_{i}", forbidden=[f"f_{i}"], aliases=[]) for i in range(25)
     ]
     block = build_term_block(terms, context_hits=["unrelated_ref"], inject_terms=True)
     # "unrelated_ref" doesn't match any id, canonical, alias, or forbidden word
@@ -354,6 +370,7 @@ def test_be5_no_hits_filters_all_terms_above_20() -> None:
 # ---------------------------------------------------------------------------
 # BE-6: worldgen _vocab_block uses seed_hits for >20 terms
 # ---------------------------------------------------------------------------
+
 
 def test_be6_vocab_block_includes_all_terms_when_over_20() -> None:
     """[BE-6 硬] _vocab_block with >20 terms injects all terms (seed_hits = term.id + canonical)."""
@@ -377,6 +394,7 @@ def test_be6_vocab_block_includes_all_terms_when_over_20() -> None:
 def test_be6_vocab_block_empty_for_no_terms() -> None:
     """[BE-6] No terms still returns empty string."""
     from owcopilot.worldgen.service import _vocab_block
+
     assert _vocab_block(None) == ""
     assert _vocab_block([]) == ""
 
@@ -384,6 +402,7 @@ def test_be6_vocab_block_empty_for_no_terms() -> None:
 # ---------------------------------------------------------------------------
 # BE-7: AcceptanceCheck.details has eval_type and is_sanity_gate
 # ---------------------------------------------------------------------------
+
 
 def test_be7_acceptance_check_has_eval_type_field() -> None:
     """[BE-7 硬] tool_selection_accuracy_gate check has eval_type and is_sanity_gate in details."""
@@ -409,9 +428,7 @@ def test_be7_acceptance_check_eval_type_present_in_real_run(tmp_path) -> None:
     from owcopilot.evaluation.acceptance import run_acceptance_evaluation
 
     report = run_acceptance_evaluation(tmp_path)
-    gate = next(
-        (c for c in report.checks if c.name == "tool_selection_accuracy_gate"), None
-    )
+    gate = next((c for c in report.checks if c.name == "tool_selection_accuracy_gate"), None)
     assert gate is not None, "tool_selection_accuracy_gate check must exist"
     assert gate.details.get("eval_type") == "offline_pipeline_sanity", (
         "eval_type must be 'offline_pipeline_sanity'"
@@ -422,6 +439,7 @@ def test_be7_acceptance_check_eval_type_present_in_real_run(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 # BE-8: save_lesson ON CONFLICT updates lesson_text
 # ---------------------------------------------------------------------------
+
 
 def test_be8_save_lesson_updates_lesson_text_on_conflict() -> None:
     """[BE-8 硬] On conflict, save_lesson updates lesson_text (not just false_pass_count)."""
@@ -449,7 +467,10 @@ def test_be8_lesson_text_not_stale_after_extract() -> None:
     store = SQLiteStore(":memory:")
     items_3 = [
         FalsePassItem(
-            item_id=f"item_{i}", item_type="quest_draft", object_ref=f"r_{i}", critic_score=0.6,
+            item_id=f"item_{i}",
+            item_type="quest_draft",
+            object_ref=f"r_{i}",
+            critic_score=0.6,
             dimension="grounding",
         )
         for i in range(3)
@@ -463,7 +484,10 @@ def test_be8_lesson_text_not_stale_after_extract() -> None:
     # Second calibration with 5 false-passes for same dimension -> lesson_text should update
     items_5 = [
         FalsePassItem(
-            item_id=f"item2_{i}", item_type="quest_draft", object_ref=f"r2_{i}", critic_score=0.6,
+            item_id=f"item2_{i}",
+            item_type="quest_draft",
+            object_ref=f"r2_{i}",
+            critic_score=0.6,
             dimension="grounding",
         )
         for i in range(5)
@@ -482,14 +506,23 @@ def test_be8_lesson_text_not_stale_after_extract() -> None:
 # BE-9: CLI --skills wires into ReActAgent.allowed_skills
 # ---------------------------------------------------------------------------
 
+
 def test_be9_cli_parses_skills_argument() -> None:
     """[BE-9 硬] CLI agent subparser accepts --skills argument."""
     from owcopilot.cli.main import build_parser
 
     parser = build_parser()
     args = parser.parse_args(
-        ["agent", "--goal", "test goal", "--skills", "audit_project", "list_issues",
-         "--content-root", "."]
+        [
+            "agent",
+            "--goal",
+            "test goal",
+            "--skills",
+            "audit_project",
+            "list_issues",
+            "--content-root",
+            ".",
+        ]
     )
     assert args.skills == ["audit_project", "list_issues"]
 
@@ -540,6 +573,6 @@ def test_be9_react_agent_allowed_skills_filters_manifest() -> None:
     agent.run("test goal")
 
     # Verify manifest was called with the restricted skill set
-    assert any(
-        a == {"audit_project", "list_issues"} for a in captured
-    ), f"manifest must be called with allowed_skills set; captured={captured}"
+    assert any(a == {"audit_project", "list_issues"} for a in captured), (
+        f"manifest must be called with allowed_skills set; captured={captured}"
+    )

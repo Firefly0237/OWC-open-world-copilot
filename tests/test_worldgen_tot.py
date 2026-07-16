@@ -279,3 +279,131 @@ def test_premise_tot_with_llm_evaluator_breaks_a_structural_tie() -> None:
         assert draft.summary == "variant-1-world"
     finally:
         store.close()
+
+
+def test_world_seed_action_wires_premise_tot_into_product_path(tmp_path, monkeypatch) -> None:
+    """P0-B regression: ``premise_candidates>1`` through the PRODUCT action must actually run the
+    ToT search. (It used to be dead-wired: the service supported it but no product construction
+    ever passed the params, so ToT never ran in any shipped call.) Offline mode honestly uses the
+    deterministic value function — the double has no quality judgement to offer."""
+    import owcopilot.worldgen.service as worldgen_service
+    from owcopilot.app.actions import run_world_seed_action
+    from owcopilot.content.store import ContentStore
+
+    seen: dict[str, object] = {}
+    real_tot = worldgen_service.tree_of_thoughts
+
+    def spy(*, root, expand, evaluate, steps, beam_width):
+        seen["evaluate"] = evaluate
+        return real_tot(
+            root=root, expand=expand, evaluate=evaluate, steps=steps, beam_width=beam_width
+        )
+
+    monkeypatch.setattr(worldgen_service, "tree_of_thoughts", spy)
+
+    root = tmp_path / "content"
+    ContentStore(root).save(ContentBundle())
+    result = run_world_seed_action(
+        root,
+        brief={
+            "idea": "边境蒸汽世界,森林记得旧战争。",
+            "faction_count": 2,
+            "region_count": 1,
+            "npc_count": 2,
+            "quest_count": 2,
+            "term_count": 2,
+        },
+        premise_candidates=3,
+        refine_rounds=0,
+    )
+
+    # The search ran in the product path, on the deterministic value function (offline mode).
+    assert seen.get("evaluate") is worldgen_service.score_premise
+    # And the chain still produced a reviewable draft end to end.
+    assert result["bundle"]["quests"]
+
+
+def test_world_seed_action_real_mode_wires_llm_evaluator(tmp_path, monkeypatch) -> None:
+    """Real mode wires the LLM evaluator as the ToT value function; a failing eval call degrades
+    to the deterministic score (marked, not silent) instead of killing the world build."""
+    import owcopilot.app.actions as actions
+    import owcopilot.worldgen.service as worldgen_service
+    from owcopilot.app.actions import run_world_seed_action
+    from owcopilot.content.store import ContentStore
+    from owcopilot.llm.telemetry import TelemetryCollector
+    from owcopilot.worldgen import LLMPremiseEvaluator
+
+    # Stub the action's gateway builder: "real" mode without a network — the staged world-seed
+    # prompts are served by the offline double. The premise-eval prompt has no stage marker, so
+    # the double REJECTS it → exercises the evaluator's gateway-error degrade path for real.
+    def fake_gateway(*, task, llm_mode, llm_model, offline_provider, extra_tasks=None):
+        telemetry = TelemetryCollector()
+        gw = LLMGateway(
+            providers={"cheap": OfflineWorldSeedProvider()},
+            router=StaticRouter(mapping={task: "cheap"}),
+            cache=NoOpCache(),
+            telemetry=telemetry,
+        )
+        return gw, telemetry
+
+    # Patch where it is USED: worldgen.py binds ``_gateway`` from actions._shared at import time.
+    monkeypatch.setattr(actions.worldgen, "_gateway", fake_gateway)
+
+    seen: dict[str, object] = {}
+    real_tot = worldgen_service.tree_of_thoughts
+
+    def spy(*, root, expand, evaluate, steps, beam_width):
+        seen["evaluate"] = evaluate
+        return real_tot(
+            root=root, expand=expand, evaluate=evaluate, steps=steps, beam_width=beam_width
+        )
+
+    monkeypatch.setattr(worldgen_service, "tree_of_thoughts", spy)
+
+    root = tmp_path / "content"
+    ContentStore(root).save(ContentBundle())
+    result = run_world_seed_action(
+        root,
+        brief={
+            "idea": "评审降级也不该杀构建",
+            "faction_count": 2,
+            "region_count": 1,
+            "npc_count": 2,
+            "quest_count": 2,
+            "term_count": 2,
+        },
+        llm_mode="real",
+        premise_candidates=2,
+        refine_rounds=0,
+    )
+
+    assert isinstance(seen.get("evaluate"), LLMPremiseEvaluator)
+    assert result["bundle"]["quests"]  # degrade path kept the chain alive
+
+
+def test_world_seed_action_default_stays_single_shot(tmp_path, monkeypatch) -> None:
+    """Cost discipline: the default (premise_candidates=1) must never enter the ToT branch."""
+    import owcopilot.worldgen.service as worldgen_service
+    from owcopilot.app.actions import run_world_seed_action
+    from owcopilot.content.store import ContentStore
+
+    def boom(**_kwargs):  # noqa: ANN003
+        raise AssertionError("tree_of_thoughts must not run for the single-shot default")
+
+    monkeypatch.setattr(worldgen_service, "tree_of_thoughts", boom)
+
+    root = tmp_path / "content"
+    ContentStore(root).save(ContentBundle())
+    result = run_world_seed_action(
+        root,
+        brief={
+            "idea": "单发默认路径",
+            "faction_count": 2,
+            "region_count": 1,
+            "npc_count": 2,
+            "quest_count": 2,
+            "term_count": 2,
+        },
+        refine_rounds=0,
+    )
+    assert result["bundle"]["quests"]

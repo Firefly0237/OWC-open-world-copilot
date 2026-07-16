@@ -1,3 +1,4 @@
+# 世界设定规则：依赖时间线或实体状态的一致性（先后矛盾/状态冲突等）。
 """World-lore rules that depend on timeline or entity state."""
 
 from __future__ import annotations

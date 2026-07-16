@@ -274,10 +274,13 @@ def test_fallback_scan_N_shrinks_with_scope(tmp_path) -> None:
         # scope's 6 rows were never read. ("npc" is a substring of every entity ref in both scopes,
         # so any leak would be visible as a boris/vera/orin ref here.)
         seen = {h.ref for h in BM25Retriever(store_a)._fallback_search("npc", limit=50)}
-        assert seen <= {r["ref"] for r in store_a.conn.execute(
-            "SELECT ref FROM content_index WHERE world_id = ? AND version = ?",
-            (store_a.world_id, store_a.version),
-        )}
+        assert seen <= {
+            r["ref"]
+            for r in store_a.conn.execute(
+                "SELECT ref FROM content_index WHERE world_id = ? AND version = ?",
+                (store_a.world_id, store_a.version),
+            )
+        }
         assert all("boris" not in r and "vera" not in r and "orin" not in r for r in seen)
         # The "npc" substring hits A's entity/relation/quest rows; the result is drawn entirely from
         # scope A's N (== 4), never from B's 6 rows. That every returned ref is a world-A ref is the

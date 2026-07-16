@@ -1,3 +1,4 @@
+# 常规 lore 形态的 Markdown 导入器（NPC/地点/阵营/关系）。
 """Markdown importer for the conventional lore shape (NPCs / Locations / Factions / Relations)."""
 
 from __future__ import annotations

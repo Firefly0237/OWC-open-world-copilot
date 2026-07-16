@@ -1,3 +1,4 @@
+# 跨模块通用小工具：slugify/unique_id、控制台/env 助手。单一来源，保证同名到处 slug 成同一 id。
 """Small cross-cutting helpers shared across modules.
 
 Console/env helpers (stdout encoding, ``.env`` loading) were previously inline in ``demo.py``; the

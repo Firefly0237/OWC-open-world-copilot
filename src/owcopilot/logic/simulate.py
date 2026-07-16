@@ -1,9 +1,12 @@
+# 确定性 playtest：走一遍任务逻辑，看它到底能不能被玩通。
 """WS-E · deterministic playtest: walk a quest's logic to see if it can actually be played.
 
-Reuses the WS-A evaluator + WorldState. Given an optional sequence of branch choices, it walks from
-the first stage — checking each precondition, applying on-complete effects, taking branches — and
-reports the path, the final variable state, and the outcome: completed / deadlock (stuck, no branch
-satisfiable) / blocked (a precondition was false) / cycle. No model calls; fully reproducible.
+Reuses the WS-A evaluator + WorldState. Given an optional sequence of branch choices, it first gates
+on the quest-level precondition (unavailable when it is false in the initial state — no stage is
+entered), then walks from the first stage — checking each stage precondition, applying on-complete
+effects, taking branches — and reports the path, the final variable state, and the outcome:
+completed / deadlock (stuck, no branch satisfiable) / blocked (a stage precondition was false) /
+cycle / unavailable (the quest-level precondition was false). No model calls; fully reproducible.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ class SimStep(BaseModel):
 
 
 class SimRun(BaseModel):
-    status: str  # "completed" | "deadlock" | "blocked" | "cycle"
+    status: str  # "completed" | "deadlock" | "blocked" | "cycle" | "unavailable"
     path: list[str] = Field(default_factory=list)
     steps: list[SimStep] = Field(default_factory=list)
     final_state: dict[str, Any] = Field(default_factory=dict)
@@ -77,6 +80,14 @@ def simulate_quest(
         return SimRun(status="completed", path=stages, message="无逻辑层，按线性默认可完成")
 
     state = _seed_state(logic, initial_state)
+    if not _truthy(state, logic.precondition):
+        # Quest-level gate: an unsatisfied precondition means the quest cannot be entered at all —
+        # no stage runs. The message carries the gate expression verbatim for the narration layer.
+        return SimRun(
+            status="unavailable",
+            message=f"任务前置不满足：{logic.precondition}",
+            final_state=state.as_mapping(),
+        )
     stage_logic = {sl.stage_id: sl for sl in logic.stage_logic}
     branches_from: dict[str, list] = {}
     for branch in logic.branches:
@@ -106,8 +117,14 @@ def simulate_quest(
                 step.effects.append(f"{effect.var} {effect.op} {effect.value}")
 
         outgoing = branches_from.get(pos, [])
-        nxt, branch_id, terminal = _next_stage(outgoing, stages, pos, state, queued_choices)
-        step.branch_taken = branch_id
+        nxt, chosen, terminal = _next_stage(outgoing, stages, pos, state, queued_choices)
+        if chosen is not None:
+            step.branch_taken = chosen.id
+            # A taken branch applies its consequences (Branch.effects) — the model has always
+            # declared them "applied when this branch is taken"; the simulator now honours that.
+            for effect in chosen.effects:
+                state.apply(effect.var, effect.op, effect.value)
+                step.effects.append(f"{effect.var} {effect.op} {effect.value}")
         run.steps.append(step)
         run.path.append(pos)
         if terminal:
@@ -130,8 +147,10 @@ def _next_stage(
     pos: str,
     state: WorldState,
     queued_choices: list[str],
-) -> tuple[str | None, str, bool]:
-    """Return (next_stage_id, branch_id, is_terminal)."""
+) -> tuple[str | None, Any, bool]:
+    """Return (next_stage_id, chosen_branch_or_None, is_terminal). The caller applies the chosen
+    branch's effects — selection here must stay side-effect-free so condition evaluation is not
+    perturbed mid-decision."""
     if outgoing:
         # prefer an explicitly queued choice for this stage; else the first satisfiable branch
         chosen = None
@@ -143,12 +162,12 @@ def _next_stage(
         if chosen is None:
             chosen = next((b for b in outgoing if _truthy(state, b.condition)), None)
         if chosen is None:
-            return None, "", False  # deadlock
+            return None, None, False  # deadlock
         if chosen.to_stage:
-            return chosen.to_stage, chosen.id, False
-        return None, chosen.id, True  # terminal outcome
+            return chosen.to_stage, chosen, False
+        return None, chosen, True  # terminal outcome
     # linear: advance to the next stage, or complete if this was the last
     index = stages.index(pos)
     if index + 1 < len(stages):
-        return stages[index + 1], "", False
-    return None, "", True  # completed
+        return stages[index + 1], None, False
+    return None, None, True  # completed

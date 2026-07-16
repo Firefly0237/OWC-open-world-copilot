@@ -1,0 +1,20 @@
+{
+    "name": "com.owcopilot.content-import.Editor",
+    "rootNamespace": "OWCopilot.ContentImport.Editor",
+    "references": [
+        "com.owcopilot.content-import",
+        "com.owcopilot.content-import.Core",
+        "Unity.Newtonsoft.Json"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

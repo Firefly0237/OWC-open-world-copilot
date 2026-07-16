@@ -155,8 +155,85 @@ def test_gateway_classifies_provider_error_after_retries_exhausted():
 
 
 # ---------------------------------------------------------------------------
+# Output-cap truncation (finish_reason="length"): guided error, no wasted retry.
+# Live-run finding: the reasoning default model spends completion budget on hidden
+# reasoning; a capped reply used to surface as a raw "no balanced JSON span" much later.
+# ---------------------------------------------------------------------------
+
+
+def _resp(finish_reason: str, completion_tokens: int = 3000):
+    return types.SimpleNamespace(
+        choices=[
+            types.SimpleNamespace(
+                message=types.SimpleNamespace(content='{"half": '),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=types.SimpleNamespace(prompt_tokens=10, completion_tokens=completion_tokens),
+    )
+
+
+def test_truncated_output_raises_guided_error():
+    from owcopilot.llm.gateway import OutputTruncatedError, _raise_if_output_truncated
+
+    with pytest.raises(OutputTruncatedError, match="OWCOPILOT_MAX_OUTPUT_TOKENS"):
+        _raise_if_output_truncated(_resp("length"), cap=3000)
+    # a normal stop must pass through untouched (and a missing field must not crash)
+    _raise_if_output_truncated(_resp("stop"), cap=3000)
+    no_field = types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="ok"))]
+    )
+    _raise_if_output_truncated(no_field, cap=3000)
+
+
+def test_provider_complete_rejects_truncated_reply(monkeypatch):
+    """The check is wired inside ``complete`` — a capped reply never reaches the JSON parser."""
+    from owcopilot.llm.gateway import OutputTruncatedError
+
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+
+    class _Completions:
+        def create(self, **kwargs):
+            return _resp("length", completion_tokens=16)
+
+    client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=_Completions()))
+    fake_openai = types.SimpleNamespace(OpenAI=lambda **_kwargs: client)
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    provider = OpenAICompatProvider(model="gpt-current", max_output_tokens=16)
+    with pytest.raises(OutputTruncatedError, match="completion_tokens=16"):
+        provider.complete(system="s", user="u", model="cheap")
+
+
+def test_gateway_output_budget_fails_fast_without_retry():
+    """Retrying a capped reply pays for another capped reply — one attempt, guided category."""
+    from owcopilot.llm.gateway import OutputTruncatedError
+
+    class _AlwaysCapped:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *, system, user, model):
+            self.calls += 1
+            raise OutputTruncatedError(completion_tokens=3000, cap=3000)
+
+    prov = _AlwaysCapped()
+    gw = LLMGateway(providers={"cheap": prov}, max_retries=2)
+    try:
+        gw.complete(task="plan", system="s", user="u", tier="cheap")
+    except LLMGatewayError as e:
+        assert e.category == "output_budget"
+        assert e.attempts == 1  # fail fast: no retries were burned
+        assert "OWCOPILOT_MAX_OUTPUT_TOKENS" in str(e.cause)
+    else:
+        raise AssertionError("expected LLMGatewayError")
+    assert prov.calls == 1
+
+
+# ---------------------------------------------------------------------------
 # R3-Team-C ③: unregistered tier → guided LLMGatewayError, not a raw KeyError
 # ---------------------------------------------------------------------------
+
 
 def test_gateway_unregistered_tier_raises_guided_error():
     """Router selects a tier with no provider → friendly LLMGatewayError listing what's available
@@ -178,6 +255,7 @@ def test_gateway_unregistered_tier_raises_guided_error():
 
 def test_gateway_records_real_model_id_on_callrecord():
     """R3-C①: CallRecord.model carries the resolved real model id (from provider.model)."""
+
     class _ModelProvider:
         model = "deepseek-v4-pro"
 

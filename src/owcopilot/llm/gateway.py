@@ -1,3 +1,5 @@
+# 全系统每次模型调用的唯一咽喉点。
+# 关键：缓存/路由/重试/成本遥测/OTEL/原生 tools 都收束在这一层——换供应商、限成本、加观测只改这里。
 """THE single chokepoint for every model call in the system.
 
 Cache, router and telemetry all hang off this one method, and call sites never touch a provider
@@ -139,6 +141,40 @@ def provider_supports_tools(provider: Any) -> bool:
         return False
 
 
+class OutputTruncatedError(RuntimeError):
+    """The model's reply was cut off by the output-token cap (``finish_reason == "length"``).
+
+    Raised by the *text* ``complete`` path only: there a truncated reply is guaranteed garbage
+    (half a JSON object), so failing loud with guidance beats letting a downstream parser report
+    an unhelpful "no balanced JSON span". The tools path deliberately stays tolerant — a truncated
+    tool call degrades to ``{}`` and the loop self-corrects via the error observation.
+    """
+
+    def __init__(self, *, completion_tokens: int, cap: int):
+        self.completion_tokens = completion_tokens
+        self.cap = cap
+        super().__init__(
+            f"model output was cut off by the output-token cap "
+            f"(finish_reason='length', completion_tokens={completion_tokens}, cap={cap}). "
+            f"Reasoning models (e.g. deepseek-v4-flash) spend part of the cap on hidden "
+            f"reasoning before the visible answer. Raise OWCOPILOT_MAX_OUTPUT_TOKENS (or pass "
+            f"max_output_tokens=) to give the reply room, or simplify the request."
+        )
+
+
+def _raise_if_output_truncated(resp: Any, cap: int) -> None:
+    """Fail loud-and-guided when the provider cut the reply at the output cap.
+
+    Split out from the provider (like ``_parse_tool_response``) so it can be unit-tested against
+    a hand-built response object. ``getattr`` keeps it safe for providers that omit the field.
+    """
+    if str(getattr(resp.choices[0], "finish_reason", "") or "") != "length":
+        return
+    usage = getattr(resp, "usage", None)
+    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0) if usage else 0
+    raise OutputTruncatedError(completion_tokens=completion_tokens, cap=cap)
+
+
 class OpenAICompatProvider:
     """Real provider for OpenAI-compatible APIs (e.g. DeepSeek). Requires `openai` and a key.
 
@@ -182,16 +218,18 @@ class OpenAICompatProvider:
         self.timeout = (
             timeout
             if timeout is not None
-            else float(os.getenv("OWCOPILOT_PROVIDER_TIMEOUT_SEC", "30"))
+            else float(os.getenv("OWCOPILOT_PROVIDER_TIMEOUT_SEC", "60"))
         )
-        # Cap runaway completions (cost + latency guard). Round-2 real testing saw a verbose
-        # draft burn 2238 output tokens / ~24s; the default leaves headroom above that while
-        # stopping multi-thousand-token runaways. A truncated JSON fails parsing and falls into
-        # the existing tolerant/retry paths, which is the intended trade.
+        # Cap runaway completions (cost + latency guard). Calibrated on the reasoning default
+        # model (deepseek-v4-flash): hidden reasoning counts toward completion_tokens, and a live
+        # bilingual quest draft needed 3471 tokens / ~37s end to end — the old 3000/30s defaults
+        # (calibrated pre-reasoning) cut exactly that call off at both ends. 6000/60s keeps the
+        # runaway guard while fitting the reasoning overhead. A reply that still hits the cap
+        # raises a guided OutputTruncatedError instead of failing later in JSON parsing.
         self.max_output_tokens = (
             max_output_tokens
             if max_output_tokens is not None
-            else int(os.getenv("OWCOPILOT_MAX_OUTPUT_TOKENS", "3000"))
+            else int(os.getenv("OWCOPILOT_MAX_OUTPUT_TOKENS", "6000"))
         )
 
     def _wants_json(self, system: str, user: str) -> bool:
@@ -243,6 +281,7 @@ class OpenAICompatProvider:
                 ],
                 **fallback_kwargs,
             )
+        _raise_if_output_truncated(resp, self.max_output_tokens)
         text = resp.choices[0].message.content or ""
         usage = resp.usage
         prompt_tokens = usage.prompt_tokens if usage else 0
@@ -455,12 +494,16 @@ class LLMGateway:
     ) -> tuple:
         attempts = self.max_retries + 1
         last_exc: Exception | None = None
+        made = 0
         for attempt in range(1, attempts + 1):
+            made = attempt
             try:
                 return provider.complete(system=system, user=user, model=tier)
             except Exception as e:
                 last_exc = e
-                if attempt >= attempts:
+                # A capped-output reply will almost certainly be capped again on retry — fail
+                # fast with the guided message instead of paying for another truncated call.
+                if isinstance(e, OutputTruncatedError) or attempt >= attempts:
                     break
                 if self.retry_backoff_seconds:
                     time.sleep(self.retry_backoff_seconds * attempt)
@@ -469,7 +512,7 @@ class LLMGateway:
             task=task,
             tier=tier,
             category=_classify_provider_error(last_exc),
-            attempts=attempts,
+            attempts=made,
             cause=last_exc,
         ) from last_exc
 
@@ -537,6 +580,8 @@ class LLMGateway:
 
 
 def _classify_provider_error(exc: Exception) -> str:
+    if isinstance(exc, OutputTruncatedError):
+        return "output_budget"
     name = exc.__class__.__name__.lower()
     msg = str(exc).lower()
     if "timeout" in name or "timeout" in msg or "timed out" in msg:

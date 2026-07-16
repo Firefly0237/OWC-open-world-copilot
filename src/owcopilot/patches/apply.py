@@ -1,3 +1,4 @@
+# 对 ContentStore 应用/回滚补丁候选。
 """Apply and rollback patch candidates against a ContentStore."""
 
 from __future__ import annotations

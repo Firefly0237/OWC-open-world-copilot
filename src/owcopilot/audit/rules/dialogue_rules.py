@@ -1,3 +1,4 @@
+# 对话树结构完整性规则（悬空跳转/不可达节点/环等）。
 """Dialogue tree structural integrity rules."""
 
 from __future__ import annotations
@@ -68,11 +69,12 @@ class DialogueTreeUnknownSpeakerRule:
 
 
 class DialogueChoiceConditionRule:
-    """A choice's gate condition must reference state that actually exists. For a tree tied to a
-    quest (`quest_id`), the variables it reads must be declared in that quest's logic; cross-quest
-    state (`quest:<id>.done`) and faction reputation (`rep:<faction>`) are recognized by convention.
-    Otherwise a branch silently never (or always) fires — exactly the consistency gap the audit
-    exists to surface. Standalone trees (no quest_id / no logic) have no variable scope to check."""
+    """A choice must read AND write state that actually exists. For a tree tied to a quest
+    (`quest_id`): the variables its `condition` reads and its `effects` mutate must be declared in
+    that quest's logic; cross-quest state (`quest:<id>.done`) and faction reputation
+    (`rep:<faction>`) are recognized by convention. Otherwise a branch silently never (or always)
+    fires — or an effect mutates a variable nothing else reads — exactly the consistency gaps the
+    audit exists to surface. Standalone trees (no quest_id / no logic) have no scope to check."""
 
     code = "DIALOGUE_CONDITION_UNDEFINED_VAR"
     severity = Severity.WARNING
@@ -85,33 +87,47 @@ class DialogueChoiceConditionRule:
             if quest is None or quest.logic is None:
                 continue  # no quest-logic scope to validate the condition's variables against
             declared = {var.id for var in quest.logic.variables}
+
+            def known(ref: str) -> bool:
+                if ref in declared:  # noqa: B023 — declared rebinds per tree by design
+                    return True
+                if ref.startswith("quest:") and ref.endswith(".done"):
+                    return True
+                return ref.startswith("rep:") and ref[len("rep:") :] in factions  # noqa: B023
+
             for node in tree.nodes.values():
                 for index, choice in enumerate(node.choices):
-                    if not choice.condition.strip():
-                        continue
                     path = f"nodes/{node.id}/choices/{index}"
-                    try:
-                        tree_expr = parse_expr(choice.condition)
-                    except LogicSyntaxError as exc:
-                        yield self._issue(
-                            tree.id,
-                            "DIALOGUE_CONDITION_SYNTAX_ERROR",
-                            path,
-                            f"condition does not parse: {exc}",
-                        )
-                        continue
-                    for ref in sorted(refs_in(tree_expr)):
-                        if ref in declared:
-                            continue
-                        if ref.startswith("quest:") and ref.endswith(".done"):
-                            continue
-                        if ref.startswith("rep:") and ref[len("rep:") :] in factions:
+                    if choice.condition.strip():
+                        try:
+                            tree_expr = parse_expr(choice.condition)
+                        except LogicSyntaxError as exc:
+                            yield self._issue(
+                                tree.id,
+                                "DIALOGUE_CONDITION_SYNTAX_ERROR",
+                                path,
+                                f"condition does not parse: {exc}",
+                            )
+                            tree_expr = None
+                        if tree_expr is not None:
+                            for ref in sorted(refs_in(tree_expr)):
+                                if known(ref):
+                                    continue
+                                yield self._issue(
+                                    tree.id,
+                                    self.code,
+                                    path,
+                                    f"condition references '{ref}', not declared in quest "
+                                    f"'{quest.id}' logic (nor a known quest/reputation ref)",
+                                )
+                    for effect in choice.effects:
+                        if known(effect.var):
                             continue
                         yield self._issue(
                             tree.id,
                             self.code,
                             path,
-                            f"condition references '{ref}', not declared in quest "
+                            f"effect mutates '{effect.var}', not declared in quest "
                             f"'{quest.id}' logic (nor a known quest/reputation ref)",
                         )
 

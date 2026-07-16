@@ -106,9 +106,7 @@ def _content_index_rows(store: SQLiteStore) -> list[tuple[Any, ...]]:
 def _content_fts_rows(store: SQLiteStore) -> list[tuple[Any, ...]]:
     return sorted(
         tuple(row)
-        for row in store.conn.execute(
-            "SELECT ref, object_type, title, body FROM content_fts"
-        )
+        for row in store.conn.execute("SELECT ref, object_type, title, body FROM content_fts")
     )
 
 
@@ -226,18 +224,13 @@ def test_content_index_delete_prunes_row_and_fts() -> None:
         del reduced.quests["quest_missing_caravan"]
         store.replace_content_index(reduced)
 
-        refs = {
-            str(row["ref"]) for row in store.conn.execute("SELECT ref FROM content_index")
-        }
+        refs = {str(row["ref"]) for row in store.conn.execute("SELECT ref FROM content_index")}
         assert "quest:quest_missing_caravan" not in refs
         # FTS5 manual delete: the pruned ref is no longer reachable by search.
-        fts_refs = {
-            str(row["ref"]) for row in store.conn.execute("SELECT ref FROM content_fts")
-        }
+        fts_refs = {str(row["ref"]) for row in store.conn.execute("SELECT ref FROM content_fts")}
         assert "quest:quest_missing_caravan" not in fts_refs
         assert all(
-            r["ref"] != "quest:quest_missing_caravan"
-            for r in store.search_content("caravan")
+            r["ref"] != "quest:quest_missing_caravan" for r in store.search_content("caravan")
         )
     finally:
         store.close()
@@ -284,9 +277,9 @@ def test_graph_edges_incremental_matches_full_rebuild(from_bundle, to_bundle) ->
         # Row count (with multiplicity) must match too -- the fingerprint's occurrence ordinal
         # keeps parallel edges distinct rather than collapsing them.
         full_count = full.conn.execute("SELECT COUNT(*) AS c FROM graph_edges").fetchone()["c"]
-        inc_count = incremental.conn.execute(
-            "SELECT COUNT(*) AS c FROM graph_edges"
-        ).fetchone()["c"]
+        inc_count = incremental.conn.execute("SELECT COUNT(*) AS c FROM graph_edges").fetchone()[
+            "c"
+        ]
         assert full_count == inc_count
     finally:
         full.close()
@@ -464,9 +457,7 @@ def test_reference_index_edited_book_rechunks_only_that_source() -> None:
             "SELECT 1 FROM reference_fts WHERE ref = ?", (stale_ref,)
         ).fetchone()
         # FTS no longer surfaces the removed chunk's ref for its old body text.
-        assert all(
-            hit["ref"] != stale_ref for hit in store.search_reference_chunks("alpha two")
-        )
+        assert all(hit["ref"] != stale_ref for hit in store.search_reference_chunks("alpha two"))
     finally:
         store.close()
 

@@ -1,3 +1,4 @@
+# 规则注册表与规则配置。
 """Rule registry and rule configuration."""
 
 from __future__ import annotations

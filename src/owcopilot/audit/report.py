@@ -1,3 +1,4 @@
+# 审计结果的 Markdown 人类可读渲染。
 """Human-readable Markdown rendering of an audit result.
 
 JSON stays the machine interface; this report is what gets pasted into a chat channel or

@@ -1,3 +1,5 @@
+# 供应商级韧性：主备故障转移 + 熔断器。透传除 complete() 外的可选能力成员(model/supports_tools/
+# complete_with_tools),避免"开韧性即退化文本 ReAct"。
 """Provider-level resilience: failover to a secondary provider, plus a circuit breaker.
 
 Both are ``LLMProvider`` decorators (the same ``complete()`` contract as ``OpenAICompatProvider``),
@@ -9,16 +11,50 @@ Why: the gateway already retries, classifies and fails *closed* (it never silent
 a single provider has no answer to a sustained outage. Failover tries a second provider on an
 availability error (never on ``auth`` — that would mask a misconfiguration). The breaker stops
 hammering a hard-down provider, failing fast for a cooldown to protect latency and budget.
+
+Capability transparency: a concrete provider's surface is bigger than the required ``complete()`` —
+``model`` (cache key / ``gen_ai.request.model``) and ``supports_tools`` + ``complete_with_tools``
+(native function-calling, probed by ``provider_supports_tools``) are OPTIONAL members a provider
+may expose (see ``llm/gateway.py``). Wrapping a provider in either class here must not make those
+members disappear: a gateway that resolves a wrapped provider and finds no ``supports_tools``
+silently falls back to the text ReAct loop even though the wrapped provider natively supports
+tools — the exact "enabling resilience degrades to text ReAct" regression this module now guards
+against. Both wrappers forward EVERY member in :data:`PROVIDER_CAPABILITY_MEMBERS` explicitly (no
+``__getattr__`` proxy / no ``wrapt`` — this project only uses that dependency-free, auditable
+style); a completeness test in ``tests/test_resilience.py`` iterates the same tuple so a future
+member added there and forgotten here fails loudly instead of silently degrading again.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
-from .gateway import LLMProvider, OpenAICompatProvider, _classify_provider_error
+from .gateway import (
+    LLMProvider,
+    OpenAICompatProvider,
+    ToolCallResponse,
+    _classify_provider_error,
+    provider_supports_tools,
+)
+
+logger = logging.getLogger(__name__)
+
+#: The provider "protocol" surface beyond the formal ``typing.Protocol`` (which only requires
+#: ``complete()`` so plain text-only providers keep structurally satisfying it). These are the
+#: OPTIONAL members callers duck-type-probe elsewhere in the codebase (``llm/gateway.py``'s
+#: ``getattr(provider, "model", ...)`` and ``provider_supports_tools``) — the single source of
+#: truth both the wrappers below and ``tests/test_resilience.py``'s completeness test read from.
+PROVIDER_CAPABILITY_MEMBERS: tuple[str, ...] = (
+    "complete",
+    "model",
+    "supports_tools",
+    "complete_with_tools",
+)
 
 
 class CircuitOpenError(RuntimeError):
@@ -67,6 +103,59 @@ class FailoverProvider:
             self.failovers += 1
             return self.secondary.complete(system=system, user=user, model=model)
 
+    @property
+    def supports_tools(self) -> bool:
+        """Native tool-calling capability probe, forwarded from PRIMARY.
+
+        Prospective, like ``.model``: the caller (``provider_supports_tools`` via
+        ``ReActAgent._native_tools_available`` / ``LLMGateway.complete_with_tools``) decides
+        text-vs-native ONCE, before any call is attempted — at that point whether *this specific*
+        call will end up failing over is unknowable, so the probe reports the provider that will be
+        tried first, exactly as ``.model`` does for the cache key. It never reports a false
+        capability: if primary genuinely lacks tool support this is False, never borrowed from a
+        tool-capable secondary. A failover *during* an actual ``complete_with_tools`` call to a
+        secondary that lacks the capability is a separate, later concern — handled honestly (raise
+        + log, never fabricate) by ``complete_with_tools`` below, not by this static probe.
+        """
+        return provider_supports_tools(self.primary)
+
+    def complete_with_tools(
+        self, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]], model: str
+    ) -> ToolCallResponse:
+        """Native-tools sibling of ``complete()``: same failover contract (try primary, fail over to
+        secondary on a non-passthrough availability error), plus an honest capability check the
+        plain ``complete()`` path doesn't need.
+
+        A hand-off to a secondary that cannot do native tool-calling would either raise an
+        ``AttributeError`` (no ``complete_with_tools``) or silently mis-answer — neither is
+        acceptable, so that case is refused explicitly: a WARNING is logged naming the capability
+        degradation, and the ORIGINAL primary error is re-raised (never a fabricated
+        :class:`ToolCallResponse`). ``failovers`` is only incremented on an actual hand-off, so it
+        stays an honest count of calls that really completed via the secondary.
+        """
+        # complete_with_tools is an OPTIONAL protocol member (not on the LLMProvider Protocol, so
+        # plain text-only providers keep structurally satisfying it) — mirrors the `Any` cast
+        # LLMGateway.complete_with_tools uses for the same reason; the provider_supports_tools
+        # guards above/below prove the member exists and is callable before each use.
+        primary: Any = self.primary
+        try:
+            return primary.complete_with_tools(messages=messages, tools=tools, model=model)
+        except Exception as exc:
+            if _classify_provider_error(exc) in self.passthrough:
+                raise  # e.g. auth — surface it, don't mask behind the secondary
+            if not provider_supports_tools(self.secondary):
+                logger.warning(
+                    "FailoverProvider.complete_with_tools: primary failed with a %s error (%s) "
+                    "and the failover secondary does not support native tool-calling — refusing "
+                    "to fabricate a tool response; native-tools capability degrades for this call.",
+                    _classify_provider_error(exc),
+                    exc,
+                )
+                raise
+            self.failovers += 1
+            secondary: Any = self.secondary
+            return secondary.complete_with_tools(messages=messages, tools=tools, model=model)
+
 
 class CircuitBreakerProvider:
     """Wrap a provider with a fixed-threshold circuit breaker.
@@ -104,6 +193,15 @@ class CircuitBreakerProvider:
         return getattr(self.inner, "model", "") or ""
 
     @property
+    def supports_tools(self) -> bool:
+        """Native tool-calling capability probe, forwarded from ``inner`` REGARDLESS of circuit
+        state (closed / open / half-open). Capability is a static trait of the wrapped provider,
+        not a function of its current health, so an open circuit still reports ``inner``'s true
+        capability honestly rather than going quiet (which would make the gateway wrongly fall back
+        to the text ReAct loop for a provider that does support native tools)."""
+        return provider_supports_tools(self.inner)
+
+    @property
     def is_open(self) -> bool:
         with self._lock:
             return self._opened_at is not None and (
@@ -111,13 +209,37 @@ class CircuitBreakerProvider:
             )
 
     def complete(self, *, system: str, user: str, model: str) -> tuple:
+        return self._call_through(
+            lambda: self.inner.complete(system=system, user=user, model=model)
+        )
+
+    def complete_with_tools(
+        self, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]], model: str
+    ) -> ToolCallResponse:
+        """Native-tools sibling of ``complete()``: identical circuit bookkeeping (same failure
+        streak / open-state fast-fail / half-open trial — both call shapes share ONE circuit, since
+        they exercise the same underlying provider connection), delegated to
+        ``inner.complete_with_tools``. Assumes the caller already probed ``supports_tools`` — the
+        gateway's ``LLMGateway.complete_with_tools`` does, via
+        ``provider_supports_tools(provider)``, before ever calling in here — same contract
+        ``OpenAICompatProvider.complete_with_tools`` itself relies on (no redundant self-check)."""
+        # Optional protocol member — see the matching comment on FailoverProvider's version.
+        inner: Any = self.inner
+        return self._call_through(
+            lambda: inner.complete_with_tools(messages=messages, tools=tools, model=model)
+        )
+
+    def _call_through(self, fn: Callable[[], Any]) -> Any:
+        """Shared open-check / failure-streak bookkeeping for both ``complete()`` and
+        ``complete_with_tools()`` — extracted so the two call shapes share exactly one circuit
+        instead of drifting into two independently-tracked ones."""
         with self._lock:
             if self._opened_at is not None:
                 if self._clock() - self._opened_at < self.reset_timeout_seconds:
                     raise CircuitOpenError("provider circuit is open; failing fast")
                 # cooldown elapsed -> fall through as a half-open trial
         try:
-            result = self.inner.complete(system=system, user=user, model=model)
+            result = fn()
         except Exception:
             with self._lock:
                 self._failures += 1

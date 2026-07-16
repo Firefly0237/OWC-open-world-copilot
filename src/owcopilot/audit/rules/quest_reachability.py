@@ -1,3 +1,5 @@
+# 跨任务状态传播的全局可达性审计（IN-5 L2）。
+# 把各任务的状态前置/后置连成图做可达分析，抓『这一步永远触发不了』这类全局死锁。
 """Global cross-quest state-propagation reachability audit rule (IN-5 L2).
 
 Implements "global reachable-state fixpoint + conservative unsatisfiable-precondition detection"
@@ -261,6 +263,7 @@ def _precondition_satisfiable(precondition: str, rv: _ReachableValues) -> bool:
     """
     try:
         from ...logic.expr import parse_expr
+
         expr = parse_expr(precondition)
     except Exception:
         return True  # parse error: assume satisfiable (conservative)
@@ -297,6 +300,7 @@ def _expr_can_be_true(expr: Any, rv: _ReachableValues) -> bool:
             from ...logic.expr import BoolLit as BL
             from ...logic.expr import IntLit, StrLit
             from ...logic.expr import Ref as ExprRef
+
             if isinstance(expr.left, ExprRef) and isinstance(expr.right, (BL, IntLit, StrLit)):
                 return rv.can_satisfy_eq(expr.left.name, expr.right.value)
             if isinstance(expr.right, ExprRef) and isinstance(expr.left, (BL, IntLit, StrLit)):
@@ -340,6 +344,7 @@ def _expr_can_be_false(expr: Any, rv: _ReachableValues) -> bool:
 # Find a specific blocking atom for reporting
 # ---------------------------------------------------------------------------
 
+
 def _find_blocking_atom(
     quest_id: str,
     ctx: AuditContext,
@@ -370,6 +375,7 @@ def _find_permanently_false_atom(precondition: str, rv: _ReachableValues) -> str
     """Return a description of a specific atom that is permanently false, or None."""
     try:
         from ...logic.expr import parse_expr
+
         expr = parse_expr(precondition)
     except Exception:
         return None
@@ -400,14 +406,10 @@ def _find_false_atom_in_expr(expr: Any, rv: _ReachableValues) -> str | None:
         if expr.op == "==":
             if isinstance(expr.left, Ref) and isinstance(expr.right, (BoolLit, IntLit, StrLit)):
                 if not rv.can_satisfy_eq(expr.left.name, expr.right.value):
-                    return (
-                        f"'{expr.left.name} == {expr.right.value!r}' can never be satisfied"
-                    )
+                    return f"'{expr.left.name} == {expr.right.value!r}' can never be satisfied"
             elif isinstance(expr.right, Ref) and isinstance(expr.left, (BoolLit, IntLit, StrLit)):
                 if not rv.can_satisfy_eq(expr.right.name, expr.left.value):
-                    return (
-                        f"'{expr.right.name} == {expr.left.value!r}' can never be satisfied"
-                    )
+                    return f"'{expr.right.name} == {expr.left.value!r}' can never be satisfied"
         return None
 
     if isinstance(expr, BoolOp):

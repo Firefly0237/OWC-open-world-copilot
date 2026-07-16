@@ -1,3 +1,4 @@
+# shadow-apply 与 rollback 共用的 JSON Pointer 解析（~1→/、~0→~）。
 """JSON Pointer parsing shared by the shadow-apply and rollback patch primitives."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# v2 内容图索引包。
 """Graph index package for v2 content graphs."""
 
 from .index import ContentGraph, EdgeRef, build_content_graph, entity_ref, ref

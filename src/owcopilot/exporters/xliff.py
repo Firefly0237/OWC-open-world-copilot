@@ -1,3 +1,4 @@
+# 本地化导出为 XLIFF 1.2（专业互换标准）。
 """Localization export to **XLIFF 1.2** — the professional interchange standard.
 
 CAT tools, TMS systems and translation agencies all speak XLIFF; a localization CSV only carries a

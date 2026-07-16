@@ -1,3 +1,5 @@
+# 可插拔向量后端（一个 VectorSearchBackend 接口后面挂 fp32/int8/usearch-HNSW）。
+# 关键：按语料规模选后端——磁盘量化 + ANN 面向大语料，避免全量进内存暴力扫。
 """Pluggable vector-search backends behind one ``VectorSearchBackend`` interface.
 
 The retriever (``retrieval/vector.py``) talks to a backend, never to a concrete index. Two
@@ -5,29 +7,29 @@ backends ship here:
 
 * ``SqliteVecBackend`` — disk-resident ``vec0`` virtual table (the sqlite-vec extension). Vectors
   live on disk, KNN is a SQL query, and a changed row is a single ``DELETE``+``INSERT`` instead of
-  rebuilding an in-memory matrix. This is the scale win for long-narrative corpora (#1).
+  rebuilding an in-memory matrix. This is the scale win for long-narrative corpora.
 * ``NumpyMatrixBackend`` — the historical in-memory ``np.vstack`` matrix, preserved verbatim as a
   fallback. If the sqlite-vec extension cannot be imported/loaded (old environments, a Python build
   with ``enable_load_extension`` disabled), the retriever degrades to this backend with a guided
   log line rather than crashing.
 
-**Group 1 is fp32 (lossless).** Both backends store full-precision float32 vectors and produce
+**The fp32 backends (lossless).** Both backends store full-precision float32 vectors and produce
 **bit-identical** ``search``/``vector_for`` results for the same inputs: vectors are normalised on
 upsert, scores are the exact ``stored · query`` dot product, and ties break by ascending ``ref``
 (matching the numpy backend's stable argsort over ref-ordered rows). int8 quantisation and a real
-ANN backend are a *separate* layer (group 2) added here later without touching these classes.
+ANN backend are a *separate* layer added here later without touching these classes.
 
-**Group 2 G2-A is int8 + two-stage rerank (still effectively lossless).**
+**The int8 + two-stage rerank tier (still effectively lossless).**
 ``SqliteVecInt8Backend`` stores symmetric int8-quantised vectors in an ``INT8[dim]`` vec0 column
 (~4× smaller, ~3× faster scan than fp32) **and** keeps the exact fp32 vectors in a sidecar table.
 ``search`` runs a two stage: ① an int8 coarse KNN pulls ``k' = max(3*limit, 30)`` candidates, then
 ② those candidates' fp32 vectors are dot-producted against the fp32 query and re-ranked, returning
 the true top-``limit``. int8-only recall@10 is ~0.84; the fp32 rerank over a 3× candidate pool lifts
-it back to ~0.999 (verified on iid and clustered synthetic corpora, see ``P0_G2_RESEARCH.md`` §2).
+it back to ~0.999 (verified on iid and clustered synthetic corpora).
 ``vector_for`` returns the exact fp32 vector (from the sidecar), so hybrid reranking upstream stays
 fp32-exact. The backend is opt-in; the fp32 ``SqliteVecBackend`` remains the safe default.
 
-**Group 2 G2-B is the on-disk ANN tier (``UsearchBackend``).** For corpora large enough that even
+**The on-disk ANN tier (``UsearchBackend``).** For corpora large enough that even
 the int8 scan's O(N) latency dominates, ``UsearchBackend`` keeps a real usearch HNSW index in a
 ``.usearch`` file (sub-linear lookup, ~1ms/query at 30k, mmap/load-able without loading the whole
 corpus) and re-uses the same two-stage idea: an approximate coarse recall feeds an exact fp32
@@ -109,9 +111,7 @@ class VectorSearchBackend(Protocol):
         ...
 
 
-def _rank(
-    scored: list[tuple[str, float]], *, limit: int
-) -> list[tuple[str, float]]:
+def _rank(scored: list[tuple[str, float]], *, limit: int) -> list[tuple[str, float]]:
     """Order candidates exactly like the numpy backend: by score desc, ref asc on ties, then cut.
 
     The historical retriever did ``np.argsort(-scores, kind="stable")`` over rows loaded
@@ -197,9 +197,10 @@ def sqlite_vec_available() -> bool:
 def _vec0_is_partitioned(conn: sqlite3.Connection, table: str) -> bool | None:
     """Whether the existing vec0 ``table`` already has the scope PARTITION KEY columns.
 
-    Returns ``None`` when the table does not exist yet (a fresh DB). A legacy vec0 table built by
-    G2-A/B (pre-C1) has only ``ref``/``embedding``; the partitioned table additionally exposes
-    ``world_id``/``version`` columns, which is what this distinguishes."""
+    Returns ``None`` when the table does not exist yet (a fresh DB). A legacy vec0 table (built
+    before the ``world_id``/``version`` partition keys) has only ``ref``/``embedding``; the
+    partitioned table additionally exposes ``world_id``/``version`` columns, which is what this
+    distinguishes."""
     exists = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
     ).fetchone()
@@ -210,7 +211,7 @@ def _vec0_is_partitioned(conn: sqlite3.Connection, table: str) -> bool | None:
 
 
 def _drop_unpartitioned_vec0(conn: sqlite3.Connection, table: str) -> None:
-    """Drop a legacy (pre-C1, un-partitioned) vec0 ``table`` so it is recreated with PARTITION KEYs.
+    """Drop a legacy (un-partitioned) vec0 ``table`` so it is recreated with PARTITION KEYs.
 
     The vec0 index is a *derived* structure: the authoritative fp32 vectors live in the
     ``content_vectors`` / ``reference_vectors`` blob cache (which keeps its rows through the C1
@@ -237,6 +238,11 @@ def _plain_table_lacks_scope(conn: sqlite3.Connection, table: str) -> bool:
     return "world_id" not in cols
 
 
+#: sqlite-vec hard-caps a KNN ``k`` at 4096. The fp32 exact-scan backend clamps its candidate pull
+#: to this; larger corpora belong on the int8/HNSW tiers (which pull small candidate pools).
+_VEC0_MAX_K = 4096
+
+
 class SqliteVecBackend:
     """Disk-resident fp32 vector backend over a sqlite-vec ``vec0`` virtual table.
 
@@ -249,11 +255,11 @@ class SqliteVecBackend:
     the project DB alongside FTS5 and the ``content_vectors`` blob cache — one file, one transaction
     boundary.
 
-    **Scale-P0 G2-C C1 scope.** The vec0 table carries ``world_id``/``version`` as sqlite-vec
-    ``PARTITION KEY`` columns, and this backend instance is bound to one ``(world_id, version)``
-    scope: every upsert stamps that scope, and every search/vector_for/count is constrained to it.
-    The default ("default", "v1") makes a single-world project's index byte-for-byte equivalent to
-    the pre-scope index. C1 only partitions the store; cross-scope reads are C2."""
+    **Scope.** The vec0 table carries ``world_id``/``version`` as sqlite-vec ``PARTITION KEY``
+    columns, and this backend instance is bound to one ``(world_id, version)`` scope: every upsert
+    stamps that scope, and every search/vector_for/count is constrained to it. The default
+    ("default", "v1") makes a single-world project's index byte-for-byte equivalent to the
+    pre-scope index."""
 
     def __init__(
         self,
@@ -281,8 +287,8 @@ class SqliteVecBackend:
             import sqlite_vec
         except Exception as exc:  # pragma: no cover - environment-dependent
             raise SqliteVecError(
-                "sqlite-vec is not installed; install it (offline wheel under scratchpad/wheels) "
-                "to enable the disk-resident vector backend, or the retriever falls back to numpy."
+                "sqlite-vec is not installed; run `pip install sqlite-vec` to enable the "
+                "disk-resident vector backend, or the retriever falls back to the numpy backend."
             ) from exc
         try:
             conn.enable_load_extension(True)
@@ -352,17 +358,21 @@ class SqliteVecBackend:
         count = self._count()
         if count == 0:
             return []
-        # vec0 KNN gives candidates in cosine (==L2 for unit vectors) order. Pull every row in this
-        # scope partition (vec0 is an exact brute-force scan, so this is the same O(N) it already
-        # does over the partition) and recompute the exact dot product from the stored fp32 blobs.
-        # That makes scores bit-identical to the numpy backend and lets _rank apply the identical
-        # (score desc, ref asc) ordering — so boundary ties and the retriever's `score > 0` filter
-        # cannot diverge.
+        # vec0 KNN gives candidates in cosine (==L2 for unit vectors) order. Pull the nearest
+        # min(count, _VEC0_MAX_K) rows in this scope partition and recompute the exact dot product
+        # from the stored fp32 blobs — scores stay bit-identical to the numpy backend and _rank
+        # applies the identical (score desc, ref asc) ordering, so ties and the retriever's
+        # `score > 0` filter cannot diverge. The _VEC0_MAX_K clamp is required: sqlite-vec caps a
+        # KNN `k` at 4096, so an unclamped `k = count` raises OperationalError once a corpus passes
+        # 4096 rows. Because L2 order == cosine order for unit vectors, the true nearest `limit`
+        # (limit ≪ 4096 in every retrieval path) are always inside the first 4096, so the clamp is
+        # exact for practical limits — it is the auto-tier's job to move a large corpus onto the
+        # int8/HNSW backends (small-k candidate pools) before the exact scan stops being ideal.
         qblob = np.ascontiguousarray(q, dtype=np.float32).tobytes()
         rows = self._conn.execute(
             f"SELECT ref, embedding FROM {self._table} "  # noqa: S608 - validated table name
             f"WHERE world_id = ? AND version = ? AND embedding MATCH ? AND k = ? ORDER BY distance",
-            (self._world_id, self._version, qblob, count),
+            (self._world_id, self._version, qblob, min(count, _VEC0_MAX_K)),
         ).fetchall()
         scored: list[tuple[str, float]] = []
         for row in rows:
@@ -392,7 +402,7 @@ class SqliteVecBackend:
 
 # Coarse-recall floor for the int8 two-stage search: even at a tiny ``limit`` the int8 stage pulls
 # at least this many candidates so the fp32 rerank has a real pool to recover precision from.
-# 3*limit (the multiplier proven in P0_G2_RESEARCH §2) takes over once it exceeds this floor.
+# 3*limit (the empirically tuned multiplier) takes over once it exceeds this floor.
 _INT8_COARSE_FLOOR = 30
 _INT8_COARSE_MULTIPLIER = 3
 
@@ -416,7 +426,7 @@ class SqliteVecInt8Backend:
     Quantised int8 KNN needs the query wrapped in the ``vec_int8(?)`` constructor (sqlite-vec
     rejects a raw float32 blob against an ``INT8`` column); the rerank uses the fp32 query.
 
-    **Scale-P0 G2-C C1 scope.** The int8 vec0 table carries ``world_id``/``version`` PARTITION KEY
+    **Scope.** The int8 vec0 table carries ``world_id``/``version`` PARTITION KEY
     columns and the fp32 rerank sidecar keys on ``(world_id, version, ref)``; the instance is bound
     to one scope. The default ("default", "v1") leaves a single-world index equivalent to the
     pre-scope one."""
@@ -450,7 +460,7 @@ class SqliteVecInt8Backend:
             f"ref TEXT PRIMARY KEY, embedding INT8[{self._dim}])"
         )
         # fp32 rerank source: the exact unit vectors, keyed by (scope, ref) so the same ref can
-        # live in distinct scopes. A legacy pre-C1 sidecar (PK = ref only) is dropped and rebuilt
+        # live in distinct scopes. A legacy sidecar (PK = ref only) is dropped and rebuilt
         # from the blob cache, the same derived-index reasoning as the vec0 table.
         if _plain_table_lacks_scope(self._conn, self._fp32_table):
             self._conn.execute(f"DROP TABLE IF EXISTS {self._fp32_table}")  # noqa: S608
@@ -568,10 +578,10 @@ class SqliteVecInt8Backend:
         self._conn.commit()
 
 
-# G2-B usearch HNSW tuning. **These are not the library defaults — the defaults are a recall trap.**
+# usearch HNSW tuning. **These are not the library defaults — the defaults are a recall trap.**
 # usearch ships connectivity=16 / expansion_search=64, which on a 30k clustered corpus (dim=1024,
-# spread=0.35) measured only recall@10 ≈ 0.13 — reproduced here, matching the 0.12 a raw probe saw
-# in P0_G2_RESEARCH §3. connectivity=32 / expansion_add=200 fix the graph quality.
+# spread=0.35) measured only recall@10 ≈ 0.13 — reproduced here, matching a raw probe's 0.12.
+# connectivity=32 / expansion_add=200 fix the graph quality.
 #
 # expansion_search is the one knob that actually bounds query-time recall: a wider search beam
 # surfaces more of the true neighbours, and — crucially — the two-stage fp32 rerank below can only
@@ -634,7 +644,7 @@ def _ref_to_key(ref: str) -> int:
 class UsearchBackend:
     """On-disk **usearch HNSW** ANN backend with a two-stage (ANN coarse → fp32 rerank) search.
 
-    The large-N tier of the scale work (G2-B). Where ``SqliteVecBackend`` /
+    The large-N tier of the scale work. Where ``SqliteVecBackend`` /
     ``SqliteVecInt8Backend`` do an exact O(N) scan inside SQLite, this does a *sub-linear* HNSW
     lookup (~1ms/query at 30k vs ~80–420ms for a brute scan) by keeping a real approximate index in
     a ``.usearch`` file, mmap- or load-able without pulling the whole corpus into RAM. It is meant
@@ -678,15 +688,15 @@ class UsearchBackend:
             from usearch.index import Index
         except Exception as exc:  # pragma: no cover - environment-dependent
             raise UsearchError(
-                "usearch is not installed; install it (offline wheel under scratchpad/wheels2) to "
-                "enable the on-disk ANN backend, or the retriever falls back to sqlite-vec."
+                "usearch is not installed; run `pip install usearch` to enable the on-disk ANN "
+                "backend, or the retriever falls back to the sqlite-vec backend."
             ) from exc
         self._Index = Index
         self._conn = conn
         self._dim = int(dim)
         self._fp32_table = f"{table}_fp32"
         self._keymap_table = f"{table}_keymap"
-        # Scale-P0 G2-C C1: one backend instance == one (world_id, version) scope. The fp32
+        # One backend instance == one (world_id, version) scope. The fp32
         # authority + keymap tables carry the scope columns and every read/write is constrained to
         # this scope; the .usearch file is per-scope (the store names it with the scope), so each
         # scope's HNSW is isolated. The default ("default", "v1") keeps a single-world index intact.
@@ -710,7 +720,7 @@ class UsearchBackend:
         )
 
     def _ensure_tables(self) -> None:
-        # fp32 authority: exact unit vectors, keyed by (scope, ref). Legacy pre-C1 tables (PK = ref
+        # fp32 authority: exact unit vectors, keyed by (scope, ref). Legacy tables (PK = ref
         # / ref UNIQUE) are dropped and rebuilt — they are derived from the blob cache the store
         # backfills, so a one-time rebuild loses no canonical data.
         if _plain_table_lacks_scope(self._conn, self._fp32_table):
@@ -788,9 +798,9 @@ class UsearchBackend:
         ).fetchall()
         if rows:
             keys = np.fromiter((int(r[0]) for r in rows), dtype=np.uint64, count=len(rows))
-            vecs = np.vstack(
-                [np.frombuffer(bytes(r[1]), dtype=np.float32) for r in rows]
-            ).astype(np.float32)
+            vecs = np.vstack([np.frombuffer(bytes(r[1]), dtype=np.float32) for r in rows]).astype(
+                np.float32
+            )
             index.add(keys, vecs)
         self._persist(index)
         return index

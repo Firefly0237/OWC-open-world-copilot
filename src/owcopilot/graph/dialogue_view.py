@@ -1,3 +1,4 @@
+# 对话树流程视图：把分支 DialogueTree 布局成节点图。
 """Dialogue-tree flow view: turn a branching ``DialogueTree`` into a laid-out node graph.
 
 We already generate dialogue trees (nodes wired by choices/next links) but only ever showed counts.

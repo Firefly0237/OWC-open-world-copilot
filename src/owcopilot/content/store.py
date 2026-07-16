@@ -1,3 +1,4 @@
+# 文件真源的内容存储（读写 canon 的底层）。
 """File-backed content store.
 
 The files are the source of truth. SQLite indexes and audit tables come later and must be
@@ -32,7 +33,7 @@ from .normalize import _FORBIDDEN_ID_CHARS, _validate_id_chars
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
-# Scale-P0 G2-C C3a: the baseline version is this store's root tree; derived versions live under
+# The baseline version is this store's root tree; derived versions live under
 # ``root/versions/<version>/``. ``v1`` matches the default scope, so ``load_scoped(version="v1")``
 # with no ``versions/`` dir is byte-identical to ``load()`` (INV-1).
 _BASELINE_VERSION = "v1"
@@ -60,10 +61,10 @@ class ContentStore:
     def _load_bundle_from(self, root: Path) -> ContentBundle:
         """Load a full ``ContentBundle`` from an arbitrary content-root directory.
 
-        Scale-P0 G2-C C3a: factored out of ``load()`` so version overlays can load the baseline
-        tree and each derived version's override directory through the same code path. Called with
-        ``self.root`` for the baseline; with ``self.root / "versions" / <version>`` for an override
-        layer (see ``load_scoped``). Behaviour for ``self.root`` is identical to pre-C3 ``load``."""
+        Factored out of ``load()`` so version overlays can load the baseline tree and each derived
+        version's override directory through the same code path. Called with ``self.root`` for the
+        baseline; with ``self.root / "versions" / <version>`` for an override layer (see
+        ``load_scoped``). Behaviour for ``self.root`` is identical to a plain ``load``."""
         bundle = ContentBundle()
         for entity in self._load_json_dir(root / "world" / "entities", Entity):
             bundle.entities[entity.id] = entity
@@ -87,7 +88,7 @@ class ContentStore:
             bundle.style_guides[style.id] = style
         return bundle
 
-    # -- Scale-P0 G2-C C3a: version overlay (copy-on-write inheritance) --------------------------
+    # -- Version overlay (copy-on-write inheritance) ---------------------------------------------
 
     def load_scoped(self, *, world_id: str = "default", version: str = "v1") -> ContentBundle:
         """Effective ``ContentBundle`` for a ``(world_id, version)`` scope via copy-on-write.
@@ -98,7 +99,8 @@ class ContentStore:
         chain [baseline … target] and overlays each layer: the nearest version's definition of an id
         wins; a tombstone removes it. ``version == "v1"`` with no ``versions/`` dir returns exactly
         ``load()`` (INV-1 byte-identical). ``world_id`` is threaded for the (world, version) scope,
-        but multi-world content-root routing is C6 -- here the baseline is always this store's root.
+        but multi-world content-root routing lives in the workspace layer -- here the baseline is
+        always this store's root.
         """
         chain = self._resolve_version_chain(version)
         bundle = self._load_bundle_from(self._version_root(chain[0]))
@@ -141,7 +143,7 @@ class ContentStore:
     def common_base_version(self, a: str, b: str) -> str:
         """The merge base of two versions: the deepest version common to both base chains.
 
-        Scale-P0 G2-C C4c: each chain runs baseline -> ... -> version, so the common prefix's last
+        Each chain runs baseline -> ... -> version, so the common prefix's last
         element is the nearest shared ancestor (the baseline ``v1`` at worst)."""
         chain_a = self._resolve_version_chain(a)
         chain_b = self._resolve_version_chain(b)
@@ -164,7 +166,18 @@ class ContentStore:
         self, base: ContentBundle, overlay: ContentBundle, tombstones: set[str]
     ) -> None:
         """Overlay ``overlay`` onto ``base`` in place: override id-keyed objects, union relations,
-        then remove tombstoned ``"kind:id"`` entries. (Relation removal is a later refinement.)"""
+        then remove tombstoned entries.
+
+        Two tombstone shapes share the ``tombstones`` set:
+
+        * ``"kind:id"`` for the id-keyed collections (``entity:npc_x`` …) — pop from the collection.
+        * ``"relation:<source>:<kind>:<target>"`` (:func:`_relation_tombstone`) — drop any relation
+          whose ``(source, kind, target)`` identity matches, closing the gap where a relation, once
+          in a base version, could never be removed by a derived version (the collections had
+          whiteout tombstones; relations were union-only).
+
+        Tombstones are applied AFTER the update/extend, so a tombstone wins over a same-layer add —
+        identical time-ordering to the id-keyed path (``update`` then ``pop``)."""
         base.entities.update(overlay.entities)
         base.quests.update(overlay.quests)
         base.regions.update(overlay.regions)
@@ -190,11 +203,19 @@ class ContentStore:
             "style_guide": base.style_guides,
             "quest_event_ref": base.quest_event_refs,
         }
-        for entry in tombstones:
+        relation_tombstones = {t for t in tombstones if t.startswith("relation:")}
+        for entry in tombstones - relation_tombstones:
             kind, _, oid = entry.partition(":")
             coll = collections.get(kind)
             if coll is not None:
                 coll.pop(oid, None)
+        # Whiteout matched relations by regenerating each surviving relation's identity key and
+        # comparing (never parsing the string back), so a colon inside a relation kind can never be
+        # mis-split — the same generate-and-compare shape as the id-keyed pop above.
+        if relation_tombstones:
+            base.relations = [
+                r for r in base.relations if _relation_tombstone(r) not in relation_tombstones
+            ]
 
     def create_version(self, version: str, *, base_version: str = _BASELINE_VERSION) -> None:
         """Branch a derived ``version`` from ``base_version`` (copy-on-write: no content copied).
@@ -229,8 +250,9 @@ class ContentStore:
         writes to ``versions/<version>/`` only objects that differ from / are new vs its resolved
         base, plus a ``tombstones.json`` for base objects the bundle drops -- so an unchanged object
         is never duplicated into the override, and ``load_scoped(version=version)`` round-trips the
-        saved bundle. (Removing a *relation* present in the base is not yet supported; relations
-        union -- a later refinement, matching the overlay.)"""
+        saved bundle. Dropping a *relation* present in the base is a whiteout tombstone too
+        (``relation:<source>:<kind>:<target>``, keyed on the relation identity triple), so relations
+        are no longer union-only; a base relation absent from the bundle is removed on reload."""
         if version == _BASELINE_VERSION:
             self.save(bundle)
             return
@@ -248,7 +270,8 @@ class ContentStore:
         self, bundle: ContentBundle, base: ContentBundle
     ) -> tuple[ContentBundle, list[str]]:
         """Copy-on-write diff of ``bundle`` vs ``base``: a bundle of only the overridden/new
-        objects, and the ``"kind:id"`` tombstones for base objects ``bundle`` drops."""
+        objects, and the tombstones for what ``bundle`` drops -- ``"kind:id"`` for id-keyed objects
+        and ``relation:<source>:<kind>:<target>`` for dropped relations."""
         diff = ContentBundle()
         tombstones: list[str] = []
         dict_kinds = (
@@ -270,6 +293,19 @@ class ContentStore:
             getattr(diff, attr).update(override)
             tombstones += [f"{kind}:{oid}" for oid in base_coll if oid not in current]
         diff.relations = [r for r in bundle.relations if r not in base.relations]
+        # A relation the bundle dropped vs its base becomes a whiteout tombstone so the derived
+        # version can actually remove it (relations were union-only before). Identity is the
+        # ``(source, kind, target)`` triple — the same key every dedup/removal site in the codebase
+        # uses (normalize._derive_relations, worldgen._dedupe_relations, remove_relation_action):
+        # exact string match, no case-fold / no reordering. Deduped so a base with duplicate triples
+        # emits one tombstone.
+        current_triples = {(r.source, r.kind, r.target) for r in bundle.relations}
+        dropped_relations = {
+            _relation_tombstone(r)
+            for r in base.relations
+            if (r.source, r.kind, r.target) not in current_triples
+        }
+        tombstones += sorted(dropped_relations)
         return diff, tombstones
 
     def save(self, bundle: ContentBundle) -> None:
@@ -283,8 +319,8 @@ class ContentStore:
     def _write_bundle_to(self, root: Path, bundle: ContentBundle) -> None:
         """Write a full ``ContentBundle`` to an arbitrary content root (baseline or a version dir).
 
-        Scale-P0 G2-C C3b: factored out of ``save`` so ``save_scoped`` can write a version's
-        override tree through the same writers. For ``self.root`` this is the pre-C3 ``save``."""
+        Factored out of ``save`` so ``save_scoped`` can write a version's override tree through the
+        same writers. For ``self.root`` this is a plain, un-scoped ``save``."""
         self._write_json_dir(root / "world" / "entities", bundle.entities)
         self._write_relations(root, bundle.relations)
         self._write_quest_event_refs(root, bundle.quest_event_refs)
@@ -334,11 +370,13 @@ class ContentStore:
             return []
 
         def parse(text: str) -> list[Relation]:
-            return [
-                Relation.model_validate_json(raw) for raw in text.splitlines() if raw.strip()
-            ]
+            return [Relation.model_validate_json(raw) for raw in text.splitlines() if raw.strip()]
 
-        return self._read_parsed(path, parse)
+        # Copy: the cache holds the parsed list itself, and this one is assigned to
+        # ``bundle.relations`` verbatim — handing out the cached object would let an in-place
+        # ``bundle.relations.append(...)`` pollute the cache, so a later ``save_scoped`` reload
+        # sees the new relation already "in base" and emits an empty diff (real data loss).
+        return list(self._read_parsed(path, parse))
 
     def _load_quest_event_refs(self, root: Path) -> dict[str, QuestEventReference]:
         path = root / "quests" / "event_refs.jsonl"
@@ -353,7 +391,9 @@ class ContentStore:
                     refs[ref.id] = ref
             return refs
 
-        return self._read_parsed(path, parse)
+        # Copy for the same reason as ``_load_relations``: this dict is assigned to
+        # ``bundle.quest_event_refs`` verbatim, so the cached object must never be handed out.
+        return dict(self._read_parsed(path, parse))
 
     def _load_style_guides(self, root: Path) -> list[StyleGuide]:
         """Full-fidelity JSON is canonical; an old body-only ``style_guide.md`` still loads (so
@@ -384,9 +424,7 @@ class ContentStore:
                 return [Term.model_validate(item) for item in data]
             if isinstance(data, dict):
                 return [
-                    Term.model_validate(item)
-                    for item in data.values()
-                    if isinstance(item, dict)
+                    Term.model_validate(item) for item in data.values() if isinstance(item, dict)
                 ]
             return []
 
@@ -462,6 +500,16 @@ class ContentStore:
     def _write_json(self, path: Path, model: BaseModel) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_json(model.model_dump(mode="json", exclude_none=True)), encoding="utf-8")
+
+
+def _relation_tombstone(relation: Relation) -> str:
+    """Whiteout key for a relation: ``relation:<source>:<kind>:<target>``.
+
+    ``partition(":")`` in :meth:`ContentStore._apply_overlay` reads the leading ``"relation"`` as
+    the collection tag (no id-keyed collection is named ``relation``, so it never collides). Source
+    and target are object ids, which forbid ``:`` (``_FORBIDDEN_ID_CHARS``), and the key is only
+    ever regenerated and compared — never parsed back — so the identity round-trips exactly."""
+    return f"relation:{relation.source}:{relation.kind}:{relation.target}"
 
 
 def _json(value: Any) -> str:

@@ -1,3 +1,4 @@
+# 多智能体系统：Orchestrator-Worker + SQLite 黑板。
 """OWCopilot Multi-Agent System — Anthropic Orchestrator-Worker + SQLite Blackboard.
 
 Provides a runtime multi-agent system where:
@@ -9,7 +10,7 @@ Provides a runtime multi-agent system where:
 Usage::
 
     from owcopilot.multi_agent import MultiAgentSession
-    from owcopilot.core.skills import default_skill_registry
+    from owcopilot.skills import default_skill_registry
     from owcopilot.llm.gateway import LLMGateway
     from owcopilot.fakes import MockProvider
 
@@ -21,7 +22,13 @@ Usage::
 """
 
 from .blackboard import AgentBlackboard
-from .messages import AgentMessage, TaskAssignPayload, TaskResultPayload, VerifyResultPayload
+from .messages import (
+    AgentMessage,
+    ReflectionPayload,
+    TaskAssignPayload,
+    TaskResultPayload,
+    VerifyResultPayload,
+)
 from .orchestrator import MultiAgentReport, OrchestratorAgent
 from .session import MultiAgentSession
 from .verifier import VerifierAgent
@@ -34,6 +41,7 @@ __all__ = [
     "MultiAgentReport",
     "MultiAgentSession",
     "OrchestratorAgent",
+    "ReflectionPayload",
     "RepairWorker",
     "TaskAssignPayload",
     "TaskResultPayload",

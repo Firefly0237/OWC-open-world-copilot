@@ -1,3 +1,4 @@
+# 提炼草稿的源忠实性检查（RAGAS/DeepEval 式，两档）。
 """Source-faithfulness checks for extraction drafts (RAGAS/DeepEval-style, two tiers).
 
 The original check only asked "does this *name* appear in the source?". That passes any RELATION

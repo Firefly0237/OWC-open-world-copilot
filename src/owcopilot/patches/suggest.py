@@ -1,3 +1,6 @@
+# 补丁建议流程：问题 → 候选补丁 → shadow 应用重审 → 排序提议。
+# 纪律：确定性 fixers 先跑且免费；LLM（若给网关）只加候选、不做决定；每个候选都在 shadow 副本重审，
+#   会引入新错误的一律丢弃。
 """Patch suggestion: issue -> candidate patches -> shadow validation -> ranked proposals.
 
 The discipline is the same as everywhere else in v2: deterministic fixers run first and are free;
@@ -23,9 +26,14 @@ from ..retrieval.context_pack import ContextPackBuilder
 from .fixers import bundle_pointer_for_ref, deterministic_candidates
 from .models import PatchCandidate
 from .parser import parse_patch_candidates
+from .search import CandidateProvider
 from .shadow import apply_patch_shadow
 
 _MAX_RAW_CANDIDATES = 8
+
+# Marker appended to a candidate's rationale when the LLM proposer budget is spent and the provider
+# falls back to the deterministic fixers — makes the bounded degradation visible downstream.
+_BUDGET_EXHAUSTED_NOTE = "budget-exhausted"
 
 
 class RankedCandidate(BaseModel):
@@ -73,7 +81,7 @@ class PatchSuggestService:
         if self.gateway is not None:
             result.used_llm = True
             llm_candidates, context_refs, parse_failed = self._llm_candidates(
-                issue, budget_tokens=budget_tokens
+                issue, self.bundle, budget_tokens=budget_tokens
             )
             result.context_refs = context_refs
             result.parse_failed = parse_failed
@@ -119,8 +127,54 @@ class PatchSuggestService:
         result.candidates = _dedupe(ranked)[:max_candidates]
         return result
 
+    def as_candidate_provider(
+        self, *, max_llm_calls: int, budget_tokens: int = 600
+    ) -> CandidateProvider:
+        """Expose the LLM proposer as a MCTS ``CandidateProvider`` (LATS — Zhou et al. 2024,
+        arXiv:2310.04406: an LM proposer that *widens* the search's move set).
+
+        Each call returns the deterministic fixers PLUS model-proposed candidates for the issue.
+        The shared move generator (:func:`owcopilot.patches.search.applicable_repair_moves`) then
+        shadow-validates and non-worsening-prunes every one, so the model path needs no new safety
+        code — a worsening or malformed model candidate is dropped exactly like any other.
+
+        Model cost is explicitly bounded LATS-style by two knobs: a hard ``max_llm_calls`` cap on
+        proposer calls, and a per-``(issue, bundle-state)`` cache so re-visiting the same MCTS state
+        never re-pays for a completion. Once the cap is spent the provider falls back to the
+        deterministic fixers, each marked ``budget-exhausted`` — an explicit, visible bound, never a
+        silent downgrade.
+        """
+        if self.gateway is None:
+            raise ValueError(
+                "as_candidate_provider needs a gateway: the LLM proposer widens the MCTS move set "
+                "with model candidates. Construct PatchSuggestService(gateway=...), or pass "
+                "deterministic_candidates directly for the $0 deterministic-only move set."
+            )
+        cache: dict[tuple[str, str], list[PatchCandidate]] = {}
+        calls_made = 0
+
+        def provide(issue: Issue, bundle: ContentBundle) -> list[PatchCandidate]:
+            nonlocal calls_made
+            key = (issue_fingerprint(issue), content_hash(bundle))
+            cached = cache.get(key)
+            if cached is not None:  # same MCTS state re-visited: reuse, never re-pay the model
+                return cached
+            deterministic = deterministic_candidates(issue, bundle)
+            if calls_made >= max_llm_calls:  # LATS budget spent: bounded fallback, marked visibly
+                result = _mark_budget_exhausted(deterministic)
+            else:
+                calls_made += 1
+                llm_candidates, _refs, _parse_failed = self._llm_candidates(
+                    issue, bundle, budget_tokens=budget_tokens
+                )
+                result = [*deterministic, *llm_candidates]
+            cache[key] = result
+            return result
+
+        return provide
+
     def _llm_candidates(
-        self, issue: Issue, *, budget_tokens: int
+        self, issue: Issue, bundle: ContentBundle, *, budget_tokens: int
     ) -> tuple[list[PatchCandidate], list[str], bool]:
         context_refs: list[str] = []
         context_lines: list[str] = []
@@ -132,11 +186,11 @@ class PatchSuggestService:
             context_lines = [f"- [{hit.ref}] {hit.title}: {hit.body}".strip() for hit in pack.hits]
         raw = self.gateway.complete(  # type: ignore[union-attr]  # guarded by caller
             task="patch_suggest",
-            system=_system_prompt(issue, self.bundle, context_lines),
+            system=_system_prompt(issue, bundle, context_lines),
             user=json.dumps(
                 {
                     "issue": issue.model_dump(mode="json", exclude_none=True),
-                    "target_object": _target_object(self.bundle, issue.target_ref),
+                    "target_object": _target_object(bundle, issue.target_ref),
                     "target_pointer": bundle_pointer_for_ref(issue.target_ref),
                 },
                 ensure_ascii=False,
@@ -161,6 +215,20 @@ class PatchSuggestService:
         return candidate.model_copy(
             update={"id": identifier, "issue_id": issue.id or issue_fingerprint(issue)}
         )
+
+
+def _mark_budget_exhausted(candidates: list[PatchCandidate]) -> list[PatchCandidate]:
+    """Tag deterministic fallback candidates when the LLM proposer budget is spent (ops unchanged,
+    only the rationale is annotated) so the bounded degradation is visible, not silent."""
+    marked: list[PatchCandidate] = []
+    for candidate in candidates:
+        rationale = (
+            f"{candidate.rationale} [{_BUDGET_EXHAUSTED_NOTE}]"
+            if candidate.rationale
+            else f"[{_BUDGET_EXHAUSTED_NOTE}]"
+        )
+        marked.append(candidate.model_copy(update={"rationale": rationale}))
+    return marked
 
 
 def _dedupe(ranked: list[RankedCandidate]) -> list[RankedCandidate]:

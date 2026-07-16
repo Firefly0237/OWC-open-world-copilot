@@ -1,3 +1,5 @@
+# 结构化补丁解析：只收 JSON，自然语言“修法”一律拒。但对模型真实会写的 op 拼写/路径形态
+#   （set 当 replace、缺前导斜杠、点路径）保持宽容。
 """Structured patch parser.
 
 Only structured JSON is accepted — natural-language "fixes" are rejected by design. Within that

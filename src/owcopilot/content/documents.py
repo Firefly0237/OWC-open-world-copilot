@@ -1,3 +1,4 @@
+# 二进制文档→纯文本（导入的文稿/参考）。
 """Binary document -> plain text for imported manuscripts and references.
 
 Planners hand us whatever they have: a .docx design doc, a .pdf novel, an .epub. These are all

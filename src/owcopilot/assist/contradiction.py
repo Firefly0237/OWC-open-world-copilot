@@ -1,3 +1,4 @@
+# canon 语义矛盾检测：批量找相互冲突的设定。
 """WS-M · Batch 2 — semantic contradiction detection over canon.
 
 The deterministic audit (WS-A + the 26 rules) catches *structural* problems — dangling refs, bad
@@ -257,6 +258,8 @@ class ContradictionDetector:
             task="contradiction_judge", system=_JUDGE_SYSTEM, user=f"PAIRS:\n{listing}"
         )
         results: list[tuple[int, str]] = []
+        # Kept off complete_structured: a batch judge — bad-index items are skipped per-item (not a
+        # whole-batch reask) and an unparsable batch degrades to empty, never raised.
         try:
             payload = extract_json_object(raw)
         except ValueError:

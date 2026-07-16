@@ -780,9 +780,7 @@ class TestQuestEventRefIdHardening:
             normalize_raw_objects([raw])
 
     def test_nul_byte_in_explicit_id_raises(self) -> None:
-        raw = _make_raw(
-            "quest_event_ref", {"id": "evt\x00ref", "quest_id": "q1", "event_id": "e1"}
-        )
+        raw = _make_raw("quest_event_ref", {"id": "evt\x00ref", "quest_id": "q1", "event_id": "e1"})
         with pytest.raises(ValueError, match="control character"):
             normalize_raw_objects([raw])
 
@@ -797,9 +795,7 @@ class TestQuestEventRefIdHardening:
     def test_explicit_id_with_colon_is_rejected(self) -> None:
         """A user-supplied id with a colon is rejected — only the *synthetic* default may
         carry the structural colon."""
-        raw = _make_raw(
-            "quest_event_ref", {"id": "a/b:c", "quest_id": "q1", "event_id": "e1"}
-        )
+        raw = _make_raw("quest_event_ref", {"id": "a/b:c", "quest_id": "q1", "event_id": "e1"})
         with pytest.raises(ValueError, match="forbidden character"):
             normalize_raw_objects([raw])
 
@@ -813,9 +809,7 @@ class TestQuestEventRefIdHardening:
         assert ":" in ref_id  # e.g. "q1:e1:mentions_event"
 
     def test_valid_explicit_id_passes(self) -> None:
-        raw = _make_raw(
-            "quest_event_ref", {"id": "ref_q1_e1", "quest_id": "q1", "event_id": "e1"}
-        )
+        raw = _make_raw("quest_event_ref", {"id": "ref_q1_e1", "quest_id": "q1", "event_id": "e1"})
         bundle = normalize_raw_objects([raw])
         assert "ref_q1_e1" in bundle.quest_event_refs
 
@@ -1033,9 +1027,7 @@ class TestStoreWriteBoundaryIdInvariant:
 
         # No file escaped the content root (no `escaped.json` two levels up, etc.).
         new_files = after - before
-        escapees = [
-            f for f in new_files if content_root.resolve() not in f.resolve().parents
-        ]
+        escapees = [f for f in new_files if content_root.resolve() not in f.resolve().parents]
         assert not escapees, f"files escaped content root: {escapees}"
 
     def test_backslash_id_blocked_at_save(self, tmp_path: Path) -> None:
@@ -1052,9 +1044,7 @@ class TestStoreWriteBoundaryIdInvariant:
         from owcopilot.content.store import ContentStore
 
         bundle = ContentBundle()
-        bundle.entities["npc_\x00null"] = Entity(
-            id="npc_\x00null", name="x", type=EntityType.NPC
-        )
+        bundle.entities["npc_\x00null"] = Entity(id="npc_\x00null", name="x", type=EntityType.NPC)
         with pytest.raises(ValueError, match="control character"):
             ContentStore(tmp_path / "content").save(bundle)
 
@@ -1064,9 +1054,7 @@ class TestStoreWriteBoundaryIdInvariant:
         from owcopilot.content.store import ContentStore
 
         bundle = ContentBundle()
-        bundle.entities["npc_aldric"] = Entity(
-            id="npc_aldric", name="Aldric", type=EntityType.NPC
-        )
+        bundle.entities["npc_aldric"] = Entity(id="npc_aldric", name="Aldric", type=EntityType.NPC)
         bundle.entities["npc_李白"] = Entity(id="npc_李白", name="李白", type=EntityType.NPC)
         store = ContentStore(tmp_path / "content")
         store.save(bundle)
@@ -1125,9 +1113,7 @@ class TestStoreWriteBoundaryIdInvariant:
         from owcopilot.content.store import ContentStore
         from owcopilot.trust.security import PathSecurityError
 
-        monkeypatch.setattr(
-            "owcopilot.content.store._validate_id_chars", lambda value, **_: value
-        )
+        monkeypatch.setattr("owcopilot.content.store._validate_id_chars", lambda value, **_: value)
         bundle = ContentBundle()
         # Final path is `<root>/world/entities/<id>.json` (3 levels under the root), so an
         # id needs `../../../../` to actually escape — fewer `..` stay inside the root.
@@ -1146,13 +1132,9 @@ class TestStoreWriteBoundaryIdInvariant:
         from owcopilot.content.models import ContentBundle, Entity, EntityType
         from owcopilot.content.store import ContentStore
 
-        monkeypatch.setattr(
-            "owcopilot.content.store._validate_id_chars", lambda value, **_: value
-        )
+        monkeypatch.setattr("owcopilot.content.store._validate_id_chars", lambda value, **_: value)
         bundle = ContentBundle()
-        bundle.entities["npc_aldric"] = Entity(
-            id="npc_aldric", name="Aldric", type=EntityType.NPC
-        )
+        bundle.entities["npc_aldric"] = Entity(id="npc_aldric", name="Aldric", type=EntityType.NPC)
         store = ContentStore(tmp_path / "content")
         store.save(bundle)  # must not raise
         assert "npc_aldric" in store.load().entities
@@ -1178,9 +1160,7 @@ class TestIndonesianIdColumnWarns:
     def test_id_column_with_other_locale_is_kept_structural(self, recwarn) -> None:
         """When real locale data exists, 'id' is the structural identifier (not a lost
         translation); the row still produces rows, so no silent-loss warning fires."""
-        raw = _make_raw(
-            "localized_text", {"text_key": "greeting", "en": "hello", "id": "halo"}
-        )
+        raw = _make_raw("localized_text", {"text_key": "greeting", "en": "hello", "id": "halo"})
         bundle = normalize_raw_objects([raw])
         # 'id' is never imported as a locale (the structural choice is unchanged).
         locales = {t.locale for t in bundle.localized_texts.values()}
@@ -1198,9 +1178,7 @@ class TestIndonesianIdColumnWarns:
         assert not any("structural field" in str(w.message) for w in recwarn)
 
     def test_clean_localized_text_does_not_warn(self, recwarn) -> None:
-        raw = _make_raw(
-            "localized_text", {"text_key": "k", "en": "hi", "zh": "你好"}
-        )
+        raw = _make_raw("localized_text", {"text_key": "k", "en": "hi", "zh": "你好"})
         bundle = normalize_raw_objects([raw])
         assert {t.locale for t in bundle.localized_texts.values()} == {"en", "zh"}
         assert len(recwarn) == 0
@@ -1214,26 +1192,20 @@ class TestIndonesianIdColumnWarns:
 
 class TestExplicitLocaleWhitelist:
     def test_unknown_explicit_locale_warns_but_keeps_value(self) -> None:
-        raw = _make_raw(
-            "localized_text", {"text_key": "k", "locale": "zz", "text": "x"}
-        )
+        raw = _make_raw("localized_text", {"text_key": "k", "locale": "zz", "text": "x"})
         with pytest.warns(UserWarning, match="not a recognized ISO 639-1"):
             bundle = normalize_raw_objects([raw])
         # Not silently dropped — the value is preserved.
         assert {t.locale for t in bundle.localized_texts.values()} == {"zz"}
 
     def test_garbage_explicit_locale_warns(self) -> None:
-        raw = _make_raw(
-            "localized_text", {"text_key": "k", "locale": "NOTALOCALE", "text": "x"}
-        )
+        raw = _make_raw("localized_text", {"text_key": "k", "locale": "NOTALOCALE", "text": "x"})
         with pytest.warns(UserWarning, match="not a recognized ISO 639-1"):
             normalize_raw_objects([raw])
 
     def test_region_form_locale_not_warned(self, recwarn) -> None:
         """zh-CN (with region + mixed case) is valid and must NOT warn."""
-        raw = _make_raw(
-            "localized_text", {"text_key": "k", "locale": "zh-CN", "text": "你好"}
-        )
+        raw = _make_raw("localized_text", {"text_key": "k", "locale": "zh-CN", "text": "你好"})
         bundle = normalize_raw_objects([raw])
         assert {t.locale for t in bundle.localized_texts.values()} == {"zh-CN"}
         assert len(recwarn) == 0
@@ -1251,16 +1223,12 @@ class TestExplicitLocaleWhitelist:
         assert len(recwarn) == 0
 
     def test_unknown_dialogue_locale_warns(self) -> None:
-        raw = _make_raw(
-            "dialogue", {"id": "d1", "text_key": "k", "locale": "zz", "text": "x"}
-        )
+        raw = _make_raw("dialogue", {"id": "d1", "text_key": "k", "locale": "zz", "text": "x"})
         with pytest.warns(UserWarning, match="not a recognized ISO 639-1"):
             bundle = normalize_raw_objects([raw])
         assert bundle.dialogues["d1"].locale == "zz"  # kept, not dropped
 
     def test_valid_dialogue_locale_not_warned(self, recwarn) -> None:
-        raw = _make_raw(
-            "dialogue", {"id": "d1", "text_key": "k", "locale": "ja", "text": "x"}
-        )
+        raw = _make_raw("dialogue", {"id": "d1", "text_key": "k", "locale": "ja", "text": "x"})
         normalize_raw_objects([raw])
         assert len(recwarn) == 0

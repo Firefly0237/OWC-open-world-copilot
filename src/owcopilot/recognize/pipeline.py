@@ -1,3 +1,4 @@
+# 把（可能人工改过的）ImportPlan 变成绑定 canon 的内容——但不自动落库。
 """Turn a (possibly human-edited) ImportPlan into canon-bound content — without auto-landing.
 
 Three pure steps the action layer composes with a project + review queue:
@@ -175,6 +176,8 @@ def _to_relation(proposed: ProposedRelation) -> Relation:
     metadata: dict[str, Any] = {"import_method": proposed.method}
     if proposed.evidence:
         metadata["evidence"] = proposed.evidence
+    if proposed.condition:
+        metadata["condition"] = proposed.condition  # DSL guard, e.g. an ink conditional choice
     if proposed.method == "llm":
         metadata["import_confidence"] = proposed.confidence
     return Relation(

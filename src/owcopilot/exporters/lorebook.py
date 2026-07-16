@@ -1,3 +1,4 @@
+# lore-book 导出：人类可读的世界纲要（Markdown + 最小 .docx）。
 """Lore-book export: a human-readable world compendium (Markdown + minimal .docx).
 
 For the broad creator audience (novelists, GMs, hobbyist worldbuilders) the deliverable is

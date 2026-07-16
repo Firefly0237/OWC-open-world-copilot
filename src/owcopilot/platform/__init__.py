@@ -1,9 +1,10 @@
+# 多租户平台控制面（WS-P）：租户/鉴权/RBAC/隔离/审计。
 """Multi-tenant platform control plane (WS-P): tenancy, auth, RBAC, isolation, audit.
 
 The canon stays file-backed; this layer governs who may touch which tenant's worlds. The X-API-Key
 loopback resolves to a single-tenant LOCAL owner so the pre-SaaS local/CLI/offline flows are
-unchanged. Production swaps the SQLite control-plane store for Postgres and the HS256 tokens for an
-OIDC provider — same contracts.
+unchanged. The control-plane store is SQLite and the tokens are HS256; the contracts would admit a
+heavier store or an OIDC provider, but neither is implemented.
 """
 
 from __future__ import annotations

@@ -97,6 +97,28 @@ def test_detection_rate_denominator_is_disclosed_as_a_rule_subset(tmp_path: Path
     assert detection_check.details["rules_covered"] == f"{report.metrics['rules_covered']}/{total}"
 
 
+def test_blind_spot_negative_control_pairs_specificity_with_detection(tmp_path: Path) -> None:
+    """The positive control (detection_rate) and the mutation-testing NEGATIVE control
+    (blind_spot_rate) must both surface: the audit CATCHES the faults it encodes AND stays SILENT on
+    the six narrative-semantic defects it provably cannot express — answering "target-painting"."""
+    report = run_acceptance_evaluation(tmp_path)
+    by_name = {check.name: check for check in report.checks}
+
+    assert "blind_spot_negative_control" in by_name
+    check = by_name["blind_spot_negative_control"]
+    assert check.passed
+    # both numbers coexist: sensitivity (positive) and specificity (negative)
+    assert report.metrics["detection_rate"] >= 0.85
+    assert report.metrics["blind_spot_rate"] == 1.0
+    assert report.metrics["blind_spots_injected"] == 6
+    assert len(report.metrics["blind_spot_categories"]) == 6
+    # a valid negative control: the mutated narrative world produced zero NEW structural issues
+    assert check.details["new_issues"] == []
+    assert check.details["caught"] == []
+    assert len(check.details["survived"]) == 6
+    assert report.passed
+
+
 def test_cli_eval_acceptance(tmp_path: Path, capsys) -> None:
     code = main(["eval-acceptance", "--workspace", str(tmp_path / "ws")])
     assert code == 0

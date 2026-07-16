@@ -4,7 +4,7 @@ import pytest
 
 from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest
 from owcopilot.content.store import ContentStore
-from owcopilot.core.skills import (
+from owcopilot.skills import (
     CostTier,
     SideEffect,
     Skill,
@@ -99,6 +99,7 @@ def test_default_registry_exposes_safe_tool_surface(tmp_path) -> None:
         "impact_of",
         "propose_fix",
         "quality_harness",
+        "read_observation",
     }
     # Whole action space is deterministic + (read-only | proposes a patch) — never a canon write.
     for skill in registry:

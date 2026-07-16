@@ -426,8 +426,11 @@ onMounted(async () => {
 }
 .value {
   color: var(--ow-gold-bright);
-  font-size: 1.7rem;
+  font-size: 1.8rem;
   line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  /* HSR HUD-numeral readout: a faint gold bloom so the figure reads like a station display */
+  text-shadow: 0 0 12px rgba(240, 210, 138, 0.25);
 }
 
 /* skeleton shimmer while the archive loads */

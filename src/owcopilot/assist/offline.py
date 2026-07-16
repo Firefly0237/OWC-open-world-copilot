@@ -1,3 +1,4 @@
+# assist 任务的离线确定性 provider。
 """Deterministic offline providers for assist tasks.
 
 Like `qa.offline.OfflineQAProvider`, these are not language models: they emit minimal structured
@@ -223,3 +224,13 @@ def _voice_name(system: str) -> str:
 def _topic(user: str) -> str:
     match = re.search(r"Topic:\s*(.+)", user)
     return match.group(1).strip() if match else user.strip()
+
+
+class OfflineEngineExplainProvider:
+    """Deterministic stand-in for the engine-issue narrative polish — a $0 dry-run that proves the
+    prompt assembly + spotlighting path without a model. The real diagnosis is deterministic and
+    lives upstream (assist/engine_explain.py); this double only supplies a fixed narrative."""
+
+    def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
+        text = "【离线解说替身】共同根因与逐条下一步动作见结构化诊断清单（issues 字段）。"
+        return text, max(1, (len(system) + len(user)) // 4), max(1, len(text) // 4)

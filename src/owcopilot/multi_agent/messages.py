@@ -1,3 +1,4 @@
+# AgentMessage 协议：流经黑板的不可变信封（谁→谁、什么类型、什么载荷）。
 """AgentMessage protocol — the immutable envelope that flows through the SQLite blackboard.
 
 Every message has a stable ``id``, carries ``from_agent``/``to_agent`` routing fields, and holds a
@@ -19,11 +20,14 @@ from typing import Any, Literal
 
 # The closed set of message types in the orchestrator-worker protocol.
 MsgType = Literal[
-    "task_assign",   # orchestrator → worker: execute a subtask
-    "task_result",   # worker → blackboard: subtask output
+    "task_assign",  # orchestrator → worker: execute a subtask
+    "task_result",  # worker → blackboard: subtask output
     "verify_request",  # orchestrator → verifier: validate a task_result
-    "verify_result",   # verifier → blackboard: pass/fail verdict
-    "synthesize",    # orchestrator: final report after all workers + verifier done
+    "verify_result",  # verifier → blackboard: pass/fail verdict
+    "synthesize",  # orchestrator: final report after all workers + verifier done
+    # T2 Reflexion (Shinn et al., 2023): the Self-Reflection trail for one bounded retry —
+    # a verbal reflection distilled from a failing verifier verdict and fed back to the worker.
+    "reflection",
 ]
 
 
@@ -35,15 +39,13 @@ class AgentMessage:
     after insertion (the blackboard enforces this — only ``status`` is updated in-place).
     """
 
-    session_id: str          # ties all messages in one multi-agent run together
-    from_agent: str          # agent_id of the sender
-    to_agent: str            # agent_id of the target, or "broadcast"
+    session_id: str  # ties all messages in one multi-agent run together
+    from_agent: str  # agent_id of the sender
+    to_agent: str  # agent_id of the target, or "broadcast"
     msg_type: MsgType
     payload: dict[str, Any]  # structured content; frozen after first write
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    created_at: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
-    )
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     status: str = "pending"  # pending → claimed → done | failed
 
     def payload_json(self) -> str:
@@ -82,8 +84,8 @@ class TaskAssignPayload:
     narrow subtask and forgets global constraints.
     """
 
-    original_goal: str         # the high-level goal passed to the orchestrator
-    subtask: str               # this worker's specific job
+    original_goal: str  # the high-level goal passed to the orchestrator
+    subtask: str  # this worker's specific job
     allowed_skills: list[str]  # tool whitelist for minimal attack surface
     max_steps: int = 4
 
@@ -109,16 +111,16 @@ class TaskAssignPayload:
 class TaskResultPayload:
     """Payload for a task_result message (worker → blackboard)."""
 
-    task_msg_id: str       # references the task_assign this answers
-    worker_role: str       # "diagnosis" | "repair_proposal" (for human readability)
-    final_answer: str      # agent's Final Answer text
+    task_msg_id: str  # references the task_assign this answers
+    worker_role: str  # "diagnosis" | "repair_proposal" (for human readability)
+    final_answer: str  # agent's Final Answer text
     # The worker's STRUCTURED claim of how many open errors it found, taken from the real
     # integer in its own ``audit_project`` tool-call result (NOT a substring count of its
     # prose).  ``None`` means the worker made no verifiable audit-backed claim (it never
     # invoked ``audit_project``) — an honest "no claim" the verifier must not read as 0.
     open_errors: int | None
-    stop_reason: str       # "finished" | "max_steps"
-    step_count: int        # number of ReAct steps taken
+    stop_reason: str  # "finished" | "max_steps"
+    step_count: int  # number of ReAct steps taken
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -147,10 +149,10 @@ class TaskResultPayload:
 class VerifyResultPayload:
     """Payload for a verify_result message (verifier → blackboard)."""
 
-    target_msg_id: str              # the task_result message id that was verified
+    target_msg_id: str  # the task_result message id that was verified
     verdict: Literal["pass", "fail", "needs_more"]
-    rationale: str                  # human-readable explanation
-    open_errors_verified: int       # what the verifier's independent audit found
+    rationale: str  # human-readable explanation
+    open_errors_verified: int  # what the verifier's independent audit found
     # What the worker asserted (for delta analysis).  ``None`` means the worker made no
     # verifiable error-count claim — the verifier reports ground truth without a delta.
     worker_claimed_errors: int | None
@@ -172,4 +174,53 @@ class VerifyResultPayload:
             rationale=d["rationale"],
             open_errors_verified=d.get("open_errors_verified", 0),
             worker_claimed_errors=d.get("worker_claimed_errors"),
+        )
+
+
+@dataclass
+class ReflectionPayload:
+    """Payload for a ``reflection`` message — the T2 Reflexion (Shinn et al., 2023) trail.
+
+    Records ONE bounded retry driven by a failing verifier verdict: the verdict that triggered
+    it (``trigger_verdict``), the verifier rationale fed into Self-Reflection (``feedback``), the
+    distilled verbal reflection injected into the retry actor (``reflection``), and the ids of the
+    retry's own task_result / verify_result so the trail is fully auditable on the blackboard.
+
+    ``retry_task_result_id`` / ``retry_verify_result_id`` are ``None`` and ``note`` is set when the
+    retry could not run (missing task_assign, a blank Self-Reflection, or a retry crash) — the
+    aborted attempt is recorded, never silently swallowed (no-silent-downgrade policy).
+    """
+
+    target_msg_id: str  # the flagged task_result the retry answers
+    worker: str  # the worker agent_id that re-ran (the Reflexion Actor)
+    trigger_verdict: str  # "fail" | "needs_more" that triggered the retry
+    feedback: str  # the verifier rationale distilled into the reflection
+    reflection: str  # the distilled verbal reflection ("" when the retry aborted)
+    retry_task_result_id: str | None = None  # id of the retry's task_result (None if aborted)
+    retry_verify_result_id: str | None = None  # id of the retry's verify_result (None if aborted)
+    note: str = ""  # abort/error reason when the retry could not complete
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "target_msg_id": self.target_msg_id,
+            "worker": self.worker,
+            "trigger_verdict": self.trigger_verdict,
+            "feedback": self.feedback,
+            "reflection": self.reflection,
+            "retry_task_result_id": self.retry_task_result_id,
+            "retry_verify_result_id": self.retry_verify_result_id,
+            "note": self.note,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ReflectionPayload:
+        return cls(
+            target_msg_id=d["target_msg_id"],
+            worker=d["worker"],
+            trigger_verdict=d["trigger_verdict"],
+            feedback=d["feedback"],
+            reflection=d["reflection"],
+            retry_task_result_id=d.get("retry_task_result_id"),
+            retry_verify_result_id=d.get("retry_verify_result_id"),
+            note=d.get("note", ""),
         )

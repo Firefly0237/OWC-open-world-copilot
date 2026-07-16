@@ -1,3 +1,5 @@
+# 确定性补丁候选：对有“原理性机械修法”的规则给零成本候选（丢悬空引用、去重、违禁词替换…）。
+#   是 suggest 流程里免费的兜底半边——从不调模型，正确性由规则本身蕴含。
 """Deterministic patch candidates for rules with a principled mechanical fix.
 
 These are the zero-cost fallback half of the suggest flow: they never call a model, they only

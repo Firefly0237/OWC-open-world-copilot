@@ -1,3 +1,4 @@
+# 最小 HS256 bearer token（用标准库实现的 JWT，不引新依赖）。
 """Minimal HS256 bearer tokens (a JWT, implemented on the stdlib so no new dependency).
 
 Production can swap this for an OIDC provider — the contract is just ``mint_token`` /

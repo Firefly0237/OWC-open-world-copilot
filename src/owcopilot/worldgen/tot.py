@@ -1,3 +1,4 @@
+# Tree of Thoughts(Yao 2023) 用于 premise/戏剧主线选优：多路展开→评分→选最优。opt-in。
 """Tree of Thoughts (Yao et al., 2023) for the premise / dramatic-spine stage.
 
 The premise is the highest-commitment decision in the staged chain: every later stage (factions,
@@ -23,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
-from ..llm.gateway import LLMGateway
+from ..llm.gateway import LLMGateway, LLMGatewayError
 from ..llm.jsonio import extract_json_object
 
 T = TypeVar("T")
@@ -157,15 +158,20 @@ class LLMPremiseEvaluator:
 
     def __call__(self, premise: dict[str, Any]) -> tuple[float, str]:
         base, base_rationale = score_premise(premise)
-        raw = self.gateway.complete(
-            task=self.task,
-            system=_PREMISE_EVAL_SYSTEM,
-            user=json.dumps(premise, ensure_ascii=False),
-        )
         try:
+            raw = self.gateway.complete(
+                task=self.task,
+                system=_PREMISE_EVAL_SYSTEM,
+                user=json.dumps(premise, ensure_ascii=False),
+            )
             data = extract_json_object(raw)
             score_value: Any = data.get("score")  # None/non-numeric -> caught below
             rating = max(0.0, min(10.0, float(score_value)))
+        except LLMGatewayError:
+            # The rating is a tie-breaker, not a stage: a provider failure (after the gateway's
+            # own retries) must not kill a multi-stage world build. Degrade to the deterministic
+            # score with the degrade marked in the rationale — same rule as the critics.
+            return base, f"{base_rationale}; llm=error→deterministic-only"
         except (ValueError, TypeError):
             return base, f"{base_rationale}; llm=unparsable→deterministic-only"
         reason = str(data.get("reason", "")).strip()[:70]

@@ -1,3 +1,4 @@
+# 面向创作者导出的发布门（不合格不放行）。
 """Release gate for creator-facing exports.
 
 The low-level exporter only writes files. Product entrypoints call this gate first so a world with

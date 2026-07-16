@@ -1,3 +1,4 @@
+# 通用 generate→critique→refine 循环：每个有 critic 的 assist 面复用它（Reflexion 式反思前馈）。
 """A generic generate→critique→refine loop, reused by every assist surface that has a critic.
 
 The quest-draft and world-seed loops predate this and keep their own richer trail types; this is the
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from pydantic import BaseModel
 
@@ -42,9 +43,15 @@ class RefineStep(BaseModel):
     # The verbal self-reflection distilled from this round's critique (Reflexion memory). Carried
     # forward into every later attempt so the generator learns from the whole history.
     reflection: str = ""
-    # IN-B1 M2: primary failing dimension from this round's CritiqueResult.
+    # Primary failing dimension from this round's CritiqueResult.
     # "general" when parse_ok=False or no dimensions. Used by calibration to track per-dim lessons.
     primary_dim: str = "general"
+    # Snapshot of the artifact THIS round's critique evaluated, taken only on rounds that go on
+    # to revise (a pass round replaces nothing). This is what makes complete preference pairs
+    # recoverable: (prompt=this round's revision instructions, rejected=this snapshot,
+    # chosen=the improved artifact). None on pass/terminal rounds and on all pre-existing trails,
+    # so old persisted payloads deserialize unchanged.
+    artifact_before: dict[str, Any] | None = None
 
 
 @dataclass
@@ -91,7 +98,7 @@ def run_refine_loop(
                 fixes=fixes,
                 summary=critique.summary,
                 reflection=reflection,
-                primary_dim=primary_failing_dimension(critique),  # IN-B1 M2
+                primary_dim=primary_failing_dimension(critique),
             )
         )
         if critique.parse_ok and critique.verdict == "pass" and not gaps:
@@ -99,12 +106,29 @@ def run_refine_loop(
         if not fixes:
             break
         reflections.append(reflection)
+        # This round revises: snapshot the artifact being replaced so the (rejected → chosen)
+        # side of a preference pair stays recoverable (see RefineStep.artifact_before).
+        trail[-1].artifact_before = snapshot_artifact(artifact)
         # Feed the WHOLE reflection history forward (not just this round's fixes) — the Reflexion
         # distinction. It rides the fixes channel so existing regenerate callbacks render it.
         artifact = regenerate(artifact, with_reflection_memory(fixes, reflections))
     return RefineOutcome(
         artifact=artifact, trail=trail, auto_review_incomplete=auto_review_incomplete
     )
+
+
+def snapshot_artifact(artifact: Any) -> dict[str, Any]:
+    """Serialise an artifact for a trail snapshot. Artifact types are unbounded, so be defensive:
+    pydantic models dump to their dict form, plain dicts pass through, anything else is wrapped
+    as text. Shared by every critique→refine loop that records ``artifact_before``."""
+    dump = getattr(artifact, "model_dump", None)
+    if callable(dump):
+        result = dump(mode="json")
+        if isinstance(result, dict):
+            return result
+    if isinstance(artifact, dict):
+        return artifact
+    return {"text": str(artifact)}
 
 
 def summarize_reflection(round_index: int, critique: CritiqueResult, gaps: list[str]) -> str:

@@ -1,7 +1,9 @@
+# ReAct 轨迹的读时上下文压缩：超 token 预算阈值时把较早步骤压成摘要、保留最近 N 步。
+# 关键：源轨迹 append-only 从不改，压缩只作用于喂给模型的视图——可回溯、不丢原始。
 """Read-time context compressor for the ReAct transcript.
 
-Design principles (Claude Code 5-level compaction, Level-2 adapted)
----------------------------------------------------------------------
+Design principles
+-----------------
 * **Append-only source**: The raw ``transcript`` list is never mutated; compression
   happens only when building the *read-time view* passed to the prompt.
 * **LLM micro-compact summarisation**: Oldest turns are sent to the gateway with
@@ -151,7 +153,7 @@ class CompressionCache:
         if self._cached_turns and cur == self._cached_turns:
             return self._cached_summary, []
         if self._cached_turns and _is_prefix(self._cached_turns, cur):
-            return self._cached_summary, list(cur[len(self._cached_turns):])
+            return self._cached_summary, list(cur[len(self._cached_turns) :])
         return None, list(cur)
 
     def store(self, compactable: list[str], summary: str) -> None:

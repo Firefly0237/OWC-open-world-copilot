@@ -1,3 +1,4 @@
+# CLI 与工作台共用的审阅队列决策工作流（接受/拒绝/改；唯一写 canon 路径的驱动）。
 """Review-queue decision workflow shared by the CLI and the Workbench UI.
 
 Accepting an item is THE write path for AI-produced content: a quest draft is materialised into
@@ -271,6 +272,7 @@ def _merge_bundle(target: ContentBundle, incoming: ContentBundle) -> None:
 
 # --- IN-4: Read-only aggregated context for a review item -----------------------------------
 
+
 def get_review_item_context_action(project: ProjectContext, item_id: str) -> dict:
     """Build the aggregated context dict for a single review item (GET :context endpoint).
 
@@ -341,7 +343,7 @@ def get_review_item_context_action(project: ProjectContext, item_id: str) -> dic
             status=r.get("status", "pending_review"),
             critic_verdict=r.get("critic_verdict"),
             critic_score=r.get("critic_score"),
-            critic_primary_dim=r.get("critic_primary_dim"),  # IN-B1 M2
+            critic_primary_dim=r.get("critic_primary_dim"),
         )
         for r in same_type
     ]

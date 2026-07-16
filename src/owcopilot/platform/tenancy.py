@@ -1,3 +1,4 @@
+# 请求主体解析 + 按租户的世界隔离（WS-P）。
 """Request principal resolution + per-tenant world isolation (WS-P).
 
 ``resolve_principal`` turns request credentials into a Principal: a JWT bearer → its claims; the

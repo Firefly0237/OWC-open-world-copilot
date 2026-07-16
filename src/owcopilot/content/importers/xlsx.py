@@ -1,3 +1,4 @@
+# 只读电子表格摄取的 XLSX 导入器。
 """XLSX importer for read-only spreadsheet ingestion."""
 
 from __future__ import annotations

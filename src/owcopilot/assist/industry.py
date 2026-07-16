@@ -1,3 +1,4 @@
+# 游戏内容 prompt 用的行业调研 rubric 片段。
 """Industry-researched rubric snippets for game-content prompts.
 
 These notes are deliberately short enough to live inside system prompts. The fuller rationale and

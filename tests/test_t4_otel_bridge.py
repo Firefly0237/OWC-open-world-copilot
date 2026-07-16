@@ -26,9 +26,11 @@ otel_sdk = pytest.importorskip("opentelemetry.sdk.trace", reason="opentelemetry-
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _build_test_tracer():
     """Return (tracer, exporter) using InMemoryExporter."""
     from owcopilot.llm.otel_bridge import InMemoryExporter, build_test_tracer
+
     exporter = InMemoryExporter()
     tracer, exp = build_test_tracer(exporter)
     return tracer, exp
@@ -41,6 +43,7 @@ def _get_spans_by_name(spans, name: str) -> list:
 # ---------------------------------------------------------------------------
 # no-op path: OTEL disabled
 # ---------------------------------------------------------------------------
+
 
 def test_otel_disabled_returns_noop_tracer(monkeypatch) -> None:
     """When OWCOPILOT_OTEL_ENABLED is unset/0, get_tracer_or_noop() returns a no-op tracer."""
@@ -85,6 +88,7 @@ def test_noop_context_managers_do_not_raise(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 # span tree structure with in-memory exporter
 # ---------------------------------------------------------------------------
+
 
 def test_span_tree_invoke_agent_is_root() -> None:
     """P4B-2: invoke_agent span has no parent (root span)."""
@@ -162,6 +166,7 @@ def test_span_tree_execute_tool_is_child_of_gen_ai_chat() -> None:
 # Span attributes: GenAI semantic conventions
 # ---------------------------------------------------------------------------
 
+
 def test_invoke_agent_span_attributes() -> None:
     """invoke_agent span must carry gen_ai.agent.name, gen_ai.operation.name, gen_ai.system."""
     from owcopilot.llm.otel_bridge import invoke_agent_span
@@ -189,8 +194,7 @@ def test_gen_ai_chat_span_token_attributes() -> None:
 
     with invoke_agent_span(tracer, agent_name="test", goal="goal"):
         with gen_ai_chat_span(
-            tracer, model="deepseek-v4-flash", step_idx=0,
-            input_tokens=100, output_tokens=50
+            tracer, model="deepseek-v4-flash", step_idx=0, input_tokens=100, output_tokens=50
         ):
             pass
 
@@ -227,6 +231,7 @@ def test_execute_tool_span_tool_name_attribute() -> None:
 # trace_id format
 # ---------------------------------------------------------------------------
 
+
 def test_trace_id_is_valid_32_char_hex() -> None:
     """P4B: trace_id must be a valid 32-character lowercase hex string."""
     from owcopilot.llm.otel_bridge import invoke_agent_span
@@ -251,6 +256,7 @@ def test_trace_id_is_valid_32_char_hex() -> None:
 # Span count: multiple steps produce multiple spans
 # ---------------------------------------------------------------------------
 
+
 def test_multiple_steps_produce_multiple_spans() -> None:
     """A 2-step agent run produces: 1 invoke_agent + 2 gen_ai.chat + 2 execute_tool = 5 spans."""
     from owcopilot.llm.otel_bridge import execute_tool_span, gen_ai_chat_span, invoke_agent_span
@@ -273,6 +279,7 @@ def test_multiple_steps_produce_multiple_spans() -> None:
 # ---------------------------------------------------------------------------
 # SQLite persistence: query_by_run_id (P4B-1/3)
 # ---------------------------------------------------------------------------
+
 
 def test_sqlite_span_export_and_query_by_run_id(tmp_path) -> None:
     """P4B-1/3: Spans persist to SQLite and can be queried by run_id."""
@@ -345,6 +352,7 @@ def test_query_by_run_id_nonexistent_returns_empty(tmp_path) -> None:
 # RT4-①: threading.Lock prevents double-provider initialisation
 # ---------------------------------------------------------------------------
 
+
 def test_get_tracer_thread_safe_single_provider(monkeypatch) -> None:
     """RT4-①: Concurrent calls to get_tracer() must initialise exactly one TracerProvider.
 
@@ -396,6 +404,7 @@ def test_get_tracer_thread_safe_single_provider(monkeypatch) -> None:
 # RT4-②: SQLite default path is absolute (never CWD-relative)
 # ---------------------------------------------------------------------------
 
+
 def test_sqlite_default_path_is_absolute() -> None:
     """RT4-②: _default_sqlite_path() returns an absolute path (never a bare filename)."""
     import os as _os
@@ -442,6 +451,7 @@ def test_sqlite_env_override_is_respected(monkeypatch, tmp_path) -> None:
 # ---------------------------------------------------------------------------
 # RT4-③: execute_tool_span sets ERROR status + records exception on tool failure
 # ---------------------------------------------------------------------------
+
 
 def test_execute_tool_span_error_status_on_skill_error() -> None:
     """RT4-③: SkillError inside execute_tool_span → span.status == ERROR, exception recorded."""
@@ -503,6 +513,7 @@ def test_execute_tool_span_no_error_status_on_success() -> None:
 # RT4-③: End-to-end: react.py sets ERROR status on SkillError and bare Exception
 # ---------------------------------------------------------------------------
 
+
 def _build_react_agent_with_tracer(
     exporter, failing_skill: bool = False, use_bare_exception: bool = False
 ):
@@ -517,10 +528,10 @@ def _build_react_agent_with_tracer(
 
     import owcopilot.agent.react as react_module
     from owcopilot.agent.react import ReActAgent
-    from owcopilot.core.skills import CostTier, SideEffect, Skill, SkillRegistry
     from owcopilot.llm.cache import NoOpCache
     from owcopilot.llm.gateway import LLMGateway
     from owcopilot.llm.router import StaticRouter
+    from owcopilot.skills import CostTier, SideEffect, Skill, SkillRegistry
 
     resource = Resource.create({"service.name": "test"})
     provider = TracerProvider(resource=resource)
@@ -551,23 +562,28 @@ def _build_react_agent_with_tracer(
     registry = SkillRegistry()
 
     if use_bare_exception:
+
         def _bad_handler(**kwargs):
             raise RuntimeError("unexpected crash")
     elif failing_skill:
-        from owcopilot.core.skills import SkillError
+        from owcopilot.skills import SkillError
+
         def _bad_handler(**kwargs):
             raise SkillError("skill kaboom")
     else:
+
         def _bad_handler(**kwargs):
             return {"ok": True}
 
-    registry.register(Skill(
-        name="bad_tool",
-        description="a tool that may fail",
-        cost_tier=CostTier.DETERMINISTIC,
-        side_effect=SideEffect.READ_ONLY,
-        handler=_bad_handler,
-    ))
+    registry.register(
+        Skill(
+            name="bad_tool",
+            description="a tool that may fail",
+            cost_tier=CostTier.DETERMINISTIC,
+            side_effect=SideEffect.READ_ONLY,
+            handler=_bad_handler,
+        )
+    )
 
     agent = ReActAgent(gateway=gw, registry=registry, max_steps=3)
 
@@ -626,6 +642,7 @@ def test_react_execute_tool_span_error_on_skill_error() -> None:
 #  context manager directly instead of going through react.py → span.)
 # ---------------------------------------------------------------------------
 
+
 def _run_react_with_tracer_and_provider(exporter, provider, *, mapping=None):
     """Run a one-shot ReActAgent (Final Answer immediately) through react.py into *exporter*.
 
@@ -638,10 +655,10 @@ def _run_react_with_tracer_and_provider(exporter, provider, *, mapping=None):
 
     import owcopilot.agent.react as react_module
     from owcopilot.agent.react import ReActAgent
-    from owcopilot.core.skills import SkillRegistry
     from owcopilot.llm.cache import NoOpCache
     from owcopilot.llm.gateway import LLMGateway
     from owcopilot.llm.router import StaticRouter
+    from owcopilot.skills import SkillRegistry
 
     resource = Resource.create({"service.name": "test"})
     tprovider = TracerProvider(resource=resource)
@@ -699,6 +716,7 @@ def test_react_chat_span_model_is_real_model_not_task_label() -> None:
 # when known — an offline fake (no response model) leaves the attribute unset.
 # ---------------------------------------------------------------------------
 
+
 def test_react_chat_span_sets_response_model_when_provider_reports_it() -> None:
     """T2-P1: a provider returning a response-body model id → gen_ai.response.model on the span."""
     from owcopilot.llm.otel_bridge import InMemoryExporter
@@ -754,6 +772,7 @@ def test_react_chat_span_model_falls_back_to_tier_when_provider_has_no_model() -
 # (previously dangling — invoke_agent_span only set it when a run_id was passed in,
 #  and react.py's single call site never passed one).
 # ---------------------------------------------------------------------------
+
 
 def test_react_root_span_has_run_id_equal_to_trace_id() -> None:
     """R3-C③: the invoke_agent root span carries agent.run_id == its trace_id (hex-32)."""

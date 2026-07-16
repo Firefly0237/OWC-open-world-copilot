@@ -1,3 +1,4 @@
+# 文件真源的灵感参考存储。
 """File-backed inspiration reference store."""
 
 from __future__ import annotations

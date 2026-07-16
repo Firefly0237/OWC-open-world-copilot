@@ -41,22 +41,23 @@ from owcopilot.assist.lessons import (
     extract_lessons_from_report,
 )
 from owcopilot.assist.review_queue import ReviewItemType, ReviewQueue
-from owcopilot.core.skills import (
+from owcopilot.llm.cache import NoOpCache
+from owcopilot.llm.gateway import LLMGateway
+from owcopilot.llm.router import StaticRouter
+from owcopilot.skills import (
     CostTier,
     SideEffect,
     Skill,
     SkillParameter,
     SkillRegistry,
 )
-from owcopilot.llm.cache import NoOpCache
-from owcopilot.llm.gateway import LLMGateway
-from owcopilot.llm.router import StaticRouter
 from owcopilot.storage.sqlite import SQLiteStore
 from owcopilot.worldgen.critic import WorldQuestCritic, run_quest_refine_loop
 
 # ============================================================
 # Helpers
 # ============================================================
+
 
 def _make_store() -> SQLiteStore:
     return SQLiteStore(":memory:")
@@ -108,6 +109,7 @@ def _gateway(provider) -> LLMGateway:
 # ============================================================
 # IN-B2 T2 — SkillRegistry.manifest(allowed=...) + ReActAgent.allowed_skills
 # ============================================================
+
 
 class TestT2ManifestFilter:
     """H-T2-1 through H-T2-7"""
@@ -175,10 +177,12 @@ class TestT2ManifestFilter:
     def test_H_T2_7_model_calls_blocked_skill_gets_error_not_crash(self):
         """H-T2-7: model calling skill not in manifest gets SkillError observation, no crash."""
         reg = _make_registry("skill_a", "skill_b")
-        provider = _ScriptedProvider([
-            "Thought: try blocked\nAction: skill_b\nAction Input: {}",
-            "Thought: done\nFinal Answer: recovered",
-        ])
+        provider = _ScriptedProvider(
+            [
+                "Thought: try blocked\nAction: skill_b\nAction Input: {}",
+                "Thought: done\nFinal Answer: recovered",
+            ]
+        )
         # Only allow skill_a; skill_b is "blocked" from manifest
         agent = ReActAgent(
             gateway=_gateway(provider),
@@ -190,10 +194,12 @@ class TestT2ManifestFilter:
         # skill_b IS registered, so calling it won't error — but the key test is:
         # with a truly unknown skill, it becomes an error observation.
         # Let's use a truly unknown skill here:
-        provider2 = _ScriptedProvider([
-            "Thought: try unknown\nAction: nonexistent_tool\nAction Input: {}",
-            "Thought: done\nFinal Answer: recovered",
-        ])
+        provider2 = _ScriptedProvider(
+            [
+                "Thought: try unknown\nAction: nonexistent_tool\nAction Input: {}",
+                "Thought: done\nFinal Answer: recovered",
+            ]
+        )
         agent2 = ReActAgent(
             gateway=_gateway(provider2),
             registry=reg,
@@ -209,6 +215,7 @@ class TestT2ManifestFilter:
 # ============================================================
 # IN-B4 C1+T3 — AgentStep fields + _trim_transcript + _user_prompt budget
 # ============================================================
+
 
 class TestC1T3TranscriptBudget:
     """H-C1-1 through H-C1-12"""
@@ -227,10 +234,12 @@ class TestC1T3TranscriptBudget:
     def test_H_C1_3_observation_chars_equals_len_observation_after_truncation(self):
         """H-C1-3: observation_chars == len(step.observation) after truncation."""
         reg = _make_registry("skill_a")
-        provider = _ScriptedProvider([
-            "Thought: run skill\nAction: skill_a\nAction Input: {}",
-            "Thought: done\nFinal Answer: ok",
-        ])
+        provider = _ScriptedProvider(
+            [
+                "Thought: run skill\nAction: skill_a\nAction Input: {}",
+                "Thought: done\nFinal Answer: ok",
+            ]
+        )
         agent = ReActAgent(gateway=_gateway(provider), registry=reg, max_steps=3)
         result = agent.run("test")
         for step in result.steps:
@@ -252,10 +261,12 @@ class TestC1T3TranscriptBudget:
         reg = SkillRegistry()
         reg.register(long_skill)
 
-        provider = _ScriptedProvider([
-            "Thought: run\nAction: long_skill\nAction Input: {}",
-            "Thought: done\nFinal Answer: ok",
-        ])
+        provider = _ScriptedProvider(
+            [
+                "Thought: run\nAction: long_skill\nAction Input: {}",
+                "Thought: done\nFinal Answer: ok",
+            ]
+        )
         agent = ReActAgent(
             gateway=_gateway(provider),
             registry=reg,
@@ -280,10 +291,12 @@ class TestC1T3TranscriptBudget:
         reg = SkillRegistry()
         reg.register(small_skill)
 
-        provider = _ScriptedProvider([
-            "Thought: run\nAction: small_skill\nAction Input: {}",
-            "Thought: done\nFinal Answer: ok",
-        ])
+        provider = _ScriptedProvider(
+            [
+                "Thought: run\nAction: small_skill\nAction Input: {}",
+                "Thought: done\nFinal Answer: ok",
+            ]
+        )
         agent = ReActAgent(
             gateway=_gateway(provider),
             registry=reg,
@@ -377,9 +390,11 @@ class TestC1T3TranscriptBudget:
     def test_H_C1_11_no_regression_default_budget(self):
         """H-C1-11: ReActAgent with default budget completes normally (no regression)."""
         reg = _make_registry("skill_a")
-        provider = _ScriptedProvider([
-            "Thought: done\nFinal Answer: ok",
-        ])
+        provider = _ScriptedProvider(
+            [
+                "Thought: done\nFinal Answer: ok",
+            ]
+        )
         agent = ReActAgent(gateway=_gateway(provider), registry=reg)
         result = agent.run("test goal")
         assert result.stop_reason == "finished"
@@ -426,6 +441,7 @@ class TestC1T3TranscriptBudget:
 # IN-B1 M2 — Lesson dimension細化
 # ============================================================
 
+
 class TestM2LessonDimension:
     """H-M2-1 through H-M2-9"""
 
@@ -444,9 +460,7 @@ class TestM2LessonDimension:
         """H-M2-2: save_lesson without dimension -> dimension='general' in DB."""
         store = _make_store()
         store.save_lesson("quest", "test text")
-        row = store.conn.execute(
-            "SELECT dimension FROM lessons WHERE item_type='quest'"
-        ).fetchone()
+        row = store.conn.execute("SELECT dimension FROM lessons WHERE item_type='quest'").fetchone()
         assert row is not None
         assert row["dimension"] == "general"
 
@@ -662,9 +676,9 @@ class TestM2WorldgenGenesisChain:
         """Drive the real run_quest_refine_loop for ONE round with a grounding-blocker
         critique. regenerate is never expected to be called past the cap; if it is, it
         returns the same quests so the loop terminates."""
-        critic = WorldQuestCritic(gateway=_world_gateway(
-            _WorldCritiqueProvider(_WORLD_GROUNDING_BLOCKER)
-        ))
+        critic = WorldQuestCritic(
+            gateway=_world_gateway(_WorldCritiqueProvider(_WORLD_GROUNDING_BLOCKER))
+        )
         quests = [
             {
                 "id": "q1",
@@ -767,6 +781,7 @@ class TestM2WorldgenGenesisChain:
 # IN-B3 M1 — Critic lesson injection (build_critic_lesson_block + all 6 critics)
 # ============================================================
 
+
 class TestM1CriticLessonInjection:
     """H-M1-1 through H-M1-8"""
 
@@ -776,8 +791,9 @@ class TestM1CriticLessonInjection:
             sig = inspect.signature(cls.critique)
             assert "lessons" in sig.parameters, f"{cls.__name__} missing 'lessons'"
             assert "inject_lessons" in sig.parameters, f"{cls.__name__} missing 'inject_lessons'"
-            assert sig.parameters["inject_lessons"].default is False, \
+            assert sig.parameters["inject_lessons"].default is False, (
                 f"{cls.__name__} inject_lessons default must be False"
+            )
 
     def test_H_M1_1_world_quest_critic_accepts_lessons_params(self):
         """H-M1-1: WorldQuestCritic accepts lessons and inject_lessons params."""
@@ -865,6 +881,7 @@ class TestM1CriticLessonInjection:
 # ============================================================
 # Cross-item backward-compat sanity checks
 # ============================================================
+
 
 class TestBackwardCompatibility:
     """Verify that all default paths are unchanged from pre-Phase-B behavior."""

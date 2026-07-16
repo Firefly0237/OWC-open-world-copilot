@@ -1,3 +1,5 @@
+# 世界种子生成服务：分阶段链（premise→区域→实体→任务），逐阶段 critique-refine。
+# 关键：阶段间契约固定，每阶段产出都过校验/接地，避免一次性大生成不可控。
 """World seed generation service.
 
 The world is no longer built in one big ``gateway.complete`` call. That single shot produced a
@@ -42,7 +44,13 @@ from ..retrieval.models import ContextPack, RetrievalHit
 from ..util import unique_id
 from . import stages
 from .critic import QuestRefineOutcome, WorldQuestCritic, run_quest_refine_loop
-from .models import ReferenceReportItem, WorldRefineRound, WorldSeedBrief, WorldSeedDraft
+from .models import (
+    ConversionReport,
+    ReferenceReportItem,
+    WorldRefineRound,
+    WorldSeedBrief,
+    WorldSeedDraft,
+)
 from .tot import PremiseEvaluator, score_premise, tree_of_thoughts
 
 
@@ -204,7 +212,7 @@ class WorldSeedService:
         draft_id = (
             "world_seed_" + hashlib.sha256(f"{brief.idea}\n{serialized}".encode()).hexdigest()[:12]
         )
-        bundle = _bundle_from_payload(
+        bundle, conversion_report = _bundle_from_payload(
             payload,
             draft_id=draft_id,
             brief=brief,
@@ -223,6 +231,7 @@ class WorldSeedService:
             inspiration_context_refs=inspiration_pack.refs,
             refine_trail=trail,
             auto_review_incomplete=auto_review_incomplete,
+            conversion_report=conversion_report,
         )
 
     def revise(
@@ -253,7 +262,10 @@ class WorldSeedService:
         else:  # QUESTS
             payload["quests"] = _list(result.get("quests"))
         payload["relations"] = _list(payload.get("relations")) + _list(result.get("relations"))
-        bundle = _bundle_from_payload(
+        # revise re-runs one stage and re-normalises; the conversion ledger is recomputed but not
+        # surfaced here — targeted revision keeps its (bundle, stage) contract, and the ledger is a
+        # genesis-result concern (the initial draft already reported it to the reviewer).
+        bundle, _conversion_report = _bundle_from_payload(
             payload,
             draft_id=draft_id,
             brief=brief,
@@ -359,6 +371,9 @@ _JSON_ONLY_RETRY = (
 )
 
 
+# Kept off complete_structured: each stage emits a DIFFERENT loose slice (premise vs factions vs
+# regions vs cast vs quests keys), all merged and coerced by _bundle_from_payload — a multi-shape
+# content-pipeline intake, not one Pydantic model per call.
 def parse_world_seed_payload(raw: str) -> dict[str, Any]:
     """Extract the stage's JSON object, tolerating markdown fences and surrounding prose.
 
@@ -548,7 +563,8 @@ def _regions_suffix(
         '- locations: each {id ("loc_*"), name, description, purpose, region_id (one of the '
         "region ids above), controlling_faction (one of the FACTION ids below), tags []}.\n"
         "Reference the faction ids EXACTLY as written below — do not rename or invent factions.\n"
-        + _vocab_block(terms) + _grounding_block(world_lines)
+        + _vocab_block(terms)
+        + _grounding_block(world_lines)
     )
 
 
@@ -574,7 +590,8 @@ def _cast_suffix(
         + "- relations: ties among the npcs and to factions, using the ids below {source, target, "
         "kind}.\n"
         "Reference faction/location ids EXACTLY as written below.\n"
-        + _vocab_block(terms) + _grounding_block(world_lines)
+        + _vocab_block(terms)
+        + _grounding_block(world_lines)
     )
 
 
@@ -595,7 +612,8 @@ def _quests_suffix(
         "outcomes INSIDE the climax stage, not as parallel ending stages), "
         "tags []}.\n"
         "Reference the cast and location ids EXACTLY as written below.\n"
-        + _vocab_block(terms) + _grounding_block(world_lines)
+        + _vocab_block(terms)
+        + _grounding_block(world_lines)
     )
 
 
@@ -871,8 +889,9 @@ def _bundle_from_payload(
     existing: ContentBundle,
     inspiration_pack: ContextPack,
     project_pack: ContextPack,
-) -> ContentBundle:
+) -> tuple[ContentBundle, ConversionReport]:
     bundle = ContentBundle()
+    report = ConversionReport()
     id_map: dict[str, str] = {}
     used_entities = set(existing.entities)
     used_regions = set(existing.regions)
@@ -897,7 +916,9 @@ def _bundle_from_payload(
         review_status=ReviewStatus.PENDING_REVIEW,
     )
 
-    for item in _ensure_count(_list(payload.get("factions")), brief.faction_count, "阵营"):
+    for item in _take_requested(
+        _list(payload.get("factions")), brief.faction_count, "阵营", report
+    ):
         raw = _dict(item)
         entity = _entity_from_item(
             raw,
@@ -909,7 +930,7 @@ def _bundle_from_payload(
         _remember(id_map, raw, entity.id)
         bundle.entities[entity.id] = entity
 
-    for item in _ensure_count(_list(payload.get("regions")), brief.region_count, "区域"):
+    for item in _take_requested(_list(payload.get("regions")), brief.region_count, "区域", report):
         raw = _dict(item)
         region_id = _unique_id(
             "region",
@@ -930,17 +951,18 @@ def _bundle_from_payload(
             review_status=ReviewStatus.PENDING_REVIEW,
         )
 
-    locations = _ensure_count(
+    locations = _take_requested(
         _list(payload.get("locations")),
         max(brief.region_count + 2, 3) if brief.region_count > 0 else 0,
         "地点",
+        report,
     )
-    region_ids = list(bundle.regions) or list(existing.regions)
-    faction_ids = _ids_by_type(bundle, EntityType.FACTION) or _ids_by_type(
-        existing, EntityType.FACTION
+    region_ids = set(bundle.regions) or set(existing.regions)
+    faction_ids = set(_ids_by_type(bundle, EntityType.FACTION)) or set(
+        _ids_by_type(existing, EntityType.FACTION)
     )
     used_locations = used_pois | used_entities
-    for index, item in enumerate(locations):
+    for item in locations:
         raw = _dict(item)
         loc_id = _unique_id(
             "loc",
@@ -950,13 +972,21 @@ def _bundle_from_payload(
         used_pois.add(loc_id)
         used_entities.add(loc_id)
         _remember(id_map, raw, loc_id)
-        poi_region_id = _known_or(
-            _resolve(raw.get("region_id"), id_map), region_ids, _round_robin(region_ids, index)
+        poi_region_id = _grounded_ref(
+            raw.get("region_id"),
+            id_map=id_map,
+            valid_ids=region_ids,
+            owner_ref=f"poi:{loc_id}",
+            field="region_id",
+            report=report,
         )
-        faction_id = _known_or(
-            _resolve(raw.get("controlling_faction"), id_map),
-            faction_ids,
-            _round_robin(faction_ids, index),
+        faction_id = _grounded_ref(
+            raw.get("controlling_faction"),
+            id_map=id_map,
+            valid_ids=faction_ids,
+            owner_ref=f"poi:{loc_id}",
+            field="controlling_faction",
+            report=report,
         )
         # No preset filler text: a missing description stays minimal and theme-neutral.
         description = str(raw.get("description") or raw.get("purpose") or raw.get("name") or "")
@@ -986,8 +1016,8 @@ def _bundle_from_payload(
         if faction_id:
             bundle.relations.append(_relation(loc_id, faction_id, "controlled_by", common_meta))
 
-    location_ids = list(bundle.pois) or list(existing.pois)
-    for index, item in enumerate(_ensure_count(_list(payload.get("npcs")), brief.npc_count, "NPC")):
+    location_ids = set(bundle.pois) or set(existing.pois)
+    for item in _take_requested(_list(payload.get("npcs")), brief.npc_count, "NPC", report):
         raw = _dict(item)
         entity = _entity_from_item(
             raw,
@@ -998,24 +1028,32 @@ def _bundle_from_payload(
         )
         _remember(id_map, raw, entity.id)
         bundle.entities[entity.id] = entity
-        faction_id = _known_or(
-            _resolve(raw.get("faction_id"), id_map),
-            faction_ids,
-            _round_robin(faction_ids, index),
+        faction_id = _grounded_ref(
+            raw.get("faction_id"),
+            id_map=id_map,
+            valid_ids=faction_ids,
+            owner_ref=f"npc:{entity.id}",
+            field="faction_id",
+            report=report,
         )
-        location_id = _known_or(
-            _resolve(raw.get("location_id"), id_map),
-            location_ids,
-            _round_robin(location_ids, index),
+        location_id = _grounded_ref(
+            raw.get("location_id"),
+            id_map=id_map,
+            valid_ids=location_ids,
+            owner_ref=f"npc:{entity.id}",
+            field="location_id",
+            report=report,
         )
         if faction_id:
             bundle.relations.append(_relation(entity.id, faction_id, "member_of", common_meta))
         if location_id:
             bundle.relations.append(_relation(entity.id, location_id, "located_in", common_meta))
 
-    npc_ids = _ids_by_type(bundle, EntityType.NPC) or _ids_by_type(existing, EntityType.NPC)
+    npc_ids = set(_ids_by_type(bundle, EntityType.NPC)) or set(
+        _ids_by_type(existing, EntityType.NPC)
+    )
     for index, item in enumerate(
-        _ensure_count(_list(payload.get("quests")), brief.quest_count, "任务")
+        _take_requested(_list(payload.get("quests")), brief.quest_count, "任务", report)
     ):
         raw = _dict(item)
         quest_id = _unique_id(
@@ -1024,15 +1062,21 @@ def _bundle_from_payload(
             used_quests,
         )
         _remember(id_map, raw, quest_id)
-        quest_location = _known_or(
-            _resolve(raw.get("location"), id_map),
-            location_ids,
-            _round_robin(location_ids, index),
+        quest_location = _grounded_ref(
+            raw.get("location"),
+            id_map=id_map,
+            valid_ids=location_ids,
+            owner_ref=f"quest:{quest_id}",
+            field="location",
+            report=report,
         )
-        quest_giver = _known_or(
-            _resolve(raw.get("giver_npc"), id_map),
-            npc_ids,
-            _round_robin(npc_ids, index),
+        quest_giver = _grounded_ref(
+            raw.get("giver_npc"),
+            id_map=id_map,
+            valid_ids=npc_ids,
+            owner_ref=f"quest:{quest_id}",
+            field="giver_npc",
+            report=report,
         )
         # Models that mirror the name/description shape of other sections still parse:
         # quests accept name→title and description→objective as fallbacks.
@@ -1040,8 +1084,12 @@ def _bundle_from_payload(
         objective = str(raw.get("objective") or raw.get("description") or title)
         # When the model omits stages, derive ONE stage from the quest's own objective —
         # never inject preset beats (确认线索/作出选择 was steering every fallback quest
-        # toward the same investigation-shaped arc).
-        raw_stages = _list(raw.get("stages")) or [objective]
+        # toward the same investigation-shaped arc). The derivation is recorded so the reviewer
+        # knows the arc is a single content-derived beat, not a model-authored multi-stage plan.
+        raw_stage_items = _list(raw.get("stages"))
+        if not raw_stage_items:
+            report.record_derived_stage(f"quest:{quest_id}", objective)
+        raw_stages = raw_stage_items or [objective]
         stages = [
             QuestStage(
                 id=f"{quest_id}_stage_{stage_index + 1}",
@@ -1074,7 +1122,7 @@ def _bundle_from_payload(
             review_status=ReviewStatus.PENDING_REVIEW,
         )
 
-    for item in _ensure_count(_list(payload.get("terms")), brief.term_count, "术语"):
+    for item in _take_requested(_list(payload.get("terms")), brief.term_count, "术语", report):
         raw = _dict(item)
         term_id = _unique_id(
             "term",
@@ -1092,16 +1140,28 @@ def _bundle_from_payload(
             review_status=ReviewStatus.PENDING_REVIEW,
         )
 
+    # Explicit relations: keep only those wiring two real ids with a kind. A declared relation whose
+    # endpoint does not exist is still dropped (an edge to a phantom node is not content), but the
+    # loss is recorded rather than silent — that was the "丢关系端点" gap.
+    known_relation_ids = set(bundle.entities) | set(bundle.pois) | set(bundle.regions)
     for item in _list(payload.get("relations")):
         raw = _dict(item)
         source = _resolve(raw.get("source"), id_map)
         target = _resolve(raw.get("target"), id_map)
         kind = str(raw.get("kind") or "").strip()
-        known_relation_ids = set(bundle.entities) | set(bundle.pois) | set(bundle.regions)
-        if source in known_relation_ids and target in known_relation_ids and kind:
+        if not kind:
+            continue
+        if source in known_relation_ids and target in known_relation_ids:
             bundle.relations.append(_relation(source, target, kind, common_meta))
+            continue
+        missing = ", ".join(
+            (endpoint or "<empty>")
+            for endpoint in (source, target)
+            if endpoint not in known_relation_ids
+        )
+        report.record_dropped_relation(source or "<empty>", kind, target or "<empty>", missing)
     bundle.relations = _dedupe_relations(bundle.relations)
-    return bundle
+    return bundle, report
 
 
 def _reference_report(
@@ -1217,17 +1277,15 @@ def _list(value: Any) -> list[Any]:
     return [value]
 
 
-def _ensure_count(items: list[Any], count: int, label: str) -> list[Any]:
-    result = list(items)
-    while len(result) < count:
-        index = len(result) + 1
-        result.append(
-            {
-                "name": f"{label}{index}",
-                "description": f"由一句话世界种子补全的{label}。",
-            }
-        )
-    return result[:count]
+def _take_requested(
+    items: list[Any], count: int, label: str, report: ConversionReport
+) -> list[Any]:
+    """Return what the model actually produced, capped at ``count`` — never padded with placeholder
+    filler. A shortfall (fewer items than requested) is recorded on ``report`` so it surfaces to the
+    reviewer instead of being faked into existence. The requested count or more normalises clean."""
+    if len(items) < count:
+        report.record_shortfall(label, count, len(items))
+    return items[:count]
 
 
 def _int(value: Any, default: int | None) -> int | None:
@@ -1243,11 +1301,26 @@ def _ids_by_type(bundle: ContentBundle, entity_type: EntityType) -> list[str]:
     return [entity.id for entity in bundle.entities.values() if entity.type is entity_type]
 
 
-def _round_robin(values: list[str], index: int) -> str | None:
-    if not values:
-        return None
-    return values[index % len(values)]
+def _grounded_ref(
+    raw_value: Any,
+    *,
+    id_map: dict[str, str],
+    valid_ids: set[str],
+    owner_ref: str,
+    field: str,
+    report: ConversionReport,
+) -> str | None:
+    """Resolve one foreign key WITHOUT fabricating a substitute.
 
-
-def _known_or(value: str | None, known_values: list[str], fallback: str | None) -> str | None:
-    return value if value in set(known_values) else fallback
+    * a value that lands on a real id is kept (grounded);
+    * an absent value stays empty (the model simply did not specify it);
+    * a non-empty value that resolves to no known id is kept VERBATIM and logged as a dangling ref —
+      not round-robined onto an arbitrary real object. Keeping the original value (rather than
+      nulling it) is deliberate: the deterministic reference audit (UNKNOWN_ENTITY_REF /
+      MISSING_RELATION_ENDPOINT) then flags it into the human review flow, which is exactly where a
+      wrong reference should be adjudicated — audit as the arbiter, not a silent guess."""
+    resolved = _resolve(raw_value, id_map)
+    if resolved is None or resolved in valid_ids:
+        return resolved
+    report.record_dangling_ref(owner_ref, field, resolved)
+    return resolved

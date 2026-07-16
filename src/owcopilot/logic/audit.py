@@ -1,3 +1,4 @@
+# 任务逻辑层的确定性检查（无需 bundle）：未定义变量、类型错误等。
 """Deterministic, bundle-free checks over a quest's logic layer: undefined variables, type errors,
 unreachable stages, and deadlocks (no path to completion). The audit-rule wrapper in
 ``audit/rules/logic_rules.py`` adds the bundle-aware dangling-reference check and maps these to

@@ -57,16 +57,18 @@ def _insert_review_item(
     db_path = root / ".owcopilot" / "runtime.sqlite"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     store = SQLiteStore(db_path)
-    store.save_review_item({
-        "id": item_id,
-        "item_type": item_type,
-        "object_ref": object_ref,
-        "payload": payload,
-        "issue_refs": ["issue_1"],
-        "status": status,
-        "critic_verdict": critic_verdict,
-        "critic_score": critic_score,
-    })
+    store.save_review_item(
+        {
+            "id": item_id,
+            "item_type": item_type,
+            "object_ref": object_ref,
+            "payload": payload,
+            "issue_refs": ["issue_1"],
+            "status": status,
+            "critic_verdict": critic_verdict,
+            "critic_score": critic_score,
+        }
+    )
 
 
 def test_context_endpoint_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,3 +1,4 @@
+# 网关的分层路由：task 名 → 模型 tier。
 """Tier routing for the gateway: map a task name to a model tier.
 
 The gateway calls ``router.choose(task=...)`` for every completion. An explicit per-call ``hint``

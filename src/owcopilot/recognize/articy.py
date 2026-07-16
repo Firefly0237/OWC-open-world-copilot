@@ -1,3 +1,4 @@
+# 从 articy:draft JSON 导出识别实体 + 关系。
 """Recognize entities + relations from an articy:draft JSON export.
 
 We walk the documented export shape — ``Packages[].Models[]`` (each model a ``{Type, Properties}``),

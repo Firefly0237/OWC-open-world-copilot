@@ -54,6 +54,57 @@ def test_cli_agent_offline_end_to_end(tmp_path, capsys) -> None:
     assert payload["telemetry"]["calls"] >= 4
 
 
+def test_cli_agent_default_early_stopping_is_force(tmp_path, capsys) -> None:
+    content_root = tmp_path / "content"
+    _dirty_project(content_root)
+
+    code = main(
+        [
+            "agent",
+            "--content-root",
+            str(content_root),
+            "--goal",
+            "Get this world ready to export.",
+            "--llm-mode",
+            "offline",
+            "--max-steps",
+            "2",  # too small to finish -> exercises the budget-exhaustion path
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stop_reason"] == "max_steps"  # --early-stopping omitted -> default "force"
+
+
+def test_cli_agent_early_stopping_generate_flag_wires_through(tmp_path, capsys) -> None:
+    content_root = tmp_path / "content"
+    _dirty_project(content_root)
+
+    code = main(
+        [
+            "agent",
+            "--content-root",
+            str(content_root),
+            "--goal",
+            "Get this world ready to export.",
+            "--llm-mode",
+            "offline",
+            "--max-steps",
+            "2",
+            "--early-stopping",
+            "generate",
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stop_reason"] == "max_steps_generate"
+    assert payload["step_count"] == 2
+    # One extra planning call beyond the 2 exhausted tool-step turns: the generate-mode finish call.
+    assert payload["telemetry"]["calls"] >= 3
+
+
 def test_cli_agent_rejects_missing_content_root(tmp_path) -> None:
     code = main(
         [

@@ -1,3 +1,4 @@
+# 灵感参考库。
 """Inspiration reference library.
 
 Reference materials live beside a content project but outside the canonical content bundle.

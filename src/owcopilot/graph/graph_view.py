@@ -1,3 +1,4 @@
+# 关系图视图：围绕某焦点的 ego 子图，为 SVG 渲染布局。
 """Relationship graph view: an ego subgraph around one focus, laid out for the SVG renderer.
 
 The content graph already knows everything — every object is a node, relations and derived

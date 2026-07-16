@@ -1,3 +1,4 @@
+# 审计规则实现集：本项目 ground-truth oracle 的规则本体（按主题分文件装配）。
 """Audit rule implementations."""
 
 from .dialogue_rules import (
@@ -35,6 +36,7 @@ from .reference_rules import (
     MissingPrerequisiteRule,
 )
 from .region_rules import (
+    MissingRegionReferenceRule,
     POILevelOutOfBoundsRule,
     POIWithoutNarrativePurposeRule,
     RegionBannedContentRule,
@@ -57,6 +59,7 @@ __all__ = [
     "MissingEntityReferenceRule",
     "MissingLocalizationKeyRule",
     "MissingPrerequisiteRule",
+    "MissingRegionReferenceRule",
     "MissingRelationEndpointRule",
     "POILevelOutOfBoundsRule",
     "POIWithoutNarrativePurposeRule",

@@ -23,6 +23,7 @@ from owcopilot.llm.router import StaticRouter
 from owcopilot.qa.community_index import GLOBAL_REPORT_ID, CommunityIndexService
 from owcopilot.qa.offline import OfflineCommunityReportProvider
 from owcopilot.retrieval.community_reports import CommunityReportRetriever
+from owcopilot.retrieval.text_match import lexical_score
 from owcopilot.storage import SQLiteStore
 
 
@@ -135,6 +136,33 @@ def test_build_produces_reports_with_provenance_and_a_global_layer() -> None:
     store.close()
 
 
+def test_flat_build_is_byte_identical_after_adding_hierarchy_fields() -> None:
+    """Backward compat: below ``HIERARCHY_MIN_SIZE`` the build keeps the flat single-level
+    partition, so the new ``hier_level``/``parent_id`` fields never perturb the existing output —
+    every report is level 0 with no parent, exactly as before T13."""
+    store = SQLiteStore(":memory:")
+    result = CommunityIndexService(
+        gateway=_gateway(OfflineCommunityReportProvider()), store=store, bundle=_world()
+    ).build()
+    assert result.community_count == 3
+    shape = {(r.id, r.level, r.hier_level, r.parent_id) for r in result.reports}
+    assert shape == {
+        ("c0", "community", 0, None),
+        ("c1", "community", 0, None),
+        ("c2", "community", 0, None),
+        (GLOBAL_REPORT_ID, "global", 0, None),
+    }
+    store.close()
+
+
+def test_flat_detection_leaves_hierarchy_fields_at_defaults() -> None:
+    """The new optional fields don't disturb the flat partition: every community is level 0 with no
+    parent, and the ids/members are unchanged from the pre-T13 detection."""
+    communities = detect_communities(_world())
+    assert all(c.hier_level == 0 and c.parent_id is None for c in communities)
+    assert [c.id for c in communities] == ["c0", "c1", "c2"]
+
+
 def test_fingerprint_cache_only_regenerates_changed_clusters() -> None:
     store = SQLiteStore(":memory:")
     bundle = _world()
@@ -174,10 +202,13 @@ def test_unparsable_report_degrades_to_a_roster_never_crashes() -> None:
     store.close()
 
 
-def test_holistic_question_grounds_on_reports_specific_on_rows(tmp_path) -> None:
+def test_holistic_question_grounds_on_reports_specific_on_rows(tmp_path, monkeypatch) -> None:
     from owcopilot.app.actions import run_ask_action, run_build_overview_action
     from owcopilot.content.store import ContentStore
 
+    # Feature test on a tiny world: open the RetrievalPolicy size-gate so GraphRAG community
+    # reports are used (they would be omitted at this small scale by default).
+    monkeypatch.setattr("owcopilot.retrieval.policy.GRAPHRAG_MIN_SIZE", 0)
     root = tmp_path / "content"
     ContentStore(root).save(_world())
     db = str(tmp_path / "rt.sqlite")
@@ -207,4 +238,125 @@ def test_retriever_is_a_noop_until_an_index_is_built() -> None:
     assert all(h.ref.startswith("community:") for h in hits)
     # the whole-world synthesis is always reachable for an abstract macro question
     assert any(h.ref == f"community:{GLOBAL_REPORT_ID}" for h in hits)
+    store.close()
+
+
+# --- T12: DRIFT-style dense recall over community-report embeddings -----------------------------
+
+
+class _AxisEmbedder:
+    """A real-model stand-in (model_id ``st:*``) that maps the "overall power" topic to one axis
+    and everything else to another, so a macro query lands a dense hit on a report whose wording it
+    shares no term with — the lexical leg would score that report 0. Hand-crafted fixed vectors are
+    the sanctioned way to demonstrate semantic bridging deterministically offline (see
+    ``tests/test_cache.py:_StubSemanticEmbedder``)."""
+
+    model_id = "st:stub"
+
+    def embed(self, text: str) -> list[float]:
+        return self.embed_many([text])[0]
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        return [
+            [1.0, 0.0] if ("opposes" in t or "overall power" in t) else [0.0, 1.0] for t in texts
+        ]
+
+
+def _seed_reports(store: SQLiteStore) -> None:
+    """Four community reports + a global synthesis, saved via the production writer.
+
+    ``c_target`` shares no query term with "overall power structure" (lexical_score 0), while
+    ``c_power`` matches on "power" — so the lexical leg surfaces c_power and misses c_target."""
+    reports = [
+        {
+            "id": "c_power",
+            "level": "community",
+            "title": "Power Grid",
+            "summary": "the power lines hum",
+            "member_refs": ["entity:x"],
+            "fingerprint": "f1",
+        },
+        {
+            "id": "c_target",
+            "level": "community",
+            "title": "Iron Pact",
+            "summary": "the iron guild opposes the salt league",
+            "member_refs": ["entity:iron", "entity:salt"],
+            "fingerprint": "f2",
+        },
+        {
+            "id": "c_a1",
+            "level": "community",
+            "title": "Alpha",
+            "summary": "nothing relevant here",
+            "member_refs": [],
+            "fingerprint": "f3",
+        },
+        {
+            "id": "c_a2",
+            "level": "community",
+            "title": "Beta",
+            "summary": "unrelated content",
+            "member_refs": [],
+            "fingerprint": "f4",
+        },
+        {
+            "id": GLOBAL_REPORT_ID,
+            "level": "global",
+            "title": "World Overview",
+            "summary": "the whole world map",
+            "member_refs": ["entity:x", "entity:iron"],
+            "fingerprint": "fg",
+        },
+    ]
+    for report in reports:
+        store.save_community_report(report)
+
+
+_MACRO_QUERY = "overall power structure"
+
+
+def test_no_embedder_path_stays_the_lexical_only_ranking() -> None:
+    # Backward compat: with no embedder the retriever is byte-for-byte the pre-T12 lexical ranking.
+    store = SQLiteStore(":memory:")
+    _seed_reports(store)
+    # c_target is a genuine lexical miss — established via the production scorer, not by assertion.
+    assert (
+        lexical_score(
+            _MACRO_QUERY, ("c_target", "Iron Pact", "the iron guild opposes the salt league")
+        )
+        == 0.0
+    )
+    lexical_only = CommunityReportRetriever(store)  # no embedder
+    refs = [h.ref for h in lexical_only.search(_MACRO_QUERY, limit=3)]
+    # c_power (matches "power") ranks first; the rest score 0 and order by id, so the top-3 is
+    # exactly this — and c_target is NOT in it.
+    assert refs == ["community:c_power", "community:_global", "community:c_a1"]
+    assert "community:c_target" not in refs
+    store.close()
+
+
+def test_dense_leg_surfaces_a_report_the_lexical_leg_misses() -> None:
+    # The T12 win: a macro query semantically about c_target (but sharing no term with it) reaches
+    # c_target through the DRIFT-style dense leg, fused with lexical via RRF.
+    store = SQLiteStore(":memory:")
+    _seed_reports(store)
+    dense = CommunityReportRetriever(store, embedder=_AxisEmbedder())
+    refs = [h.ref for h in dense.search(_MACRO_QUERY, limit=3)]
+    assert "community:c_target" in refs  # dense recall lifted the lexically-invisible report in
+    assert "community:c_power" in refs  # the lexical hit is still fused in, not replaced
+    assert f"community:{GLOBAL_REPORT_ID}" in refs  # global synthesis stays reachable
+    # the returned hit still carries full report provenance (member_refs), same as the lexical path
+    target = next(h for h in dense.search(_MACRO_QUERY, limit=3) if h.ref == "community:c_target")
+    assert target.metadata["member_refs"] == "entity:iron,entity:salt"
+    assert target.object_type == "community_report"
+    # the dense leg persisted its embeddings into the third vector corpus (whitelist round-trip)
+    assert store.get_vectors("st:stub", table="community_vectors") != {}
+    store.close()
+
+
+def test_dense_retriever_is_still_a_noop_until_an_index_is_built() -> None:
+    # The no-op guard holds with an embedder too: no reports → no hits, no embedding work.
+    store = SQLiteStore(":memory:")
+    assert CommunityReportRetriever(store, embedder=_AxisEmbedder()).search("anything") == []
     store.close()

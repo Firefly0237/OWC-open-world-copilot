@@ -388,10 +388,7 @@ def _clustered_corpus(
 def _fp32_truth(vectors: dict[str, np.ndarray], q: np.ndarray, limit: int) -> set[str]:
     qn = q / (np.linalg.norm(q) or 1.0)
     scored = sorted(
-        (
-            (ref, float((v / (np.linalg.norm(v) or 1.0)) @ qn))
-            for ref, v in vectors.items()
-        ),
+        ((ref, float((v / (np.linalg.norm(v) or 1.0)) @ qn)) for ref, v in vectors.items()),
         key=lambda x: (-x[1], x[0]),
     )
     return {ref for ref, _ in scored[:limit]}
@@ -876,3 +873,28 @@ def test_retriever_ann_small_corpus_matches_fp32(tmp_path) -> None:
         store.close()
 
     assert [r for r, _ in fp32_hits] == [r for r, _ in ann_hits]
+
+
+@requires_sqlite_vec
+def test_fp32_exact_scan_survives_beyond_vec0_k_cap() -> None:
+    """Regression (surfaced by the scale benchmark): sqlite-vec caps a KNN ``k`` at 4096, so the
+    fp32 exact scan (which pulls ``k = count``) used to raise OperationalError once a corpus passed
+    4096 rows — the default product backend before the auto-tier. Clamped to the cap it must both
+    (a) not crash and (b) still return the exact top-k (L2 order == cosine order for unit vectors,
+    so the true nearest ``limit`` are always inside the first 4096)."""
+    rng = np.random.default_rng(4096)
+    n, dim = 4200, 16  # just over the vec0 cap
+    vecs = rng.standard_normal((n, dim)).astype(np.float32)
+    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-12
+    refs = [f"e{i:05d}" for i in range(n)]
+
+    fp32 = _new_vec_backend(dim=dim)
+    truth = NumpyMatrixBackend()
+    for ref, v in zip(refs, vecs, strict=True):
+        fp32.upsert(ref, v)
+        truth.upsert(ref, v)
+
+    for qi in (0, 1234, 4199):
+        got = fp32.search(vecs[qi], limit=10)  # must not raise
+        gold = truth.search(vecs[qi], limit=10)
+        assert [r for r, _ in got] == [r for r, _ in gold]  # exact parity vs numpy ground truth

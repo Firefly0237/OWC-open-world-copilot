@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 
 class CheckResult(BaseModel):
-    """One item on a content type's production-ready checklist."""
+    """One item on a content type's completeness checklist."""
 
     key: str
     label: str

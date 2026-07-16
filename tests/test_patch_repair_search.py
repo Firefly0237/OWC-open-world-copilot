@@ -25,6 +25,15 @@ def _dirty_bundle() -> ContentBundle:
     )
 
 
+def _fixable_bundle() -> ContentBundle:
+    # A world whose every error is deterministically fixable: a dangling giver_npc ref (fixed by
+    # removing it) plus a missing localization key (fixed by adding it). The search can therefore
+    # drive it all the way to 0 open errors — the shape the anytime early-stop needs.
+    return ContentBundle(
+        quests={"q1": Quest(id="q1", title="Q1", giver_npc="npc_ghost", objective="Do the thing.")}
+    )
+
+
 def _open_error_count(bundle: ContentBundle, runner: AuditRunner) -> int:
     return len(runner.run(AuditContext.from_bundle(bundle)).open_errors)
 
@@ -97,3 +106,41 @@ def test_plan_repairs_never_increases_errors() -> None:
     runner = _runner()
     plan = plan_repairs(bundle, runner, seed=0)
     assert plan.final_open_errors <= plan.initial_open_errors
+
+
+def test_stop_on_clean_early_terminates_and_reports_actual_iterations() -> None:
+    # A fully-fixable world reaches 0 open errors, so the anytime stop (default) fires and the loop
+    # returns without burning the whole budget — and iterations reports the true executed count.
+    bundle = _fixable_bundle()
+    runner = _runner()
+    assert _open_error_count(bundle, runner) == 2  # sanity: two deterministically-fixable errors
+
+    plan = plan_repairs(bundle, runner, seed=0, max_iterations=200)
+
+    assert plan.final_open_errors == 0
+    assert plan.resolved_errors == 2
+    assert 0 < plan.iterations < 200  # stopped on the clean goal, not at the full budget
+
+
+def test_stop_on_clean_false_exhausts_the_budget() -> None:
+    # Opting out of the anytime stop keeps hunting until the budget is spent, even after a clean
+    # plan is already in hand — iterations then equals the full budget.
+    bundle = _fixable_bundle()
+    runner = _runner()
+
+    plan = plan_repairs(bundle, runner, seed=0, max_iterations=25, stop_on_clean=False)
+
+    assert plan.final_open_errors == 0  # still finds the fully-resolving plan
+    assert plan.iterations == 25  # but runs every iteration of the budget
+
+
+def test_iterations_equal_budget_when_the_clean_goal_is_unreachable() -> None:
+    # Backward-compat: when no plan can reach 0 errors, the anytime stop never fires, so the loop
+    # runs the full budget and iterations equals max_iterations — exactly the old reported value.
+    bundle = _dirty_bundle()
+    runner = _runner()
+
+    plan = plan_repairs(bundle, runner, seed=0, max_iterations=50)
+
+    assert plan.final_open_errors == 1  # the missing-objective error has no deterministic fix
+    assert plan.iterations == 50

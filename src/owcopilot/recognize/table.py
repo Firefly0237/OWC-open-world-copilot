@@ -1,3 +1,4 @@
+# 从列语义未知的表格识别实体 + 关系（列含义靠推断）。
 """Recognize entities + relations from a spreadsheet whose columns we don't know in advance.
 
 Two deterministic jobs, both fully inspectable and overridable by a human:

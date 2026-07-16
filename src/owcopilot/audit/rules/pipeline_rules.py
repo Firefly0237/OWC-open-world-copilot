@@ -1,3 +1,4 @@
+# 生产流水线规则：本地化/UI 文本/术语一致性检查。
 """Production pipeline rules: localization, UI text and terminology checks."""
 
 from __future__ import annotations

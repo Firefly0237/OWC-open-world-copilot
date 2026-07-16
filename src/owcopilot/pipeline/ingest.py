@@ -1,3 +1,4 @@
+# 摄取流水线入口。
 """Ingest pipeline entrypoints."""
 
 from __future__ import annotations

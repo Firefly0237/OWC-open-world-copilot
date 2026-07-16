@@ -1,3 +1,4 @@
+# 整改工单生命周期：建立在确定性主题扫描之上（WS-D 版号/内容合规）。
 """Remediation case lifecycle on top of the deterministic theme sweep (WS-D).
 
 Open cases from a sweep, drive them through a legal state machine with an audit trail, rescan to

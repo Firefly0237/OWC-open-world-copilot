@@ -25,9 +25,9 @@ from contextlib import contextmanager
 
 from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest
 from owcopilot.content.store import ContentStore
-from owcopilot.core.skills import default_skill_registry
 from owcopilot.mcp_server import tools
 from owcopilot.pipeline.project import ProjectContext
+from owcopilot.skills import default_skill_registry
 
 
 def _dirty_project(content_root) -> None:

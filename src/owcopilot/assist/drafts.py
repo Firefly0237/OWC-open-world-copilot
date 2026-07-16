@@ -1,3 +1,4 @@
+# 受约束草稿生成：接地于世界、确定性过滤、进审阅队列。
 """Constrained draft generation.
 
 Draft generation is no longer the project axis. It is a sidecar assist feature: produce a
@@ -43,6 +44,10 @@ class RefineRound(BaseModel):
     auto_review_ok: bool = True  # False when this round's critique could not be parsed
     # Verbal self-reflection distilled from this round (Reflexion memory), carried forward.
     reflection: str = ""
+    # Snapshot of the quest THIS round's critique evaluated, set only when the round goes on to
+    # revise — the recoverable "rejected" side of a complete preference pair (see
+    # assist/dpo_export.py). None on pass/terminal rounds and on all pre-existing trails.
+    artifact_before: dict[str, Any] | None = None
 
 
 class DraftResult(BaseModel):
@@ -106,6 +111,10 @@ class QuestDraftService:
                 quest=quest,
                 context_lines=context_lines,
                 readiness_missing=readiness.missing,
+                # the same cross-session lesson archive the generator sees: a dimension humans
+                # keep rejecting makes the critic stricter on that dimension too
+                lessons=self.lessons,
+                inject_lessons=self.lessons is not None,
             )
             # An unparsable critique is NOT a pass — the quality gate failed to run. Track it so the
             # final draft is flagged for human scrutiny instead of being waved through.
@@ -133,6 +142,9 @@ class QuestDraftService:
                 break
             # Feed the whole reflection history forward (Reflexion), not just this round's fixes.
             reflections.append(reflection)
+            # This round revises: snapshot the quest being replaced (same dump shape as the
+            # review-queue payload) so complete preference pairs stay recoverable.
+            trail[-1].artifact_before = quest.model_dump(mode="json", exclude_none=True)
             quest = self._generate(
                 brief, pack, prior=quest, feedback=with_reflection_memory(fixes, reflections)
             )
@@ -253,6 +265,9 @@ def _draft_user_message(
     )
 
 
+# Kept off complete_structured: _normalize_quest_payload / _as_str_list do deliberate lossy coercion
+# (int→str, list-of-objects→id list, {}→[]) that absorbs real model shape drift before validate —
+# the content pipeline's wide-intake, which a direct QuestLogic-style single-model validate rejects.
 def parse_quest_draft(raw: str) -> Quest:
     data = extract_json_object(raw)
     if "id" not in data:
@@ -447,6 +462,7 @@ def _system_prompt(
     lesson_section = ""
     if inject_lessons and lessons:
         from .lessons import build_lesson_block
+
         lb = build_lesson_block(lessons, inject_lessons=inject_lessons)
         lesson_section = f"{lb}\n\n" if lb else ""
 
@@ -475,9 +491,9 @@ def _system_prompt(
         "The draft is not approved content; it will enter human review.\n\n"
         + industry_source_block(*QUEST_RUBRIC_SOURCES)
         + "\n"
-        + quality_bar        # BE-3: quality_bar first (highest priority, furthest from user msg)
-        + lesson_section     # BE-3: lesson after quality_bar (recency-closer, recent context)
-        + term_section       # BE-3: term constraints closest to content context
+        + quality_bar  # BE-3: quality_bar first (highest priority, furthest from user msg)
+        + lesson_section  # BE-3: lesson after quality_bar (recency-closer, recent context)
+        + term_section  # BE-3: term constraints closest to content context
         + f"{lang_line}\n"
         + "Content context:\n"
         + "\n".join(context_lines)

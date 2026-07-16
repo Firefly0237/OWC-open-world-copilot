@@ -1,3 +1,4 @@
+# HTTP 服务层：copilot 的可部署对外面。
 """HTTP service layer — the deployable surface of the copilot (audit Theme A).
 
 `create_app()` builds the FastAPI app; `app` is the module-level instance uvicorn/gunicorn target

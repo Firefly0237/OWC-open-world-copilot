@@ -1,3 +1,4 @@
+# AI 辅助的任务逻辑起草。
 """WS-M · B7 — AI-assisted quest logic drafting.
 
 The native logic layer (WS-A) is hand-authored today. B7 lets a model *draft* the variables /
@@ -14,14 +15,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from pydantic import ValidationError
-
 from ..assist.critic import CritiqueResult
 from ..assist.industry import LOGIC_RUBRIC_SOURCES, industry_source_block
 from ..assist.refine import RefineStep, run_refine_loop
 from ..content.models import Quest, QuestLogic
 from ..llm.gateway import LLMGateway
-from ..llm.jsonio import extract_json_object
+from ..llm.structured import StructuredOutputError, complete_structured
 from .audit import LogicIssue, audit_quest_logic
 
 LOGIC_DRAFT_TASK = "draft_quest_logic"
@@ -82,20 +81,6 @@ def _user_prompt(quest: Quest, intent: str, feedback: list[str]) -> str:
     return "\n".join(parts)
 
 
-def _parse_logic(raw: str) -> QuestLogic | None:
-    try:
-        data = extract_json_object(raw)
-    except ValueError:
-        return None
-    # tolerate the model omitting list fields
-    for key in ("variables", "stage_logic", "branches", "unlocks"):
-        data.setdefault(key, [])
-    try:
-        return QuestLogic.model_validate(data)
-    except ValidationError:
-        return None
-
-
 def draft_quest_logic(
     *,
     gateway: LLMGateway,
@@ -108,15 +93,25 @@ def draft_quest_logic(
     ValueError if the model never returns parseable logic (honest failure, not a fabricated one)."""
 
     def generate(feedback: list[str]) -> QuestLogic | None:
-        raw = gateway.complete(
-            task=LOGIC_DRAFT_TASK, system=_SYSTEM, user=_user_prompt(quest, intent, feedback)
-        )
-        return _parse_logic(raw)
+        # QuestLogic is a single validated model with no lossy pre-coercion (its list fields all
+        # default to []), so the structured-output layer owns run->validate->repair here:
+        # complete_structured re-asks ONCE quoting the specific pydantic error (sharper than the old
+        # generic JSON-only nudge). A repair-exhausted failure returns as StructuredOutputError,
+        # folded into the None sentinel the refine loop already reads as "unparsable": initial ->
+        # raise below, a refine round -> keep the last good draft (see regenerate).
+        try:
+            return complete_structured(
+                gateway,
+                task=LOGIC_DRAFT_TASK,
+                system=_SYSTEM,
+                user=_user_prompt(quest, intent, feedback),
+                model_cls=QuestLogic,
+            )
+        except StructuredOutputError:
+            return None
 
     initial = generate([])
-    if initial is None:  # one honest retry before giving up
-        initial = generate(["上次输出无法解析为合法 JSON，请只返回一个 QuestLogic JSON 对象。"])
-    if initial is None:
+    if initial is None:  # repair budget exhausted on the first draft — fail honestly, never fake
         raise ValueError("模型未能生成可解析的任务逻辑，请重试或改为人工编写。")
 
     parse_failed = False

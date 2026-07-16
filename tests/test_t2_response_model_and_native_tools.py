@@ -15,13 +15,6 @@ from typing import Any
 
 import pytest
 
-from owcopilot.core.skills import (
-    CostTier,
-    SideEffect,
-    Skill,
-    SkillParameter,
-    SkillRegistry,
-)
 from owcopilot.llm.cache import NoOpCache
 from owcopilot.llm.gateway import (
     LLMGateway,
@@ -34,6 +27,13 @@ from owcopilot.llm.gateway import (
 from owcopilot.llm.resilience import FailoverProvider
 from owcopilot.llm.router import StaticRouter
 from owcopilot.llm.telemetry import TelemetryCollector
+from owcopilot.skills import (
+    CostTier,
+    SideEffect,
+    Skill,
+    SkillParameter,
+    SkillRegistry,
+)
 
 # --------------------------------------------------------------------------- helpers
 
@@ -155,11 +155,17 @@ def test_provider_supports_tools_probe() -> None:
 
 
 def test_gateway_complete_with_tools_records_telemetry() -> None:
-    provider = _NativeProvider([ToolCallResponse(text="done", input_tokens=12, output_tokens=4,
-                                                 response_model="deepseek-v4-pro-0613")])
+    provider = _NativeProvider(
+        [
+            ToolCallResponse(
+                text="done", input_tokens=12, output_tokens=4, response_model="deepseek-v4-pro-0613"
+            )
+        ]
+    )
     gw, telemetry = _gateway(provider, task="agent_react")
-    resp = gw.complete_with_tools(task="agent_react", messages=[{"role": "user", "content": "g"}],
-                                  tools=[])
+    resp = gw.complete_with_tools(
+        task="agent_react", messages=[{"role": "user", "content": "g"}], tools=[]
+    )
     assert resp.text == "done"
     rec = telemetry.records[-1]
     assert rec.input_tokens == 12
@@ -214,9 +220,7 @@ class _FakeResp:
 
 
 def test_parse_tool_response_decodes_tool_calls() -> None:
-    resp = _FakeResp(
-        _FakeMessage(None, [_FakeToolCall("call_1", "audit_project", '{"x": 1}')])
-    )
+    resp = _FakeResp(_FakeMessage(None, [_FakeToolCall("call_1", "audit_project", '{"x": 1}')]))
     parsed = _parse_tool_response(resp)
     assert parsed.wants_tool_calls
     assert parsed.tool_calls == [

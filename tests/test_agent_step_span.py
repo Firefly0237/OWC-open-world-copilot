@@ -16,15 +16,16 @@ from typing import Any
 import pytest
 
 from owcopilot.agent.react import ReActAgent
-from owcopilot.core.skills import CostTier, SideEffect, Skill, SkillRegistry
 from owcopilot.llm.cache import NoOpCache
 from owcopilot.llm.gateway import LLMGateway
 from owcopilot.llm.router import StaticRouter
 from owcopilot.llm.telemetry import CallRecord, TelemetryCollector
+from owcopilot.skills import CostTier, SideEffect, Skill, SkillRegistry
 
 # ---------------------------------------------------------------------------
 # Helpers: instrumented provider and fake skill
 # ---------------------------------------------------------------------------
+
 
 class _InstrumentedProvider:
     """Returns scripted responses and sets a fake latency on each call."""
@@ -68,13 +69,15 @@ def _make_registry_with_skill(
         return return_value
 
     registry = SkillRegistry()
-    registry.register(Skill(
-        name=skill_name,
-        description="test skill",
-        cost_tier=CostTier.DETERMINISTIC,
-        side_effect=SideEffect.READ_ONLY,
-        handler=_handler,
-    ))
+    registry.register(
+        Skill(
+            name=skill_name,
+            description="test skill",
+            cost_tier=CostTier.DETERMINISTIC,
+            side_effect=SideEffect.READ_ONLY,
+            handler=_handler,
+        )
+    )
     return registry
 
 
@@ -90,6 +93,7 @@ def _final_response() -> str:
 # ---------------------------------------------------------------------------
 # records_since: unit tests
 # ---------------------------------------------------------------------------
+
 
 def test_records_since_basic_slice() -> None:
     """records_since returns records after the snapshot index."""
@@ -143,6 +147,7 @@ def test_records_since_negative_raises() -> None:
 # AgentStep.latency_ms from CallRecord
 # ---------------------------------------------------------------------------
 
+
 def test_step_latency_ms_from_call_record() -> None:
     """[硬] AgentStep.latency_ms is derived from real CallRecord, not hardcoded 0.
 
@@ -156,8 +161,8 @@ def test_step_latency_ms_from_call_record() -> None:
     provider = _InstrumentedProvider(
         responses=[
             _plan_response("check_world"),  # agent planning call #1
-            "dummy",                         # skill's inner LLM call (counted in step span)
-            _final_response(),               # agent planning call #2
+            "dummy",  # skill's inner LLM call (counted in step span)
+            _final_response(),  # agent planning call #2
         ]
     )
     gw = LLMGateway(
@@ -171,6 +176,7 @@ def test_step_latency_ms_from_call_record() -> None:
 
     def _patched_record(rec: CallRecord) -> None:
         from dataclasses import replace
+
         rec = replace(rec, latency_ms=FAKE_LATENCY)
         _orig_record(rec)
 
@@ -221,6 +227,7 @@ def test_step_latency_ms_is_zero_for_deterministic_skill() -> None:
 # AgentStep.cost_usd from CallRecord
 # ---------------------------------------------------------------------------
 
+
 def test_step_cost_usd_from_call_record() -> None:
     """[硬] AgentStep.cost_usd is derived from real CallRecord (tokens * price).
 
@@ -230,8 +237,8 @@ def test_step_cost_usd_from_call_record() -> None:
     provider = _InstrumentedProvider(
         responses=[
             _plan_response("check_world"),  # agent planning call #1
-            "dummy",                         # skill's inner LLM call (counted in step span)
-            _final_response(),               # agent planning call #2
+            "dummy",  # skill's inner LLM call (counted in step span)
+            _final_response(),  # agent planning call #2
         ],
         tokens_in=100,
         tokens_out=50,
@@ -258,9 +265,7 @@ def test_step_cost_usd_from_call_record() -> None:
 
 def test_step_cost_usd_zero_for_deterministic_skill() -> None:
     """Deterministic skill with no gateway calls -> cost_usd == 0.0."""
-    provider = _InstrumentedProvider(
-        responses=[_plan_response("check_world"), _final_response()]
-    )
+    provider = _InstrumentedProvider(responses=[_plan_response("check_world"), _final_response()])
     gw = LLMGateway(
         providers={"mock": provider},
         router=StaticRouter(mapping={"agent_react": "mock", "default": "mock"}),
@@ -275,6 +280,7 @@ def test_step_cost_usd_zero_for_deterministic_skill() -> None:
 # ---------------------------------------------------------------------------
 # Multi-step: planning call not in step span
 # ---------------------------------------------------------------------------
+
 
 def test_planning_call_not_counted_in_step_span() -> None:
     """[硬] The planning LLM call is NOT counted in the step's latency/cost span.
@@ -292,8 +298,8 @@ def test_planning_call_not_counted_in_step_span() -> None:
 
     scripted = [
         _plan_response("check_world"),  # planning call #1
-        "dummy",                         # skill's inner call
-        _final_response(),               # planning call #2 (produces final answer)
+        "dummy",  # skill's inner call
+        _final_response(),  # planning call #2 (produces final answer)
     ]
     scripted_idx = [0]
 
@@ -316,6 +322,7 @@ def test_planning_call_not_counted_in_step_span() -> None:
 
     def _patched_record(rec: CallRecord) -> None:
         from dataclasses import replace
+
         idx = min(call_count[0], len(latencies) - 1)
         call_count[0] += 1
         rec = replace(rec, latency_ms=latencies[idx])
@@ -337,6 +344,7 @@ def test_planning_call_not_counted_in_step_span() -> None:
 # ---------------------------------------------------------------------------
 # Multi-call aggregation within a single step
 # ---------------------------------------------------------------------------
+
 
 def test_multi_call_per_step_aggregated() -> None:
     """[硬] Skill that makes multiple gateway calls -> step latency/cost aggregated from all."""
@@ -369,6 +377,7 @@ def test_multi_call_per_step_aggregated() -> None:
 
     def _patched_record(rec: CallRecord) -> None:
         from dataclasses import replace
+
         rec = replace(rec, latency_ms=CALL_LATENCY)
         _orig_record(rec)
 
@@ -409,9 +418,7 @@ def test_step_span_exactly_equals_skill_call_records() -> None:
     # SKILL_CALLS_PER_STEP inner calls. Response script accounts for every gateway.complete():
     #   plan#1 (action) | skill_call#1 | skill_call#2 | plan#2 (final answer)
     scripted = (
-        [_plan_response("check_world")]
-        + ["dummy"] * SKILL_CALLS_PER_STEP
-        + [_final_response()]
+        [_plan_response("check_world")] + ["dummy"] * SKILL_CALLS_PER_STEP + [_final_response()]
     )
     scripted_idx = [0]
 
@@ -433,6 +440,7 @@ def test_step_span_exactly_equals_skill_call_records() -> None:
 
     def _patched_record(rec: CallRecord) -> None:
         from dataclasses import replace
+
         call_seq[0] += 1
         rec = replace(rec, latency_ms=float(call_seq[0]) * 37.0)  # 37, 74, 111, 148, ...
         _orig_record(rec)

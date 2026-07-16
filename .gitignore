@@ -12,7 +12,7 @@ build/
 dist/
 .idea/
 .vscode/
-# Claude Code (AI dev tool) local config — IDE-style personal tooling, never published
+# Local editor/tool configuration
 .claude/
 .Rhistory
 # benchmark output at repo root only — project_docs/reports/ (real-LLM test records) stays tracked
@@ -25,8 +25,41 @@ dist/
 # personal project notes/docs stay local only
 /CHANGELOG.md
 /project_docs/
+/benchmarks/
+/docs/interview_prep/
+/docs/research/
+/docs/live_agent_showcase.md
+/docs/product_thesis.md
+/docs/演示动线.md
+/frontend/scripts/
+/scripts/collect_preference_pairs.py
+/scripts/gen_runner_traces.py
+/scripts/prompt_ab_followup.py
+/scripts/run_ab_eval.py
+/scripts/run_complexity_benchmark.py
+/scripts/run_demo_pipeline.py
+/scripts/run_ink_losslessness.py
+/scripts/run_live_eval.py
+/scripts/run_scale_benchmark.py
+/tests/fixtures/
+/unity/com.owcopilot.content-import/Tests/
+/unity/com.owcopilot.content-import/Tests.meta
+/unity/offengine-tests/
 
-# P0 scaling probes: disposable isolated venv + vendored wheels (not for the repo)
-scratchpad/testvenv/
-scratchpad/wheels/
-scratchpad/wheels2/
+# Local scratch/working area - not product
+scratchpad/
+
+# UE content-only plugin: never commit regenerated engine artifacts (content-only plugins don't
+# even produce these, but guard defensively). The .uplugin + Content/Python/*.py are the payload.
+integrations/unreal/**/Binaries/
+integrations/unreal/**/Intermediate/
+
+# Unity UPM package: the payload is text (.cs/.asmdef/package.json/.md) + committed .meta (GUIDs must
+# be tracked). Ignore only Unity/dotnet build artifacts from any throwaway authoring/test project —
+# never .meta.
+unity/**/[Ll]ibrary/
+unity/**/[Tt]emp/
+unity/**/[Oo]bj/
+unity/**/[Ll]ogs/
+unity/**/*.csproj
+unity/**/*.sln

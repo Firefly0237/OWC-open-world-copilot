@@ -1,3 +1,4 @@
+# 设计就绪度分析：确定性的『这内容能发了吗』评分。
 """Design-readiness analysis: deterministic "is this content ready to ship?" scoring.
 
 Distinct from the audit (correctness). See ``project_docs/开发全过程.md``.

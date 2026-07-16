@@ -1,3 +1,4 @@
+# 审计执行器：跑规则集、汇总 findings。
 """Audit runner."""
 
 from __future__ import annotations

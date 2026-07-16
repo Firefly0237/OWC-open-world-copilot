@@ -1,3 +1,4 @@
+# 稳定内容哈希（缓存命名空间/审计可复现/溯源）。
 """Stable content hashes for cache namespaces, audit reproducibility and traceability."""
 
 from __future__ import annotations

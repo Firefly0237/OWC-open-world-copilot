@@ -1,3 +1,4 @@
+# 信任、溯源、路径安全助手。
 """Trust, provenance, and path-safety helpers."""
 
 from .provenance import (
