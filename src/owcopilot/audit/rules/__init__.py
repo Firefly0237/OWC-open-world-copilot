@@ -3,9 +3,12 @@
 
 from .dialogue_rules import (
     DialogueChoiceConditionRule,
+    DialogueSelfReportInconsistencyRule,
     DialogueTreeBrokenLinkRule,
+    DialogueTreeMissingTextKeyRule,
     DialogueTreeUnknownSpeakerRule,
     DialogueTreeUnreachableNodeRule,
+    DialogueUngatedSiblingChoiceRule,
 )
 from .graph_rules import (
     DuplicateRelationRule,
@@ -43,18 +46,23 @@ from .region_rules import (
     RegionLevelBoundsRule,
 )
 from .security_rules import PromptInjectionRule
+from .temporal_rules import FlagTemporalInvariantRule
 from .trust_rules import UnreviewedAIContentRule
 
 __all__ = [
     "CharacterStateContradictionRule",
     "DialogueChoiceConditionRule",
+    "DialogueSelfReportInconsistencyRule",
+    "DialogueUngatedSiblingChoiceRule",
     "DialogueTreeBrokenLinkRule",
+    "DialogueTreeMissingTextKeyRule",
     "DialogueTreeUnknownSpeakerRule",
     "DialogueTreeUnreachableNodeRule",
     "DeprecatedEntityReferenceRule",
     "DuplicateRelationRule",
     "EventResultReferencedTooEarlyRule",
     "FactionConflictRule",
+    "FlagTemporalInvariantRule",
     "MissingDialogueReferenceRule",
     "MissingEntityReferenceRule",
     "MissingLocalizationKeyRule",

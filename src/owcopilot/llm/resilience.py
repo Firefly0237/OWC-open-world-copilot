@@ -2,9 +2,9 @@
 # complete_with_tools),避免"开韧性即退化文本 ReAct"。
 """Provider-level resilience: failover to a secondary provider, plus a circuit breaker.
 
-Both are ``LLMProvider`` decorators (the same ``complete()`` contract as ``OpenAICompatProvider``),
+Both are ``LLMProvider`` decorators (the same ``complete()`` contract as ``ChatModelProvider``),
 so they compose and the gateway is untouched. They are **opt-in via env**: ``build_real_provider``
-returns a plain ``OpenAICompatProvider`` unless ``OWCOPILOT_FALLBACK_MODEL`` /
+returns a plain ``ChatModelProvider`` unless ``OWCOPILOT_FALLBACK_MODEL`` /
 ``OWCOPILOT_CIRCUIT_BREAKER`` are set, so default real-mode behaviour is byte-for-byte unchanged.
 
 Why: the gateway already retries, classifies and fails *closed* (it never silently downgrades), but
@@ -29,18 +29,32 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 import time
 from collections.abc import Callable
 from typing import Any
 
+from .chat_model import ChatModelProvider
+from .circuit import (
+    CIRCUIT_FAILURE_THRESHOLD_ENV,
+    CIRCUIT_RESET_SEC_ENV,
+    CircuitOpenError,
+    _CircuitState,
+    circuit_enabled_from_env,
+)
 from .gateway import (
     LLMProvider,
-    OpenAICompatProvider,
     ToolCallResponse,
     _classify_provider_error,
     provider_supports_tools,
 )
+
+__all__ = [
+    "CircuitBreakerProvider",
+    "CircuitOpenError",
+    "FailoverProvider",
+    "PROVIDER_CAPABILITY_MEMBERS",
+    "build_real_provider",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +69,6 @@ PROVIDER_CAPABILITY_MEMBERS: tuple[str, ...] = (
     "supports_tools",
     "complete_with_tools",
 )
-
-
-class CircuitOpenError(RuntimeError):
-    """Raised by :class:`CircuitBreakerProvider` when the circuit is open — fail fast, no call."""
 
 
 class FailoverProvider:
@@ -108,8 +118,8 @@ class FailoverProvider:
         """Native tool-calling capability probe, forwarded from PRIMARY.
 
         Prospective, like ``.model``: the caller (``provider_supports_tools`` via
-        ``ReActAgent._native_tools_available`` / ``LLMGateway.complete_with_tools``) decides
-        text-vs-native ONCE, before any call is attempted — at that point whether *this specific*
+        ``LLMGateway.complete_with_tools``) checks the capability ONCE, before any call is
+        attempted — at that point whether *this specific*
         call will end up failing over is unknowable, so the probe reports the provider that will be
         tried first, exactly as ``.model`` does for the cache key. It never reports a false
         capability: if primary genuinely lacks tool support this is False, never borrowed from a
@@ -176,13 +186,16 @@ class CircuitBreakerProvider:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.inner = inner
-        self.failure_threshold = max(1, failure_threshold)
-        self.reset_timeout_seconds = max(0.0, reset_timeout_seconds)
-        self._clock = clock
-        self._lock = threading.Lock()
-        self._failures = 0
-        self._opened_at: float | None = None  # None = closed
-        self.trips = 0
+        self._state = _CircuitState(
+            failure_threshold=failure_threshold,
+            reset_timeout_seconds=reset_timeout_seconds,
+            clock=clock,
+        )
+
+    @property
+    def trips(self) -> int:
+        """How many times the circuit has opened (delegated to the shared state machine)."""
+        return self._state.trips
 
     @property
     def model(self) -> str:
@@ -203,10 +216,7 @@ class CircuitBreakerProvider:
 
     @property
     def is_open(self) -> bool:
-        with self._lock:
-            return self._opened_at is not None and (
-                self._clock() - self._opened_at < self.reset_timeout_seconds
-            )
+        return self._state.is_open
 
     def complete(self, *, system: str, user: str, model: str) -> tuple:
         return self._call_through(
@@ -222,7 +232,7 @@ class CircuitBreakerProvider:
         ``inner.complete_with_tools``. Assumes the caller already probed ``supports_tools`` — the
         gateway's ``LLMGateway.complete_with_tools`` does, via
         ``provider_supports_tools(provider)``, before ever calling in here — same contract
-        ``OpenAICompatProvider.complete_with_tools`` itself relies on (no redundant self-check)."""
+        the real provider's ``complete_with_tools`` itself relies on (no redundant self-check)."""
         # Optional protocol member — see the matching comment on FailoverProvider's version.
         inner: Any = self.inner
         return self._call_through(
@@ -230,32 +240,11 @@ class CircuitBreakerProvider:
         )
 
     def _call_through(self, fn: Callable[[], Any]) -> Any:
-        """Shared open-check / failure-streak bookkeeping for both ``complete()`` and
-        ``complete_with_tools()`` — extracted so the two call shapes share exactly one circuit
-        instead of drifting into two independently-tracked ones."""
-        with self._lock:
-            if self._opened_at is not None:
-                if self._clock() - self._opened_at < self.reset_timeout_seconds:
-                    raise CircuitOpenError("provider circuit is open; failing fast")
-                # cooldown elapsed -> fall through as a half-open trial
-        try:
-            result = fn()
-        except Exception:
-            with self._lock:
-                self._failures += 1
-                if self._failures >= self.failure_threshold:
-                    if self._opened_at is None:
-                        self.trips += 1
-                    self._opened_at = self._clock()
-            raise
-        with self._lock:  # a success closes the circuit
-            self._failures = 0
-            self._opened_at = None
-        return result
-
-
-def _env_flag(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+        """Route both ``complete()`` and ``complete_with_tools()`` through the SAME
+        :class:`~owcopilot.llm.circuit._CircuitState`, so the two call shapes share exactly one
+        circuit (they exercise the same underlying provider connection) instead of drifting into
+        two independently-tracked ones."""
+        return self._state.run(fn)
 
 
 def build_real_provider(
@@ -265,9 +254,11 @@ def build_real_provider(
     timeout: float | None = None,
     max_output_tokens: int | None = None,
 ) -> LLMProvider:
-    """Build the real OpenAI-compatible provider, optionally wrapped with failover + a circuit
-    breaker per env. With no env set this is exactly ``OpenAICompatProvider(...)`` — so existing
-    real-mode behaviour is unchanged; the resilience is purely additive when a studio opts in.
+    """Build the real provider — the LangChain-backed :class:`ChatModelProvider` — optionally
+    wrapped with failover + a circuit breaker per env. This is the ONE birth point of every
+    real provider in the product, so the T1a model-layer swap (self-built HTTP →
+    ChatDeepSeek/ChatOpenAI) happened here once; the wrapping logic is untouched and purely
+    additive when a studio opts in.
 
     Env:
       ``OWCOPILOT_FALLBACK_MODEL``            secondary model id; enables failover when set.
@@ -276,12 +267,12 @@ def build_real_provider(
       ``OWCOPILOT_CIRCUIT_FAILURE_THRESHOLD`` consecutive failures to open (default 5).
       ``OWCOPILOT_CIRCUIT_RESET_SEC``         open-state cooldown seconds (default 30).
     """
-    provider: LLMProvider = OpenAICompatProvider(
+    provider: LLMProvider = ChatModelProvider(
         model=model, json_mode=json_mode, timeout=timeout, max_output_tokens=max_output_tokens
     )
     fallback_model = os.getenv("OWCOPILOT_FALLBACK_MODEL", "").strip()
     if fallback_model:
-        secondary = OpenAICompatProvider(
+        secondary = ChatModelProvider(
             model=fallback_model,
             base_url_env="OWCOPILOT_FALLBACK_BASE_URL",
             api_key_env="OWCOPILOT_FALLBACK_API_KEY",
@@ -290,10 +281,10 @@ def build_real_provider(
             max_output_tokens=max_output_tokens,
         )
         provider = FailoverProvider(provider, secondary)
-    if _env_flag("OWCOPILOT_CIRCUIT_BREAKER"):
+    if circuit_enabled_from_env():
         provider = CircuitBreakerProvider(
             provider,
-            failure_threshold=int(os.getenv("OWCOPILOT_CIRCUIT_FAILURE_THRESHOLD", "5")),
-            reset_timeout_seconds=float(os.getenv("OWCOPILOT_CIRCUIT_RESET_SEC", "30")),
+            failure_threshold=int(os.getenv(CIRCUIT_FAILURE_THRESHOLD_ENV, "5")),
+            reset_timeout_seconds=float(os.getenv(CIRCUIT_RESET_SEC_ENV, "30")),
         )
     return provider

@@ -1,18 +1,8 @@
-import sys
-import types
-
 import pytest
 
-from owcopilot.llm.gateway import LLMGateway, LLMGatewayError, MockProvider, OpenAICompatProvider
+from owcopilot.llm.gateway import LLMGateway, LLMGatewayError, MockProvider
 from owcopilot.llm.router import StaticRouter
 from owcopilot.llm.telemetry import PRICES, TelemetryCollector
-
-
-def test_openai_provider_fails_fast_without_api_key():
-    # A missing key must raise an actionable error before any network call.
-    provider = OpenAICompatProvider(model="x", api_key_env="OWCOPILOT_UNSET_KEY_FOR_TEST")
-    with pytest.raises(RuntimeError, match="needs an API key"):
-        provider.complete(system="s", user="u", model="x")
 
 
 def test_routing_and_telemetry():
@@ -81,47 +71,6 @@ def test_gateway_does_not_cache_empty_response():
     assert prov.calls == 2
 
 
-def test_openai_provider_gates_json_mode_on_prompt_mentioning_json():
-    # DeepSeek/OpenAI 400 if response_format=json_object but the prompt has no 'json'.
-    # The planner prompt has none (and is discarded); generate/repair prompts do.
-    p = OpenAICompatProvider(model="deepseek-v4-flash")  # json_mode=True default
-    assert p._wants_json("Return ONE JSON object with keys: …", "make a quest") is True
-    assert p._wants_json("You are a planner.", "Decompose into steps: foo") is False
-    assert OpenAICompatProvider(model="x", json_mode=False)._wants_json("Return JSON", "x") is False
-
-
-def test_openai_provider_retries_with_max_completion_tokens(monkeypatch):
-    calls = []
-
-    class _Completions:
-        def create(self, **kwargs):
-            calls.append(kwargs)
-            if "max_tokens" in kwargs:
-                raise RuntimeError(
-                    "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead."
-                )
-            return types.SimpleNamespace(
-                choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="pong"))],
-                usage=types.SimpleNamespace(prompt_tokens=4, completion_tokens=1),
-            )
-
-    client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=_Completions()))
-    fake_openai = types.SimpleNamespace(OpenAI=lambda **_kwargs: client)
-    monkeypatch.setitem(sys.modules, "openai", fake_openai)
-
-    provider = OpenAICompatProvider(model="gpt-current", max_output_tokens=16)
-    text, in_tok, out_tok, cached, resp_model = provider.complete(
-        system="s", user="u", model="cheap"
-    )
-
-    assert text == "pong"
-    assert (in_tok, out_tok, cached) == (4, 1, 0)
-    # The fake response has no `model` attribute → response_model degrades to "" (not a crash).
-    assert resp_model == ""
-    assert "max_tokens" in calls[0]
-    assert calls[1]["max_completion_tokens"] == 16
-
-
 def test_gateway_retries_transient_provider_error():
     class _Flaky:
         def __init__(self):
@@ -152,57 +101,6 @@ def test_gateway_classifies_provider_error_after_retries_exhausted():
         assert e.attempts == 2
     else:
         raise AssertionError("expected LLMGatewayError")
-
-
-# ---------------------------------------------------------------------------
-# Output-cap truncation (finish_reason="length"): guided error, no wasted retry.
-# Live-run finding: the reasoning default model spends completion budget on hidden
-# reasoning; a capped reply used to surface as a raw "no balanced JSON span" much later.
-# ---------------------------------------------------------------------------
-
-
-def _resp(finish_reason: str, completion_tokens: int = 3000):
-    return types.SimpleNamespace(
-        choices=[
-            types.SimpleNamespace(
-                message=types.SimpleNamespace(content='{"half": '),
-                finish_reason=finish_reason,
-            )
-        ],
-        usage=types.SimpleNamespace(prompt_tokens=10, completion_tokens=completion_tokens),
-    )
-
-
-def test_truncated_output_raises_guided_error():
-    from owcopilot.llm.gateway import OutputTruncatedError, _raise_if_output_truncated
-
-    with pytest.raises(OutputTruncatedError, match="OWCOPILOT_MAX_OUTPUT_TOKENS"):
-        _raise_if_output_truncated(_resp("length"), cap=3000)
-    # a normal stop must pass through untouched (and a missing field must not crash)
-    _raise_if_output_truncated(_resp("stop"), cap=3000)
-    no_field = types.SimpleNamespace(
-        choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="ok"))]
-    )
-    _raise_if_output_truncated(no_field, cap=3000)
-
-
-def test_provider_complete_rejects_truncated_reply(monkeypatch):
-    """The check is wired inside ``complete`` — a capped reply never reaches the JSON parser."""
-    from owcopilot.llm.gateway import OutputTruncatedError
-
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
-
-    class _Completions:
-        def create(self, **kwargs):
-            return _resp("length", completion_tokens=16)
-
-    client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=_Completions()))
-    fake_openai = types.SimpleNamespace(OpenAI=lambda **_kwargs: client)
-    monkeypatch.setitem(sys.modules, "openai", fake_openai)
-
-    provider = OpenAICompatProvider(model="gpt-current", max_output_tokens=16)
-    with pytest.raises(OutputTruncatedError, match="completion_tokens=16"):
-        provider.complete(system="s", user="u", model="cheap")
 
 
 def test_gateway_output_budget_fails_fast_without_retry():

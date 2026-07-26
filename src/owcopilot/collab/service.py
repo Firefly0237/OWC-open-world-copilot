@@ -10,10 +10,11 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 
+from ..errors import OWCopilotError
 from .models import Assignment, CollabState, Comment, Lock
 
 
-class ConflictError(ValueError):
+class ConflictError(OWCopilotError, ValueError):
     """A concurrent-edit conflict: stale etag, or a lock held by someone else."""
 
 

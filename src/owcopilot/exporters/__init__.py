@@ -10,6 +10,7 @@ from .unity_localization import (
 )
 from .unity_manifest import write_unity_manifest
 from .unreal_datatable import (
+    AuditFindingInput,
     PreflightIssue,
     PreflightReport,
     PreflightSeverity,
@@ -31,6 +32,7 @@ __all__ = [
     "UnityLocalizationSummary",
     "UnrealExportResult",
     "UnrealExportError",
+    "AuditFindingInput",
     "PreflightReport",
     "PreflightIssue",
     "PreflightSeverity",

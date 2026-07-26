@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -238,6 +239,29 @@ def test_mcp_export_project_writes_engine_scoped_bundle(tmp_path, monkeypatch) -
     assert (export_dir / "manifest.json").exists()
     assert result["manifest"]["target_engine"] == "generic"
     assert result["cost_budget"]["used_usd"] == 0.0
+
+
+def test_mcp_export_project_row_struct_map_renames_columns(tmp_path, monkeypatch) -> None:
+    """A1 (MCP entry): the row_struct_map tool argument threads into the UE projection — the
+    renamed column reaches Quests.json and the C++ row header, proving the arg is wired."""
+    content_root = tmp_path / "content"
+    output_root = tmp_path / "exports"
+    _write_clean_project(content_root)
+    monkeypatch.setenv("OWCOPILOT_EXPORT_ROOT", str(tmp_path))
+
+    result = export_project(
+        content_root=str(content_root),
+        output_dir=str(output_root),
+        target_engine="unreal",
+        row_struct_map={"quests": {"DisplayName": "sDisplayName"}},
+    )
+
+    unreal_dir = Path(result["output_dir"]) / "unreal"
+    quests = json.loads((unreal_dir / "Quests.json").read_text(encoding="utf-8"))
+    row = next(r for r in quests if r["Name"] == "q1")
+    assert "sDisplayName" in row and "DisplayName" not in row
+    header = (unreal_dir / "OWCopilotRows.h").read_text(encoding="utf-8")
+    assert "FText sDisplayName;" in header
 
 
 def test_mcp_export_project_blocks_open_errors(tmp_path, monkeypatch) -> None:

@@ -1,0 +1,110 @@
+{
+  "id": "hl_daiyu_jiafu",
+  "title": "黛玉初进贾府",
+  "giver_npc": "jiamu",
+  "location": null,
+  "objective": "黛玉拜见贾母、王夫人、凤姐与宝玉，在应答进退间显出心思。（改编创作，非原文引用）",
+  "prerequisites": [],
+  "timeline_order": 3,
+  "stages": [
+    {
+      "id": "n010",
+      "summary": "拜见贾母",
+      "location": null,
+      "required_entities": ["daiyu", "jiamu"]
+    },
+    {
+      "id": "n020",
+      "summary": "见王夫人与凤姐",
+      "location": null,
+      "required_entities": ["daiyu", "wangfuren", "xifeng"]
+    },
+    {
+      "id": "n030",
+      "summary": "见宝玉",
+      "location": null,
+      "required_entities": ["daiyu", "baoyu"]
+    },
+    {
+      "id": "n040",
+      "summary": "摔玉与收束",
+      "location": null,
+      "required_entities": ["daiyu", "baoyu"]
+    }
+  ],
+  "rewards": [],
+  "dialogue_refs": [],
+  "localization_keys": ["quest.hl_daiyu_jiafu.objective"],
+  "tags": ["main", "chapter3", "demo"],
+  "metadata": {},
+  "origin": "human",
+  "review_status": "approved",
+  "logic": {
+    "variables": [
+      { "id": "grandma_favor", "name": "贾母好感", "type": "int", "default": 0, "enum_values": [] },
+      { "id": "said_read_books", "name": "对贾母称已读书", "type": "bool", "default": false, "enum_values": [] },
+      { "id": "baoyu_impression", "name": "宝玉印象分（负面）", "type": "int", "default": 0, "enum_values": [] },
+      { "id": "careful", "name": "谨慎谦辞", "type": "bool", "default": false, "enum_values": [] }
+    ],
+    "precondition": "",
+    "stage_logic": [],
+    "branches": [
+      {
+        "id": "b_n010_c1",
+        "from_stage": "n010",
+        "condition": "",
+        "to_stage": "n020",
+        "outcome": "",
+        "effects": [
+          { "var": "said_read_books", "op": "set", "value": true },
+          { "var": "grandma_favor", "op": "inc", "value": 1 }
+        ]
+      },
+      {
+        "id": "b_n010_c2",
+        "from_stage": "n010",
+        "condition": "",
+        "to_stage": "n020",
+        "outcome": "",
+        "effects": [
+          { "var": "careful", "op": "set", "value": true }
+        ]
+      },
+      {
+        "id": "b_n030_c1",
+        "from_stage": "n030",
+        "condition": "said_read_books == true",
+        "to_stage": "n040",
+        "outcome": "",
+        "effects": []
+      },
+      {
+        "id": "b_n030_c2",
+        "from_stage": "n030",
+        "condition": "",
+        "to_stage": "n040",
+        "outcome": "",
+        "effects": [
+          { "var": "baoyu_impression", "op": "inc", "value": 1 }
+        ]
+      },
+      {
+        "id": "b_end_calm",
+        "from_stage": "n040",
+        "condition": "careful == false and baoyu_impression == 0",
+        "to_stage": "",
+        "outcome": "从容收场",
+        "effects": []
+      },
+      {
+        "id": "b_end_drama",
+        "from_stage": "n040",
+        "condition": "baoyu_impression >= 1",
+        "to_stage": "",
+        "outcome": "摔玉风波",
+        "effects": []
+      }
+    ],
+    "unlocks": []
+  }
+}

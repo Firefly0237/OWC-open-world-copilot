@@ -1,0 +1,132 @@
+# 熔断器状态机：CLOSED/OPEN/half-open 的连续失败计数与冷却探测，供 provider 与 chat model 两层复用。
+# 单独成模块以打破 resilience(文本路径) 与 chat_model(agent 路径) 的循环依赖——两者都只依赖这里。
+"""The circuit-breaker state machine, shared by both resilience wrappers.
+
+One implementation of the CLOSED / OPEN / half-open bookkeeping, used by BOTH the text path's
+:class:`~owcopilot.llm.resilience.CircuitBreakerProvider` (wraps an ``LLMProvider``) and the agent
+path's :class:`~owcopilot.llm.chat_model.CircuitBreakerChatModel` (wraps a LangChain ``Runnable``).
+It lives in its own module so neither of those two modules has to import the other —
+``resilience`` already imports ``chat_model`` (for ``ChatModelProvider``), so a breaker in
+``chat_model`` reaching back for the state machine would close an import cycle. Here both sides
+depend only on this leaf module.
+
+State machine (in-memory, single-process — a multi-instance deploy would share the state):
+
+* **CLOSED** — calls pass through; ``failure_threshold`` *consecutive* failures open the circuit.
+* **OPEN** — calls fail fast with :class:`CircuitOpenError` for ``reset_timeout_seconds``.
+* **half-open** — the first call after the cooldown is a trial: success closes the circuit, a
+  failure re-opens it (restarting the cooldown without counting a new trip).
+
+``trips`` counts how many times the circuit has opened (a re-open from half-open is not a new trip).
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+import time
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from ..errors import OWCopilotError
+
+#: The circuit-breaker env contract — ONE set of names both the text path
+#: (:func:`~owcopilot.llm.resilience.build_real_provider`) and the agent path
+#: (:func:`~owcopilot.llm.chat_model.build_chat_model_with_resilience`) read, so a studio
+#: configures the breaker once for both.
+CIRCUIT_BREAKER_ENV = "OWCOPILOT_CIRCUIT_BREAKER"
+CIRCUIT_FAILURE_THRESHOLD_ENV = "OWCOPILOT_CIRCUIT_FAILURE_THRESHOLD"
+CIRCUIT_RESET_SEC_ENV = "OWCOPILOT_CIRCUIT_RESET_SEC"
+
+
+def circuit_enabled_from_env() -> bool:
+    """Whether ``OWCOPILOT_CIRCUIT_BREAKER`` opts the circuit breaker in (unset ⇒ off)."""
+    return os.getenv(CIRCUIT_BREAKER_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def circuit_state_from_env() -> _CircuitState:
+    """A fresh :class:`_CircuitState` configured from the env contract (threshold 5 / reset 30s)."""
+    return _CircuitState(
+        failure_threshold=int(os.getenv(CIRCUIT_FAILURE_THRESHOLD_ENV, "5")),
+        reset_timeout_seconds=float(os.getenv(CIRCUIT_RESET_SEC_ENV, "30")),
+    )
+
+
+class CircuitOpenError(OWCopilotError, RuntimeError):
+    """Raised by a circuit breaker when the circuit is open — fail fast, no call made."""
+
+
+class _CircuitState:
+    """The consecutive-failure / open-cooldown / half-open-trial bookkeeping for one circuit.
+
+    Shared by a breaker and every wrapper derived from it (e.g. a ``bind_tools`` result), so the
+    circuit's health outlives any single wrapper instance: the agent host re-binds tools on the
+    breaker on every model call, and those bound wrappers must all read and mutate the SAME state.
+    """
+
+    def __init__(
+        self,
+        *,
+        failure_threshold: int = 5,
+        reset_timeout_seconds: float = 30.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.failure_threshold = max(1, failure_threshold)
+        self.reset_timeout_seconds = max(0.0, reset_timeout_seconds)
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._failures = 0
+        self._opened_at: float | None = None  # None = closed
+        self.trips = 0
+
+    @property
+    def is_open(self) -> bool:
+        """True while the circuit is fast-failing (open and still within the cooldown window)."""
+        with self._lock:
+            return self._opened_at is not None and (
+                self._clock() - self._opened_at < self.reset_timeout_seconds
+            )
+
+    def _guard(self) -> None:
+        """Fast-fail if the circuit is open and still cooling; a lapsed cooldown falls through as a
+        half-open trial (the guard returns and the call is allowed to run)."""
+        with self._lock:
+            if self._opened_at is not None and (
+                self._clock() - self._opened_at < self.reset_timeout_seconds
+            ):
+                raise CircuitOpenError("provider circuit is open; failing fast")
+
+    def _on_failure(self) -> None:
+        with self._lock:
+            self._failures += 1
+            if self._failures >= self.failure_threshold:
+                if self._opened_at is None:  # first open — not a re-open from half-open
+                    self.trips += 1
+                self._opened_at = self._clock()
+
+    def _on_success(self) -> None:
+        with self._lock:  # a success closes the circuit and clears the streak
+            self._failures = 0
+            self._opened_at = None
+
+    def run(self, fn: Callable[[], Any]) -> Any:
+        """Run *fn* under the circuit: fast-fail when open, else call and update the streak."""
+        self._guard()
+        try:
+            result = fn()
+        except Exception:
+            self._on_failure()
+            raise
+        self._on_success()
+        return result
+
+    async def arun(self, afn: Callable[[], Awaitable[Any]]) -> Any:
+        """Async sibling of :meth:`run` — identical bookkeeping around an awaited call."""
+        self._guard()
+        try:
+            result = await afn()
+        except Exception:
+            self._on_failure()
+            raise
+        self._on_success()
+        return result

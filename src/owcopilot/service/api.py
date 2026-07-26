@@ -30,6 +30,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from ..config import DEFAULT_CHEAP_MODEL
 from ..llm.gateway import (
     OFFLINE_LLM_FORBIDDEN_MESSAGE,
     LLMGateway,
@@ -114,7 +115,7 @@ def _task_gateway(
     telemetry = TelemetryCollector()
     if req.llm_mode == "real":
         _require_real_allowed(request)
-        model: str = req.llm_model or os.getenv("OWCOPILOT_CHEAP_MODEL") or "deepseek-v4-flash"
+        model: str = req.llm_model or os.getenv("OWCOPILOT_CHEAP_MODEL") or DEFAULT_CHEAP_MODEL
         provider: Any = build_real_provider(model=model)
     elif offline_provider is None:
         return None, telemetry

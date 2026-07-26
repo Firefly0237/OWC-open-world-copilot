@@ -11,6 +11,10 @@ from ..models import Category, Evidence, Issue, Severity
 
 _PLACEHOLDER_RE = re.compile(r"\{(?:[a-zA-Z_][a-zA-Z0-9_]*|\d+)\}")
 
+# 任务在消息里给策划看的标签：优先带标题，没有标题时才退回只报编号（多条规则要用到）。
+def _quest_label(quest_id: str, title: str) -> str:
+    return f"任务《{title}》(编号 {quest_id})" if title else f"编号为 {quest_id} 的任务"
+
 
 class MissingLocalizationKeyRule:
     code = "MISSING_LOCALIZATION_KEY"
@@ -21,15 +25,22 @@ class MissingLocalizationKeyRule:
         for quest in ctx.bundle.quests.values():
             if not quest.localization_keys:
                 target_ref = f"quest:{quest.id}"
+                key = f"quest.{quest.id}.objective"
                 yield Issue(
                     rule_code=self.code,
                     severity=self.severity,
                     category=self.category,
                     target_ref=target_ref,
-                    message=f"Quest '{quest.id}' has no localization keys",
+                    message=(
+                        f"{_quest_label(quest.id, quest.title)}还没有配置本地化键,进不了本地化流程,"
+                        "上线后这个任务的文本可能显示不出来,或者玩家只能看到英文原文。"
+                    ),
                     evidence=[
                         Evidence(kind="field_path", target_ref=target_ref, path="localization_keys")
                     ],
+                    suggested_action=(
+                        f"在这个任务的本地化键列表里加一条 `{key}`,让它能进入本地化流程。"
+                    ),
                 )
 
 
@@ -47,8 +58,16 @@ class QuestMissingObjectiveRule:
                     severity=self.severity,
                     category=self.category,
                     target_ref=target_ref,
-                    message=f"Quest '{quest.id}' has no objective",
+                    message=(
+                        f"{_quest_label(quest.id, quest.title)}的目标字段是空的,策划和玩家都不清楚"
+                        "这个任务具体要做什么。"
+                    ),
                     evidence=[Evidence(kind="field_path", target_ref=target_ref, path="objective")],
+                    suggested_action=(
+                        f"需要人工判断:请在{_quest_label(quest.id, quest.title)}的目标字段里写清楚"
+                        "玩家具体要做什么(比如击败谁、收集什么、护送谁去哪里)——这段话需要策划创作,"
+                        "不能靠机器自动编造。"
+                    ),
                 )
 
 
@@ -73,9 +92,14 @@ class TextTooLongForUIRule:
                     category=self.category,
                     target_ref=target_ref,
                     message=(
-                        f"Dialogue '{dialogue.id}' text length {len(text)} exceeds UI limit {limit}"
+                        f"对话《{dialogue.id}》的文本共 {len(text)} 个字,超过了这个界面能显示的 "
+                        f"{limit} 个字上限,玩家在界面里可能看到文字被截断或者溢出。"
                     ),
                     evidence=[Evidence(kind="field_path", target_ref=target_ref, path="text")],
+                    suggested_action=(
+                        f"把这段对话文本从 {len(text)} 字精简到 {limit} 字以内;如果这段话必须保留"
+                        f"完整信息,就找程序把这条对话允许的界面字数上限从 {limit} 调大。"
+                    ),
                 )
         for text_obj in ctx.bundle.localized_texts.values():
             text_limit = text_obj.ui_max_len or _int(text_obj.metadata.get("ui_max_len"))
@@ -89,10 +113,14 @@ class TextTooLongForUIRule:
                     category=self.category,
                     target_ref=target_ref,
                     message=(
-                        f"Localized text '{text_obj.id}' length {len(text_obj.text)} exceeds "
-                        f"UI limit {text_limit}"
+                        f"本地化文本条目《{text_obj.id}》共 {len(text_obj.text)} 个字,超过了这个"
+                        f"界面能显示的 {text_limit} 个字上限,玩家在界面里可能看到文字被截断或溢出。"
                     ),
                     evidence=[Evidence(kind="field_path", target_ref=target_ref, path="text")],
+                    suggested_action=(
+                        f"把这条文本从 {len(text_obj.text)} 字精简到 {text_limit} 字以内;如果必须"
+                        f"保留完整信息,就找程序把这条文本允许的界面字数上限从 {text_limit} 调大。"
+                    ),
                 )
 
 
@@ -102,29 +130,40 @@ class PlaceholderMismatchRule:
     category = Category.PIPELINE
 
     def check(self, ctx: AuditContext) -> Iterable[Issue]:
-        by_key: dict[str, dict[str, set[str]]] = {}
+        # 值是 (占位符集合, 这条文本所属对象的 ref)。带上对象 ref 是因为一个文本键横跨多个语言
+        # 版本、散在多个对象里，光有键定位不到任何一个文件；带上它，报告才能说出"去哪个文件改"。
+        by_key: dict[str, dict[str, tuple[set[str], str]]] = {}
         for dialogue in ctx.bundle.dialogues.values():
             if not dialogue.locale or dialogue.text is None:
                 continue
-            by_key.setdefault(dialogue.text_key, {})[dialogue.locale] = _placeholders(dialogue.text)
+            by_key.setdefault(dialogue.text_key, {})[dialogue.locale] = (
+                _placeholders(dialogue.text),
+                f"dialogue:{dialogue.id}",
+            )
         for text in ctx.bundle.localized_texts.values():
-            by_key.setdefault(text.text_key, {})[text.locale] = _placeholders(text.text)
+            by_key.setdefault(text.text_key, {})[text.locale] = (
+                _placeholders(text.text),
+                f"localized_text:{text.id}",
+            )
 
         for text_key, locale_map in by_key.items():
             if len(locale_map) < 2:
                 continue
-            expected = next(iter(locale_map.values()))
-            for locale, placeholders in locale_map.items():
+            expected = next(iter(locale_map.values()))[0]
+            for locale, (placeholders, owner_ref) in locale_map.items():
                 if placeholders != expected:
                     target_ref = f"dialogue_key:{text_key}"
+                    expected_sorted = sorted(expected)
+                    actual_sorted = sorted(placeholders)
                     yield Issue(
                         rule_code=self.code,
                         severity=self.severity,
                         category=self.category,
                         target_ref=target_ref,
                         message=(
-                            f"Dialogue key '{text_key}' placeholder set in locale '{locale}' "
-                            f"differs from other locales"
+                            f"文本键『{text_key}』的『{locale}』语言版本里,携带的可替换占位符是 "
+                            f"{actual_sorted},跟其他语言版本里的 {expected_sorted} 不一样,替换变量"
+                            "时这一条会跟别的语言对不上,可能漏内容甚至直接报错。"
                         ),
                         evidence=[
                             Evidence(
@@ -132,12 +171,24 @@ class PlaceholderMismatchRule:
                                 target_ref=target_ref,
                                 path=f"locales.{locale}.text",
                                 data={
-                                    "expected": sorted(expected),
-                                    "actual": sorted(placeholders),
+                                    "expected": expected_sorted,
+                                    "actual": actual_sorted,
                                 },
-                            )
+                            ),
+                            # 这一条真正落在哪个对象上：定位器据此推出文件与行号。
+                            Evidence(kind="field_path", target_ref=owner_ref, path="text"),
                         ],
+                        suggested_action=(
+                            f"把『{locale}』语言版本文本里的占位符改成 {expected_sorted},和其它语言"
+                            f"版本保持一致(现在是 {actual_sorted})。"
+                        ),
                     )
+
+
+# target_ref 的对象类型 -> 策划看得懂的名字；下面两条规则（TermInconsistentRule / PromptInjection
+# 由 security_rules.py 单独维护自己的一份，这里只覆盖 _texts() 会产出的三种）。
+_KIND_LABELS = {"quest": "任务", "dialogue": "对话", "localized_text": "本地化文本"}
+_SLOT_LABELS = {"title": "标题", "objective": "目标", "text": "文本"}
 
 
 class TermInconsistentRule:
@@ -157,14 +208,17 @@ class TermInconsistentRule:
             lowered = text.lower()
             for forbidden, canonical in forbidden_terms.items():
                 if _term_appears(forbidden, lowered):
+                    kind, _, object_id = target_ref.partition(":")
+                    label = _KIND_LABELS.get(kind, kind)
+                    slot = _SLOT_LABELS.get(path, path)
                     yield Issue(
                         rule_code=self.code,
                         severity=self.severity,
                         category=self.category,
                         target_ref=target_ref,
                         message=(
-                            f"{target_ref} uses forbidden term '{forbidden}', "
-                            f"use canonical term '{canonical}'"
+                            f"{label}「{object_id}」的{slot}里用了禁用词『{forbidden}』,按术语表"
+                            f"应该改用标准称呼『{canonical}』,统一后能避免玩家看到两套不同的叫法。"
                         ),
                         evidence=[
                             Evidence(
@@ -174,6 +228,9 @@ class TermInconsistentRule:
                                 data={"forbidden": forbidden, "canonical": canonical},
                             )
                         ],
+                        suggested_action=(
+                            f"把这段文字里的『{forbidden}』替换成标准称呼『{canonical}』。"
+                        ),
                     )
 
 

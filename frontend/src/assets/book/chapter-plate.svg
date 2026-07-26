@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 96" fill="none" stroke="currentColor">
+  <!-- 章节号牌外框：切角矩形双线框 + 左右菱饰；牌内数字/章节名走 Cinzel/serif 字体 -->
+  <path d="M14 2h292l12 12v68l-12 12H14L2 82V14z" stroke-width="1.5"/>
+  <path d="M17 8h286l9 9v62l-9 9H17l-9-9V17z" stroke-width="0.75" opacity="0.55"/>
+  <!-- 左右中腰菱饰 -->
+  <path d="M28 48l4.5-5.5L37 48l-4.5 5.5z" fill="currentColor" stroke="none"/>
+  <path d="M292 48l-4.5-5.5L283 48l4.5 5.5z" fill="currentColor" stroke="none"/>
+  <path d="M37 48h34M249 48h34" stroke-width="0.75" opacity="0.55"/>
+</svg>

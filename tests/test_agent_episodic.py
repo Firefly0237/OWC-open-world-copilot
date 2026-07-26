@@ -12,9 +12,24 @@ OWCOPILOT_ALLOW_OFFLINE_LLM=1, so nothing here touches a network or a paid model
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
 
 from owcopilot.agent import ReActAgent
 from owcopilot.agent.episodic import (
+    _to_blob,
     persist_reflection,
     persist_run_embedding,
     recall_reflections,
@@ -22,10 +37,7 @@ from owcopilot.agent.episodic import (
 )
 from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest
 from owcopilot.content.store import ContentStore
-from owcopilot.llm.cache import HashingEmbedder, NoOpCache
-from owcopilot.llm.gateway import LLMGateway
-from owcopilot.llm.router import StaticRouter
-from owcopilot.llm.telemetry import TelemetryCollector
+from owcopilot.llm.cache import HashingEmbedder
 from owcopilot.skills import SkillRegistry
 from owcopilot.storage.sqlite import SQLiteStore
 
@@ -51,25 +63,24 @@ def _dirty_project(content_root) -> None:
     )
 
 
-def _gateway(provider) -> LLMGateway:
-    return LLMGateway(
-        providers={"cheap": provider},
-        router=StaticRouter(mapping={"agent_react": "cheap"}),
-        cache=NoOpCache(),
-    )
+class _RecordingChatModel(BaseChatModel):
+    """Chat double replying with a fixed final answer and recording every message list, so a test
+    can assert what context (e.g. recalled reflections in the system suffix) the actor was
+    actually handed."""
 
+    reply: str = "ok"
+    seen: list[list[BaseMessage]] = Field(default_factory=list)
 
-class _RecordingProvider:
-    """Records the exact ``user`` prompt of every planning call so a test can assert what context
-    (e.g. recalled reflections) the actor was actually handed."""
+    @property
+    def _llm_type(self) -> str:
+        return "recording-chat-fake"
 
-    def __init__(self, reply: str = "Thought: done.\nFinal Answer: ok") -> None:
-        self.reply = reply
-        self.seen_user: list[str] = []
+    def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> Any:
+        return self
 
-    def complete(self, *, system: str, user: str, model: str):
-        self.seen_user.append(user)
-        return self.reply, 1, 1
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.seen.append(list(messages))
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.reply))])
 
 
 def _store_run(
@@ -317,14 +328,16 @@ def test_reflection_persist_and_recall_into_prompt() -> None:
     assert [h.reflection for h in hits] == [lesson]
     assert hits[0].source == "multi_agent_retry"
 
-    # The recalled reflection reaches the actor through ReActAgent's existing reflections channel.
-    provider = _RecordingProvider()
-    ReActAgent(gateway=_gateway(provider), registry=SkillRegistry(), max_steps=1).run(
+    # The recalled reflection reaches the actor through ReActAgent's existing reflections channel
+    # (injected as the system-message suffix by MemoryInjectionMiddleware).
+    model = _RecordingChatModel()
+    ReActAgent(model=model, registry=SkillRegistry(), max_steps=1).run(
         "audit quest giver consistency for the caravan quest",
         reflections=[h.reflection for h in hits],
     )
-    assert "Reflections from previous attempts:" in provider.seen_user[0]
-    assert lesson in provider.seen_user[0]
+    system_text = str(model.seen[0][0].text)
+    assert "Reflections from previous attempts:" in system_text
+    assert lesson in system_text
 
 
 def test_reflection_not_recalled_for_dissimilar_goal() -> None:
@@ -342,6 +355,23 @@ def test_reflection_not_recalled_for_dissimilar_goal() -> None:
     hits = recall_reflections(store, embedder, "bake chocolate strawberry cake dessert")
 
     assert hits == []
+
+
+class _RoutedChatModel(BaseChatModel):
+    """Message-routed chat double: ``route(messages)`` decides each reply (goal / system-suffix /
+    ToolMessage aware) — the chat-model generation of the retired prompt-routed text providers."""
+
+    route: Any
+
+    @property
+    def _llm_type(self) -> str:
+        return "routed-chat-fake"
+
+    def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> Any:
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        return ChatResult(generations=[ChatGeneration(message=self.route(messages))])
 
 
 def test_multi_agent_retry_persists_reflection_offline() -> None:
@@ -397,40 +427,47 @@ def test_multi_agent_retry_persists_reflection_offline() -> None:
         )
         return reg
 
-    class _LazyThenDiligentProvider:
-        def complete(self, *, system: str, user: str, model: str):
-            if "task-decomposition" in system or "Decompose into subtasks" in user:
-                return _DECOMPOSE_JSON, 10, 10
-            if "[Your specific subtask as diagnosis]" in user:
-                if "Reflections from previous attempts:" not in user:
-                    return (
-                        (
-                            "Thought: looks fine to me.\n"
-                            "Final Answer: The world is clean. I found 0 open errors."
-                        ),
-                        5,
-                        5,
-                    )
-                if "Observation:" not in user:
-                    return (
-                        (
-                            "Thought: audit first this time.\n"
-                            "Action: audit_project\nAction Input: {}"
-                        ),
-                        5,
-                        5,
-                    )
-                return "Thought: now I know.\nFinal Answer: 一致性审计发现 3 个待修复错误。", 5, 5
-            return "Thought: done.\nFinal Answer: 已生成修复提案，等待人工审阅。", 5, 2
+    class _DecomposeOnlyModel(BaseChatModel):
+        """Chat model for the orchestrator's decompose calls (its own model, decompose-only)."""
+
+        @property
+        def _llm_type(self) -> str:
+            return "decompose-only-fake"
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content=_DECOMPOSE_JSON))]
+            )
+
+    def _lazy_then_diligent(messages) -> AIMessage:
+        system = str(messages[0].text) if isinstance(messages[0], SystemMessage) else ""
+        human = next((str(m.text) for m in messages if isinstance(m, HumanMessage)), "")
+        observations = sum(1 for m in messages if isinstance(m, ToolMessage))
+        if "[Your specific subtask as diagnosis]" in human:
+            if "Reflections from previous attempts:" not in system:
+                # Trial 0: lazy — never audits, asserts clean → verifier fail (ground truth 3).
+                return AIMessage(content="The world is clean. I found 0 open errors.")
+            if observations == 0:
+                return AIMessage(
+                    content="audit first this time.",
+                    tool_calls=[
+                        {"name": "audit_project", "args": {}, "id": "call_a0", "type": "tool_call"}
+                    ],
+                )
+            return AIMessage(content="一致性审计发现 3 个待修复错误。")
+        return AIMessage(content="已生成修复提案，等待人工审阅。")
 
     registry = _make_audit_registry(open_errors=3)
-    provider = _LazyThenDiligentProvider()
-    telemetry = TelemetryCollector()
-    gw = LLMGateway({"cheap": provider, "frontier": provider}, telemetry=telemetry)
     store = SQLiteStore(":memory:")
     embedder = HashingEmbedder()
 
-    session = MultiAgentSession(gateway=gw, registry=registry, store=store, embedder=embedder)
+    session = MultiAgentSession(
+        orchestrator_model=_DecomposeOnlyModel(),
+        model=_RoutedChatModel(route=_lazy_then_diligent),
+        registry=registry,
+        store=store,
+        embedder=embedder,
+    )
     session.run("diagnose and fix")
 
     # The distilled reflection was persisted to the cross-trial buffer, keyed and embedded.
@@ -444,3 +481,223 @@ def test_multi_agent_retry_persists_reflection_offline() -> None:
     # from the offline Self-Reflection template (no LLM call), not a live model.
     assert embedder.model_id.startswith("hashing")
     assert rows[0]["reflection"].startswith("第1次尝试未通过")
+
+
+# ===================================================================== T7: memory lifecycle
+# The three-factor recall (relevance × recency × importance), dedup, and capacity soft-delete must
+# be GENUINELY in the recall/persist path — not a scoring function nobody calls. These tests drive
+# the public recall + persist functions with controlled fixtures and assert the ordering, dedup and
+# eviction that the lifecycle produces.
+
+
+class _DictEmbedder:
+    """Embedder whose vectors are looked up from a fixed table, so a test controls the query vector
+    exactly (the HashingEmbedder's token quirks are irrelevant to a factor-isolation test). Stored
+    candidate vectors are written to the DB directly, so relevance / dedup geometry is pinned."""
+
+    model_id = "dict-3"
+
+    def __init__(self, table: dict[str, list[float]]) -> None:
+        self._table = table
+
+    def embed(self, text: str) -> list[float]:
+        return list(self._table[text])
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed(t) for t in texts]
+
+
+def _store_vec_run(
+    store: SQLiteStore,
+    *,
+    run_id: str,
+    vector: list[float],
+    model_id: str = "dict-3",
+    goal: str = "g",
+    summary: str = "done",
+    step_count: int = 5,
+    created_at: datetime,
+    stop_reason: str = "finished",
+) -> None:
+    """Persist a finished run + a hand-crafted recall embedding with a controlled created_at.
+
+    Bypasses the embedder for the STORED vector (written verbatim) so a factor-isolation test pins
+    relevance and dedup geometry; created_at / step_count drive recency and importance."""
+    iso = created_at.isoformat()
+    store.save_agent_run(
+        run_id=run_id,
+        goal=goal,
+        stop_reason=stop_reason,
+        step_count=step_count,
+        cost_usd=0.0,
+        latency_ms=0.0,
+        agent_name="world-consistency",
+        transcript_json="{}",
+        created_at=iso,
+    )
+    store.save_agent_run_embedding(
+        run_id=run_id,
+        model_id=model_id,
+        goal=goal,
+        summary=summary,
+        vector=_to_blob(vector),
+        created_at=iso,
+    )
+
+
+def test_recall_recency_orders_newer_first_when_relevance_equal() -> None:
+    """Two equally-relevant, equally-important runs → the NEWER one ranks first (recency factor)."""
+    store = SQLiteStore(":memory:")
+    # q=[1,0,0]; A=[1,1,0], B=[1,0,1] → both cos .707 to q (equal relevance), mutual .5 (no dedup).
+    embedder = _DictEmbedder({"Q": [1.0, 0.0, 0.0]})
+    now = datetime.now(UTC)
+    _store_vec_run(store, run_id="old", vector=[1.0, 1.0, 0.0], created_at=now - timedelta(days=30))
+    _store_vec_run(store, run_id="new", vector=[1.0, 0.0, 1.0], created_at=now)
+
+    hits = recall_similar_runs(store, embedder, "Q")
+
+    assert [h.run_id for h in hits] == ["new", "old"]
+    # similarity is the raw cosine (equal here), NOT the recency-blended score used for ordering.
+    assert abs(hits[0].similarity - hits[1].similarity) < 1e-4
+
+
+def test_recall_importance_orders_higher_step_count_first() -> None:
+    """Two equally-relevant, equally-recent runs → higher step_count ranks first (importance)."""
+    store = SQLiteStore(":memory:")
+    embedder = _DictEmbedder({"Q": [1.0, 0.0, 0.0]})
+    now = datetime.now(UTC)
+    _store_vec_run(store, run_id="shallow", vector=[1.0, 1.0, 0.0], step_count=1, created_at=now)
+    _store_vec_run(store, run_id="deep", vector=[1.0, 0.0, 1.0], step_count=30, created_at=now)
+
+    hits = recall_similar_runs(store, embedder, "Q")
+
+    assert [h.run_id for h in hits] == ["deep", "shallow"]
+
+
+def test_recall_recency_decay_outranks_a_more_relevant_but_ancient_run() -> None:
+    """Recency genuinely moves ordering: a fresher, LESS-relevant run beats an ancient,
+    MORE-relevant one once the old one's recency has decayed away."""
+    store = SQLiteStore(":memory:")
+    embedder = _DictEmbedder({"Q": [1.0, 0.0, 0.0]})
+    now = datetime.now(UTC)
+    # fresh, cosine 0.707; ancient, cosine 0.958 (more relevant) but ~1 year old → decayed to floor.
+    _store_vec_run(store, run_id="fresh", vector=[1.0, 1.0, 0.0], created_at=now)
+    _store_vec_run(
+        store, run_id="ancient", vector=[1.0, 0.3, 0.0], created_at=now - timedelta(days=365)
+    )
+
+    hits = recall_similar_runs(store, embedder, "Q")
+
+    assert [h.run_id for h in hits] == ["fresh", "ancient"]
+    # The ancient hit is the MORE cosine-similar of the two — proving order flipped on recency,
+    # not relevance.
+    ancient = next(h for h in hits if h.run_id == "ancient")
+    fresh = next(h for h in hits if h.run_id == "fresh")
+    assert ancient.similarity > fresh.similarity
+
+
+def test_recall_dedup_collapses_duplicate_experience() -> None:
+    """Two near-identical embeddings (mutual cosine ≥ 0.95) collapse to the best-scored one."""
+    store = SQLiteStore(":memory:")
+    embedder = _DictEmbedder({"Q": [1.0, 0.0, 0.0]})
+    now = datetime.now(UTC)
+    # Identical vectors ⇒ mutual cosine 1.0 ⇒ duplicates. "new" outscores "old" on recency, so it
+    # is the survivor; "old" is dropped as a duplicate rather than occupying a second recall slot.
+    _store_vec_run(store, run_id="old", vector=[1.0, 1.0, 0.0], created_at=now - timedelta(days=10))
+    _store_vec_run(store, run_id="new", vector=[1.0, 1.0, 0.0], created_at=now)
+
+    hits = recall_similar_runs(store, embedder, "Q")
+
+    assert [h.run_id for h in hits] == ["new"]
+
+
+def test_recall_dedup_keeps_distinct_but_similar_episodes() -> None:
+    """Distinct experiences below the dedup cutoff are BOTH kept — dedup is near-duplicate only."""
+    store = SQLiteStore(":memory:")
+    embedder = _DictEmbedder({"Q": [1.0, 0.0, 0.0]})
+    now = datetime.now(UTC)
+    # mutual cosine 0.5 (well below 0.95) → not duplicates, both surface.
+    _store_vec_run(store, run_id="a", vector=[1.0, 1.0, 0.0], created_at=now)
+    _store_vec_run(store, run_id="b", vector=[1.0, 0.0, 1.0], created_at=now)
+
+    hits = recall_similar_runs(store, embedder, "Q")
+
+    assert sorted(h.run_id for h in hits) == ["a", "b"]
+
+
+def test_capacity_soft_deletes_lowest_score_and_is_recoverable() -> None:
+    """Over-capacity persist soft-deletes the lowest-retention run; recall excludes it; restore
+    revives it. Exercised through the real persist path (the CLI's write side), not a helper."""
+    store = SQLiteStore(":memory:")
+    embedder = HashingEmbedder()
+    goal = "audit quest consistency for the caravan"
+    # Three runs, same goal (so all recallable), differing only in step_count ⇒ importance. All
+    # written "now", so recency is ~equal and importance decides retention. Capacity 2 ⇒ the lowest
+    # importance (step_count=1) is evicted when the third write pushes the space over capacity.
+    for run_id, steps in (("s1", 1), ("s5", 5), ("s9", 9)):
+        store.save_agent_run(
+            run_id=run_id,
+            goal=goal,
+            stop_reason="finished",
+            step_count=steps,
+            cost_usd=0.0,
+            latency_ms=0.0,
+            agent_name="world-consistency",
+            transcript_json="{}",
+        )
+        persist_run_embedding(
+            store, embedder, run_id=run_id, goal=goal, final_answer="done", capacity=2
+        )
+
+    # The lowest-importance run's embedding is tombstoned → recall no longer surfaces it.
+    live = {r["run_id"] for r in store.query_agent_run_embeddings(model_id=embedder.model_id)}
+    assert live == {"s5", "s9"}
+    assert "s1" not in {h.run_id for h in recall_similar_runs(store, embedder, goal)}
+
+    # Soft-delete, not physical: the agent_run row is untouched and the embedding is recoverable.
+    assert store.get_agent_run("s1") is not None
+    assert store.restore_agent_run_embedding("s1") is True
+    live_after = {r["run_id"] for r in store.query_agent_run_embeddings(model_id=embedder.model_id)}
+    assert "s1" in live_after
+
+
+def test_restore_missing_embedding_returns_false() -> None:
+    """Recovery path guards a bad id: restoring an unknown run reports False (guided-error hook)."""
+    store = SQLiteStore(":memory:")
+    assert store.restore_agent_run_embedding("nope") is False
+
+
+def test_reflection_capacity_soft_deletes_oldest_and_is_recoverable() -> None:
+    """Reflections carry constant importance, so capacity evicts the OLDEST live entry; recall
+    excludes it and it is recoverable. Driven through the real persist_reflection write path."""
+    store = SQLiteStore(":memory:")
+    embedder = HashingEmbedder()
+    # Two DISTINCT goals (so their vectors are not deduped) both matching the recall query. Backdate
+    # the first so it is the oldest → lowest recency-retention. capacity=1 ⇒ the second write evicts
+    # it. Written directly to control created_at, then capacity enforced via the public persist.
+    query = "audit quest giver consistency caravan"
+    old_id = "refl_old"
+    store.save_reflection(
+        reflection_id=old_id,
+        goal=f"{query} alpha",
+        reflection="stale lesson",
+        source="multi_agent_retry",
+        vector=_to_blob(embedder.embed(f"{query} alpha")),
+        model_id=embedder.model_id,
+        created_at=(datetime.now(UTC) - timedelta(days=30)).isoformat(),
+    )
+    persist_reflection(
+        store,
+        embedder,
+        goal=f"{query} beta",
+        reflection="fresh lesson",
+        source="multi_agent_retry",
+        capacity=1,
+    )
+
+    reflections = [h.reflection for h in recall_reflections(store, embedder, query)]
+    assert "fresh lesson" in reflections
+    assert "stale lesson" not in reflections  # oldest tombstoned by capacity
+
+    assert store.restore_reflection(old_id) is True
+    assert "stale lesson" in [h.reflection for h in recall_reflections(store, embedder, query)]

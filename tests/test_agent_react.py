@@ -1,25 +1,40 @@
+"""ReActAgent on the LangGraph ``create_agent`` host (T2-S5 core swap).
+
+Per design §4: the text-path parser/fallback tests are deleted with the text path; every kept
+test drives the REAL single native-tool-calling loop with LangChain-standard fakes
+(``scripted_chat_model`` / the transcript-aware ``OfflineReactChatModel``), asserting the same
+behavioural contracts as before: grounded trajectories, step budget, recoverable errors,
+observation truncation round-trips, Reflexion injection (now a system-message suffix), and the
+force/generate budget finish.
+"""
+
 from __future__ import annotations
 
+import json
 import logging
 import re
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from pydantic import Field
 
-from owcopilot.agent import ReActAgent, parse_react_step
-from owcopilot.agent.offline import OfflineGoalAwareReActProvider, OfflineReactProvider
-from owcopilot.agent.react import _dumps, _reflections_block, _user_prompt
+from owcopilot.agent import ReActAgent
+from owcopilot.agent.middleware import _reflections_block
+from owcopilot.agent.offline import OfflineReactChatModel
+from owcopilot.agent.react import _MAX_STEPS_MESSAGE, _NATIVE_SYSTEM_PROMPT
 from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest
 from owcopilot.content.store import ContentStore
-from owcopilot.llm.cache import NoOpCache
-from owcopilot.llm.gateway import LLMGateway, ToolCall, ToolCallResponse
-from owcopilot.llm.router import StaticRouter
+from owcopilot.fakes import scripted_chat_model
 from owcopilot.skills import (
     CostTier,
     SideEffect,
     Skill,
     default_skill_registry,
 )
+from owcopilot.skills.langchain_tools import dumps_observation
 
 
 def _dirty_project(content_root) -> None:
@@ -38,90 +53,49 @@ def _dirty_project(content_root) -> None:
     )
 
 
-def _gateway(provider) -> LLMGateway:
-    return LLMGateway(
-        providers={"cheap": provider},
-        router=StaticRouter(mapping={"agent_react": "cheap"}),
-        cache=NoOpCache(),
-    )
+def _tool_call(name: str, args: dict[str, Any], call_id: str) -> dict[str, Any]:
+    return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
 
 
-class _ScriptedProvider:
-    """Returns the next canned ReAct turn on each call (for testing specific loop behaviours)."""
+class _RecordingChatModel(GenericFakeChatModel):
+    """Scripted fake that records the exact message list of EVERY model call.
 
-    def __init__(self, turns: list[str]) -> None:
-        self.turns = turns
-        self.calls = 0
+    Lets a test assert what context the model was actually handed (system prompt, reflection
+    block, echoed assistant turns, tool results) — the chat-model analogue of the retired
+    ``_RecordingProvider``.
+    """
 
-    def complete(self, *, system: str, user: str, model: str):
-        text = self.turns[min(self.calls, len(self.turns) - 1)]
-        self.calls += 1
-        return text, 1, 1
+    seen: list[list[BaseMessage]] = Field(default_factory=list)
 
+    def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> Any:
+        return self
 
-class _RecordingProvider:
-    """Like _ScriptedProvider but records the exact ``user`` prompt of every planning call, so a
-    test can assert what context (e.g. reflection memory) the actor was actually handed."""
-
-    def __init__(self, turns: list[str]) -> None:
-        self.turns = turns
-        self.calls = 0
-        self.seen_user: list[str] = []
-
-    def complete(self, *, system: str, user: str, model: str):
-        self.seen_user.append(user)
-        text = self.turns[min(self.calls, len(self.turns) - 1)]
-        self.calls += 1
-        return text, 1, 1
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.seen.append(list(messages))
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
-# --------------------------------------------------------------------------- parser
-def test_parse_action_step() -> None:
-    step = parse_react_step(
-        'Thought: look it up\nAction: build_context_pack\nAction Input: {"query": "Aldric"}'
-    )
-    assert step.thought == "look it up"
-    assert step.action == "build_context_pack"
-    assert step.action_input == {"query": "Aldric"}
-    assert step.final_answer is None
+class _ExhaustedRaisesModel(_RecordingChatModel):
+    """Replays its script, then RAISES on the next call — proves the generate-mode finish
+    call's own failure falls back to the 'force' stop honestly."""
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        try:
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        except StopIteration:
+            raise RuntimeError("finish call boom") from None
 
 
-def test_parse_final_answer() -> None:
-    step = parse_react_step("Thought: done\nFinal Answer: all good")
-    assert step.final_answer == "all good"
-    assert step.action is None
+def _recording(turns: list[AIMessage]) -> _RecordingChatModel:
+    return _RecordingChatModel(messages=iter(turns))
 
 
-def test_parse_ignores_hallucinated_observation() -> None:
-    # The model must not author observations; anything from "Observation:" on is discarded.
-    step = parse_react_step(
-        "Thought: t\nAction: audit_project\nAction Input: {}\n"
-        'Observation: {"open_errors": 99}\nThought: fake'
-    )
-    assert step.action == "audit_project"
-    assert step.action_input == {}
-
-
-def test_parse_tolerates_fenced_json_and_backticked_name() -> None:
-    step = parse_react_step(
-        'Thought: t\nAction: `propose_fix`\nAction Input: ```json\n{"issue_id": "x"}\n```'
-    )
-    assert step.action == "propose_fix"
-    assert step.action_input == {"issue_id": "x"}
-
-
-def test_parse_no_action_no_final() -> None:
-    step = parse_react_step("Thought: I am unsure what to do.")
-    assert step.action is None
-    assert step.final_answer is None
-
-
-# --- loop: offline reasoning double + real skills ---
+# --------------------------------------------------- loop: offline reasoning double + real skills
 def test_agent_runs_canonical_trajectory_and_grounds_answer_in_observations(tmp_path) -> None:
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    agent = ReActAgent(gateway=_gateway(OfflineReactProvider()), registry=registry, max_steps=6)
+    agent = ReActAgent(model=OfflineReactChatModel(), registry=registry, max_steps=6)
 
     result = agent.run("Get this world ready to export.")
 
@@ -151,207 +125,147 @@ def test_agent_stops_at_step_budget(tmp_path) -> None:
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    agent = ReActAgent(gateway=_gateway(OfflineReactProvider()), registry=registry, max_steps=2)
+    # Model keeps calling a tool, never finishing → must stop at the budget of 2 model calls.
+    model = scripted_chat_model([("audit_project", {}), ("audit_project", {})])
+    agent = ReActAgent(model=model, registry=registry, max_steps=2)
 
     result = agent.run("Diagnose the world.")
 
     assert result.stop_reason == "max_steps"
     assert result.step_count == 2
+    # The limiter's artificial "Model call limits exceeded" message never leaks out.
+    assert result.final_answer == _MAX_STEPS_MESSAGE
 
 
 def test_agent_reports_unknown_skill_as_recoverable_observation(tmp_path) -> None:
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    provider = _ScriptedProvider(
-        [
-            "Thought: try a bad tool\nAction: delete_everything\nAction Input: {}",
-            "Thought: ok, audit instead\nAction: audit_project\nAction Input: {}",
-            "Thought: done\nFinal Answer: reported",
-        ]
-    )
-    agent = ReActAgent(gateway=_gateway(provider), registry=registry, max_steps=5)
+    model = scripted_chat_model([("delete_everything", {}), ("audit_project", {}), "reported"])
+    agent = ReActAgent(model=model, registry=registry, max_steps=5)
 
     result = agent.run("test recovery")
 
     assert result.stop_reason == "finished"
     assert result.steps[0].is_error
+    # The execution-layer rejection is the registry's own wording (dispatch via registry.run),
+    # not LangChain's generic "not a valid tool" text.
     assert "unknown skill" in result.steps[0].observation
     assert result.steps[1].action == "audit_project"
     assert not result.steps[1].is_error
 
 
-def test_agent_handles_a_turn_with_no_action(tmp_path) -> None:
-    content_root = tmp_path / "content"
-    _dirty_project(content_root)
-    registry = default_skill_registry(content_root=str(content_root))
-    provider = _ScriptedProvider(
-        [
-            "Thought: I'm just thinking out loud with no tool.",
-            "Thought: now I'll finish\nFinal Answer: ok",
-        ]
-    )
-    agent = ReActAgent(gateway=_gateway(provider), registry=registry, max_steps=5)
-
-    result = agent.run("test no-action nudge")
-
-    assert result.stop_reason == "finished"
-    assert result.steps[0].is_error
-    assert "No Action or Final Answer" in result.steps[0].observation
-
-
-# ------------------------------------------------------------------- P2a native tool-calling
-
-
-class _ScriptedToolProvider:
-    """Offline native-function-calling double: returns scripted ToolCallResponse turns so the
-    structured ReAct loop runs at $0. Mirrors how agent frameworks unit-test tool loops."""
-
-    supports_tools = True
-    model = "deepseek-v4-pro"
-
-    def __init__(self, turns: list[ToolCallResponse]) -> None:
-        self.turns = turns
-        self.calls = 0
-        self.seen_messages: list[list[dict[str, Any]]] = []
-
-    def complete_with_tools(
-        self, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]], model: str
-    ) -> ToolCallResponse:
-        self.seen_messages.append([dict(m) for m in messages])
-        turn = self.turns[min(self.calls, len(self.turns) - 1)]
-        self.calls += 1
-        return turn
-
-
-def _tool_gateway(provider) -> LLMGateway:
-    return LLMGateway(
-        providers={"cheap": provider},
-        router=StaticRouter(mapping={"agent_react": "cheap"}),
-        cache=NoOpCache(),
-    )
+# ------------------------------------------------------------------- native tool-calling loop
 
 
 def test_native_tools_loop_executes_and_feeds_results_back(tmp_path) -> None:
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    provider = _ScriptedToolProvider(
+    model = _recording(
         [
-            ToolCallResponse(
-                tool_calls=[ToolCall(call_id="c1", name="audit_project", arguments={})],
-                input_tokens=10,
-                output_tokens=5,
-            ),
-            ToolCallResponse(
-                text="Audit complete; fixes go to the review queue.",
-                input_tokens=8,
-                output_tokens=6,
-            ),
+            AIMessage(content="", tool_calls=[_tool_call("audit_project", {}, "c1")]),
+            AIMessage(content="Audit complete; fixes go to the review queue."),
         ]
     )
-    agent = ReActAgent(
-        gateway=_tool_gateway(provider), registry=registry, max_steps=6, use_native_tools=True
-    )
+    agent = ReActAgent(model=model, registry=registry, max_steps=6)
 
     result = agent.run("Get this world ready to export.")
 
     assert result.stop_reason == "finished"
     assert [s.action for s in result.steps] == ["audit_project"]
     assert not result.steps[0].is_error
-    # The structured result was captured and the observation really came from the deterministic tool
+    # The structured result was captured and the observation really came from the deterministic
+    # tool.
     assert result.steps[0].result is not None
     assert "open_errors" in result.steps[0].observation
-    # The second planning turn was handed the tool result as a role=tool message (feedback loop).
-    second_turn_msgs = provider.seen_messages[1]
-    assert any(m.get("role") == "tool" and m.get("tool_call_id") == "c1" for m in second_turn_msgs)
-    # And the assistant tool-call echo precedes it (OpenAI contract).
-    assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in second_turn_msgs)
+    # The second planning turn was handed the tool result as a ToolMessage correlated to the
+    # requesting call id (feedback loop), preceded by the assistant tool-call echo.
+    second_turn_msgs = model.seen[1]
+    tool_positions = [
+        i
+        for i, m in enumerate(second_turn_msgs)
+        if m.type == "tool" and getattr(m, "tool_call_id", "") == "c1"
+    ]
+    assert tool_positions, "tool result for call c1 missing from the next model turn"
+    echo_positions = [
+        i for i, m in enumerate(second_turn_msgs) if isinstance(m, AIMessage) and m.tool_calls
+    ]
+    assert echo_positions and echo_positions[0] < tool_positions[0]
 
 
 def test_native_tools_preserves_thought_and_echoes_text_content(tmp_path) -> None:
-    # T3: the model's text alongside its tool_call IS the ReAct thought (Yao et al., 2022) and must
-    # be preserved on the step record AND echoed as the assistant message content (OpenAI contract).
+    # The model's text alongside its tool_call IS the ReAct thought (Yao et al., 2022) and must
+    # be preserved on the step record AND ride along on the echoed assistant message in history.
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    provider = _ScriptedToolProvider(
+    model = _recording(
         [
-            ToolCallResponse(
-                text="I should audit the project first.",
-                tool_calls=[ToolCall(call_id="c1", name="audit_project", arguments={})],
+            AIMessage(
+                content="I should audit the project first.",
+                tool_calls=[_tool_call("audit_project", {}, "c1")],
             ),
-            ToolCallResponse(text="Audit done."),
+            AIMessage(content="Audit done."),
         ]
     )
-    agent = ReActAgent(
-        gateway=_tool_gateway(provider), registry=registry, max_steps=6, use_native_tools=True
-    )
+    agent = ReActAgent(model=model, registry=registry, max_steps=6)
 
     result = agent.run("Get this world ready to export.")
 
     # Thought captured from the assistant turn's text.
     assert result.steps[0].thought == "I should audit the project first."
-    # The assistant echo message carries that text as content (full-message echo per OpenAI).
-    echo = next(
-        m for m in provider.seen_messages[1] if m.get("role") == "assistant" and m.get("tool_calls")
-    )
-    assert echo["content"] == "I should audit the project first."
+    # The assistant echo message in the next turn's history carries that text as content.
+    echo = next(m for m in model.seen[1] if isinstance(m, AIMessage) and m.tool_calls)
+    assert echo.text == "I should audit the project first."
     # Behaviour otherwise unchanged.
     assert result.steps[0].action == "audit_project"
     assert not result.steps[0].is_error
 
 
-def test_native_tools_without_text_keeps_thought_empty_and_content_none(tmp_path) -> None:
-    # Backward-compat: when the model returns NO text alongside its tool_call, the step thought
-    # stays "" (as before) and the echoed assistant content is byte-identical None (not "") —
-    # proving `text or None` preserves the exact prior default.
+def test_native_tools_without_text_keeps_thought_empty_and_content_empty(tmp_path) -> None:
+    # When the model returns NO text alongside its tool_call, the step thought stays "" and the
+    # echoed assistant content is the empty string (LangChain's AIMessage empty-content value —
+    # the wire-level None serialization is the provider integration's concern, not the loop's).
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    provider = _ScriptedToolProvider(
+    model = _recording(
         [
-            ToolCallResponse(
-                tool_calls=[ToolCall(call_id="c1", name="audit_project", arguments={})]
-            ),
-            ToolCallResponse(text="done"),
+            AIMessage(content="", tool_calls=[_tool_call("audit_project", {}, "c1")]),
+            AIMessage(content="done"),
         ]
     )
-    agent = ReActAgent(
-        gateway=_tool_gateway(provider), registry=registry, max_steps=6, use_native_tools=True
-    )
+    agent = ReActAgent(model=model, registry=registry, max_steps=6)
 
     result = agent.run("Get this world ready to export.")
 
     assert result.steps[0].thought == ""
-    echo = next(
-        m for m in provider.seen_messages[1] if m.get("role") == "assistant" and m.get("tool_calls")
-    )
-    assert echo["content"] is None
+    echo = next(m for m in model.seen[1] if isinstance(m, AIMessage) and m.tool_calls)
+    assert echo.text == ""
 
 
 def test_native_tools_multicall_turn_attaches_text_to_first_step_only(tmp_path) -> None:
     # Documented mapping: a single assistant turn carries one text blob but may request several
-    # tool_calls. The text is attached to the FIRST step of the turn only; later steps of the same
-    # turn keep thought="" so the reasoning is not duplicated across steps.
+    # tool_calls. The text is attached to the FIRST step of the turn only; later steps of the
+    # same turn keep thought="" so the reasoning is not duplicated across steps. Tool results
+    # back-fill in tool_calls order (pinned here — a LangGraph upgrade breaking order trips this).
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    provider = _ScriptedToolProvider(
+    model = _recording(
         [
-            ToolCallResponse(
-                text="Audit then list the issues.",
+            AIMessage(
+                content="Audit then list the issues.",
                 tool_calls=[
-                    ToolCall(call_id="c1", name="audit_project", arguments={}),
-                    ToolCall(call_id="c2", name="list_issues", arguments={}),
+                    _tool_call("audit_project", {}, "c1"),
+                    _tool_call("list_issues", {}, "c2"),
                 ],
             ),
-            ToolCallResponse(text="done"),
+            AIMessage(content="done"),
         ]
     )
-    agent = ReActAgent(
-        gateway=_tool_gateway(provider), registry=registry, max_steps=6, use_native_tools=True
-    )
+    agent = ReActAgent(model=model, registry=registry, max_steps=6)
 
     result = agent.run("Audit and list issues.")
 
@@ -360,69 +274,12 @@ def test_native_tools_multicall_turn_attaches_text_to_first_step_only(tmp_path) 
     assert result.steps[1].thought == ""  # later step of the same turn: no duplicate reasoning
 
 
-def test_native_tools_falls_back_to_text_when_provider_unsupported(tmp_path) -> None:
-    # use_native_tools=True but the provider has no native support → the agent must transparently
-    # run the canonical TEXT loop instead (OfflineReactProvider drives the standard trajectory).
-    content_root = tmp_path / "content"
-    _dirty_project(content_root)
-    registry = default_skill_registry(content_root=str(content_root))
-    agent = ReActAgent(
-        gateway=_gateway(OfflineReactProvider()),
-        registry=registry,
-        max_steps=6,
-        use_native_tools=True,  # requested, but provider doesn't support it
-    )
-
-    result = agent.run("Get this world ready to export.")
-
-    assert result.stop_reason == "finished"
-    # The text trajectory ran — proof we fell back, not errored.
-    assert [s.action for s in result.steps] == [
-        "audit_project",
-        "build_context_pack",
-        "quality_harness",
-    ]
-
-
-def test_default_prefers_native_but_falls_back_to_text_byte_identical(tmp_path) -> None:
-    # New default: use_native_tools=True (prefer native). An OfflineReactProvider has NO native
-    # tool support, so the agent transparently runs the exact text trajectory — the $0 suite is
-    # driven entirely by such fakes, so its behaviour is unchanged.
-    content_root = tmp_path / "content"
-    _dirty_project(content_root)
-    registry = default_skill_registry(content_root=str(content_root))
-    agent = ReActAgent(gateway=_gateway(OfflineReactProvider()), registry=registry, max_steps=6)
-
-    result = agent.run("Get this world ready to export.")
-
-    assert result.stop_reason == "finished"
-    assert [s.action for s in result.steps] == [
-        "audit_project",
-        "build_context_pack",
-        "quality_harness",
-    ]
-    assert agent.use_native_tools is True  # prefer-native default
-    assert not agent._native_tools_available()  # but the unsupported provider → text path
-
-
 def test_native_tools_unknown_skill_is_recoverable_observation(tmp_path) -> None:
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    provider = _ScriptedToolProvider(
-        [
-            ToolCallResponse(
-                tool_calls=[ToolCall(call_id="c1", name="delete_everything", arguments={})]
-            ),
-            ToolCallResponse(
-                tool_calls=[ToolCall(call_id="c2", name="audit_project", arguments={})]
-            ),
-            ToolCallResponse(text="reported"),
-        ]
-    )
-    agent = ReActAgent(
-        gateway=_tool_gateway(provider), registry=registry, max_steps=5, use_native_tools=True
-    )
+    model = scripted_chat_model([("delete_everything", {}), ("audit_project", {}), "reported"])
+    agent = ReActAgent(model=model, registry=registry, max_steps=5)
 
     result = agent.run("test native recovery")
 
@@ -433,17 +290,103 @@ def test_native_tools_unknown_skill_is_recoverable_observation(tmp_path) -> None
     assert not result.steps[1].is_error
 
 
+def test_scoped_registry_denies_out_of_scope_skill_at_execution(tmp_path) -> None:
+    # W1-1: the single permission truth. A skill outside the scoped registry is not merely hidden
+    # from the model — a direct call is DENIED at run() and its handler never executes. The denial
+    # is the registry's own SkillError, surfaced as a recoverable is_error observation.
+    # owcopilot.skills.scoped_registry is the shared enforcement the CLI --skills path uses.
+    from owcopilot.skills import scoped_registry
+
+    content_root = tmp_path / "content"
+    _dirty_project(content_root)
+    full = default_skill_registry(content_root=str(content_root))
+    scoped = scoped_registry(full, {"audit_project"})
+    # The model tries the out-of-scope propose_fix (PROPOSES_PATCH) first, then the allowed skill.
+    model = scripted_chat_model(
+        [("propose_fix", {"issue_id": "q1"}), ("audit_project", {}), "reported"]
+    )
+    agent = ReActAgent(model=model, registry=scoped, max_steps=5)
+
+    result = agent.run("try to escalate")
+
+    assert result.steps[0].action == "propose_fix"
+    assert result.steps[0].is_error
+    assert "not in this agent's allowed tool set" in result.steps[0].observation
+    assert result.steps[1].action == "audit_project"
+    assert not result.steps[1].is_error
+    # allowed=None passthrough keeps the full surface unchanged (backward compatible).
+    assert scoped_registry(full, None) is full
+
+
+# ----------------------------------------- E-1/E-2: unified error envelope + system recovery layer
+
+
+def test_error_envelope_reaches_product_path_and_model_recovers(tmp_path) -> None:
+    # A1: drive the REAL product path (ReActAgent.run — the CLI `owcopilot agent` loop). A skill
+    # failure must reach the model as the unified envelope {status, error_code, message}, so it can
+    # key its recovery off the CODE: an unknown skill is NOT_FOUND, then the model recovers to the
+    # valid audit_project.
+    content_root = tmp_path / "content"
+    _dirty_project(content_root)
+    registry = default_skill_registry(content_root=str(content_root))
+    model = scripted_chat_model([("delete_everything", {}), ("audit_project", {}), "reported"])
+    agent = ReActAgent(model=model, registry=registry, max_steps=5)
+
+    result = agent.run("recover from a bad tool call")
+
+    assert result.steps[0].is_error
+    envelope = json.loads(result.steps[0].observation)
+    assert envelope["status"] == "error"
+    assert envelope["error_code"] == "NOT_FOUND"  # an unknown skill name is NOT_FOUND
+    assert "unknown skill" in envelope["message"]
+    # The model recovered on the next turn — the whole point of a machine-readable code.
+    assert not result.steps[1].is_error
+    assert result.steps[1].action == "audit_project"
+    assert result.stop_reason == "finished"
+
+
+def test_invalid_argument_surfaces_invalid_arg_code(tmp_path) -> None:
+    # A different failure mode through the same product path: a missing required argument is
+    # INVALID_ARG (recovery layer: fix the args and retry the same tool).
+    content_root = tmp_path / "content"
+    _dirty_project(content_root)
+    registry = default_skill_registry(content_root=str(content_root))
+    # build_context_pack requires `query`; omit it → SkillError → INVALID_ARG envelope, then retry.
+    model = scripted_chat_model(
+        [("build_context_pack", {}), ("build_context_pack", {"query": "aldric"}), "done"]
+    )
+    agent = ReActAgent(model=model, registry=registry, max_steps=5)
+
+    result = agent.run("look up lore")
+
+    assert result.steps[0].is_error
+    assert json.loads(result.steps[0].observation)["error_code"] == "INVALID_ARG"
+    assert not result.steps[1].is_error
+    assert result.steps[1].action == "build_context_pack"
+
+
+def test_recovery_layer_reaches_the_model_system_prompt() -> None:
+    # E-2: the recovery layer must be in the system prompt the model actually receives, so a real
+    # model can act on the codes. Assert every code is named, and that the injected prompt reaches
+    # the model call.
+    for code in ("NOT_FOUND", "INVALID_ARG", "EMPTY_RESULT", "CONFLICT", "BUDGET_EXCEEDED"):
+        assert code in _NATIVE_SYSTEM_PROMPT
+    registry = default_skill_registry(content_root=".")
+    model = _recording([AIMessage(content="done")])
+    ReActAgent(model=model, registry=registry, max_steps=2).run("goal")
+
+    system_text = model.seen[0][0].text
+    assert "error_code" in system_text
+    assert "BUDGET_EXCEEDED means stop calling tools" in system_text
+
+
 def test_native_tools_step_budget(tmp_path) -> None:
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
     # Model keeps calling a tool, never finishing → must stop at the budget.
-    provider = _ScriptedToolProvider(
-        [ToolCallResponse(tool_calls=[ToolCall(call_id="c", name="audit_project", arguments={})])]
-    )
-    agent = ReActAgent(
-        gateway=_tool_gateway(provider), registry=registry, max_steps=2, use_native_tools=True
-    )
+    model = scripted_chat_model([("audit_project", {}), ("audit_project", {})])
+    agent = ReActAgent(model=model, registry=registry, max_steps=2)
 
     result = agent.run("loop forever")
 
@@ -451,146 +394,77 @@ def test_native_tools_step_budget(tmp_path) -> None:
     assert result.step_count == 2
 
 
-# ------------------------------------------------------- native is the default when supported
-
-
-def test_native_is_the_default_when_provider_supports_tools(tmp_path) -> None:
-    # With use_native_tools omitted (new default True) and a provider that DOES support tools, the
-    # agent takes the native function-calling path — no explicit opt-in needed.
-    content_root = tmp_path / "content"
-    _dirty_project(content_root)
-    registry = default_skill_registry(content_root=str(content_root))
-    provider = _ScriptedToolProvider(
-        [
-            ToolCallResponse(
-                tool_calls=[ToolCall(call_id="c1", name="audit_project", arguments={})],
-                input_tokens=10,
-                output_tokens=5,
-            ),
-            ToolCallResponse(text="done", input_tokens=8, output_tokens=6),
-        ]
-    )
-    agent = ReActAgent(gateway=_tool_gateway(provider), registry=registry, max_steps=6)
-
-    result = agent.run("Get this world ready to export.")
-
-    assert agent._native_tools_available()  # default preferred native
-    assert provider.calls > 0  # the native complete_with_tools path actually ran
-    assert [s.action for s in result.steps] == ["audit_project"]
-
-
-def test_text_and_native_paths_select_the_same_tools(tmp_path) -> None:
-    # Parity: for the same goal, the text ReAct path and the native function-calling path execute
-    # the SAME tool selection (both dispatch through the same registry). Guards against the two
-    # paths drifting apart now that native is the default.
-    content_root = tmp_path / "content"
-    _dirty_project(content_root)
-    goal = "Audit the world and list what's broken."
-    gold = ["audit_project", "list_issues"]
-
-    # text path: the goal-aware offline provider emits the gold sequence in the text ReAct format.
-    text_agent = ReActAgent(
-        gateway=_gateway(OfflineGoalAwareReActProvider.from_scenarios([(goal, gold)])),
-        registry=default_skill_registry(content_root=str(content_root)),
-        max_steps=6,
-        use_native_tools=False,
-    )
-    text_result = text_agent.run(goal)
-
-    # native path: a scripted tool provider emits the same tools as structured tool_calls.
-    native_provider = _ScriptedToolProvider(
-        [
-            ToolCallResponse(
-                tool_calls=[ToolCall(call_id="c1", name="audit_project", arguments={})],
-                input_tokens=10,
-                output_tokens=5,
-            ),
-            ToolCallResponse(
-                tool_calls=[ToolCall(call_id="c2", name="list_issues", arguments={})],
-                input_tokens=10,
-                output_tokens=5,
-            ),
-            ToolCallResponse(text="done", input_tokens=8, output_tokens=6),
-        ]
-    )
-    native_agent = ReActAgent(
-        gateway=_tool_gateway(native_provider),
-        registry=default_skill_registry(content_root=str(content_root)),
-        max_steps=6,
-    )
-    native_result = native_agent.run(goal)
-
-    def executed(result) -> list[str]:
-        return [s.action for s in result.steps if s.action and not s.is_error]
-
-    assert executed(text_result) == gold
-    assert executed(native_result) == gold
-    assert executed(text_result) == executed(native_result)  # parity
-
-
 # ----------------------------------------------------- Reflexion memory: the `reflections` param
 
 
-def test_user_prompt_byte_identical_without_reflections() -> None:
-    # Backward-compat hard guarantee: default / None / empty reflections must leave the built prompt
-    # byte-for-byte unchanged versus the pre-Reflexion signature.
-    transcript = ["Thought: t\nAction: audit_project\nAction Input: {}\nObservation: {}"]
-    base = _user_prompt("goal", transcript, 2500)
-    assert _user_prompt("goal", transcript, 2500, reflections=None) == base
-    assert _user_prompt("goal", transcript, 2500, reflections=[]) == base
-    # Same for the empty-transcript (Begin) branch.
-    base_begin = _user_prompt("goal", [])
-    assert _user_prompt("goal", [], reflections=None) == base_begin
-    assert _user_prompt("goal", [], reflections=[]) == base_begin
+def test_no_reflections_leave_first_turn_byte_identical() -> None:
+    # Backward-compat hard guarantee: default / None / empty reflections must leave the request
+    # the model receives byte-for-byte unchanged — same system prompt, same [system, "Goal:"]
+    # first-turn shape, no extra message.
+    registry = default_skill_registry(content_root=".")
+    baselines: list[list[BaseMessage]] = []
+    for reflections in (None, None, []):
+        model = _recording([AIMessage(content="done")])
+        ReActAgent(model=model, registry=registry, max_steps=2).run("goal", reflections=reflections)
+        baselines.append(model.seen[0])
+    for first_turn in baselines:
+        assert isinstance(first_turn[0], SystemMessage)
+        assert first_turn[0].text == _NATIVE_SYSTEM_PROMPT
+        assert isinstance(first_turn[1], HumanMessage)
+        assert first_turn[1].text == "Goal: goal"
+        assert len(first_turn) == 2
 
 
-def test_user_prompt_renders_reflection_block_before_transcript() -> None:
-    prompt = _user_prompt("goal", [], reflections=["ran no audit", "wrong tool"])
-    assert _reflections_block(["ran no audit", "wrong tool"]) in prompt
-    assert "- ran no audit" in prompt
-    assert "- wrong tool" in prompt
-    # Block sits after the Goal header and before the Begin/transcript section.
-    assert prompt.index("Goal: goal") < prompt.index("Reflections from previous attempts:")
-    assert prompt.index("Reflections from previous attempts:") < prompt.index("Begin.")
+def test_reflections_render_as_system_suffix_block() -> None:
+    registry = default_skill_registry(content_root=".")
+    model = _recording([AIMessage(content="done")])
+    ReActAgent(model=model, registry=registry, max_steps=2).run(
+        "goal", reflections=["ran no audit", "wrong tool"]
+    )
+
+    first_turn = model.seen[0]
+    system = first_turn[0]
+    assert isinstance(system, SystemMessage)
+    # The shared block wording, appended after the base prompt (injection point per decision 5).
+    assert system.text == (
+        _NATIVE_SYSTEM_PROMPT + "\n\n" + _reflections_block(["ran no audit", "wrong tool"])
+    )
+    assert "- ran no audit" in system.text
+    assert "- wrong tool" in system.text
+    # No extra user message: the first turn keeps the [system, "Goal:"] shape.
+    assert [type(m) for m in first_turn] == [SystemMessage, HumanMessage]
 
 
-def test_run_text_threads_reflections_into_actor_prompt(tmp_path) -> None:
+def test_run_threads_reflections_into_actor_context(tmp_path) -> None:
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    provider = _RecordingProvider(["Thought: done\nFinal Answer: report"])
-    agent = ReActAgent(
-        gateway=_gateway(provider), registry=registry, max_steps=6, use_native_tools=False
-    )
+    model = _recording([AIMessage(content="report")])
+    agent = ReActAgent(model=model, registry=registry, max_steps=6)
 
     agent.run("diagnose", reflections=["last time I skipped audit_project"])
 
-    assert "Reflections from previous attempts:" in provider.seen_user[0]
-    assert "- last time I skipped audit_project" in provider.seen_user[0]
+    system_text = model.seen[0][0].text
+    assert "Reflections from previous attempts:" in system_text
+    assert "- last time I skipped audit_project" in system_text
 
 
-def test_run_native_threads_reflections_into_messages_and_default_is_byte_identical(
-    tmp_path,
-) -> None:
+def test_reflections_absent_on_every_turn_without_memory(tmp_path) -> None:
+    # A multi-turn run without reflections never grows a reflection block anywhere.
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-
-    # Default (no reflections): the first turn's messages are exactly [system, "Goal:"] — unchanged.
-    plain = _ScriptedToolProvider([ToolCallResponse(text="done")])
-    ReActAgent(gateway=_tool_gateway(plain), registry=registry, max_steps=3).run("g")
-    first_plain = plain.seen_messages[0]
-    assert [m["role"] for m in first_plain] == ["system", "user"]
-    assert first_plain[1]["content"] == "Goal: g"
-
-    # With reflections: exactly one extra user message carrying the shared reflection block.
-    withref = _ScriptedToolProvider([ToolCallResponse(text="done")])
-    ReActAgent(gateway=_tool_gateway(withref), registry=registry, max_steps=3).run(
-        "g", reflections=["missed the audit step"]
+    model = _recording(
+        [
+            AIMessage(content="", tool_calls=[_tool_call("audit_project", {}, "c1")]),
+            AIMessage(content="done"),
+        ]
     )
-    first_ref = withref.seen_messages[0]
-    assert [m["role"] for m in first_ref] == ["system", "user", "user"]
-    assert first_ref[2]["content"] == _reflections_block(["missed the audit step"])
+    ReActAgent(model=model, registry=registry, max_steps=6).run("g")
+
+    for turn in model.seen:
+        assert "Reflections from previous attempts:" not in turn[0].text
+        assert turn[0].text == _NATIVE_SYSTEM_PROMPT
 
 
 # ------------------------- T4: recoverable observation truncation + read_observation round-trip
@@ -610,28 +484,27 @@ def _big_blob_skill(blob: str, name: str = "big_blob") -> Skill:
 
 
 def test_oversized_observation_marker_carries_obs_id_and_stores_full(tmp_path) -> None:
-    # TEXT path: an oversized observation is truncated with a guided marker that names the exact
-    # read_observation call, the FULL text is stored under obs_id, and a follow-up read_observation
-    # restores it byte-for-byte via the real registry + ContextVar. Core acceptance round-trip.
+    # An oversized observation is truncated with a guided marker that names the exact
+    # read_observation call, the FULL text is stored under obs_id, and a follow-up
+    # read_observation restores it byte-for-byte via the real registry + ContextVar (crossing
+    # the LangGraph tool worker threads). Core acceptance round-trip.
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
     blob = "x" * 9000
     registry.register(_big_blob_skill(blob))
-    provider = _ScriptedProvider(
+    model = scripted_chat_model(
         [
-            "Thought: get big data\nAction: big_blob\nAction Input: {}",
-            'Thought: read the rest\nAction: read_observation\nAction Input: {"obs_id": "obs-0-0"}',
-            "Thought: done\nFinal Answer: reported",
+            ("big_blob", {}),
+            ("read_observation", {"obs_id": "obs-0-0"}),
+            "reported",
         ]
     )
-    agent = ReActAgent(
-        gateway=_gateway(provider), registry=registry, max_steps=6, use_native_tools=False
-    )
+    agent = ReActAgent(model=model, registry=registry, max_steps=6)
 
     result = agent.run("fetch and restore")
 
-    full = _dumps({"blob": blob})
+    full = dumps_observation({"blob": blob})
     assert result.steps[0].is_truncated is True
     marker = result.steps[0].observation
     assert 'read_observation(obs_id="obs-0-0")' in marker
@@ -645,56 +518,33 @@ def test_oversized_observation_marker_carries_obs_id_and_stores_full(tmp_path) -
     assert result.steps[1].result["content"] == full
 
 
-def test_oversized_observation_marker_native_path(tmp_path) -> None:
-    # NATIVE path parity: same overflow store + guided marker + round-trip through the
-    # function-calling loop.
+def test_oversized_observation_marker_metadata(tmp_path) -> None:
+    # The truncation metadata (observation_chars / is_truncated) on the step reflects the
+    # POST-truncation observation string, and an explicit small char limit binds.
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    blob = "x" * 9000
-    registry.register(_big_blob_skill(blob))
-    provider = _ScriptedToolProvider(
-        [
-            ToolCallResponse(tool_calls=[ToolCall(call_id="c1", name="big_blob", arguments={})]),
-            ToolCallResponse(
-                tool_calls=[
-                    ToolCall(
-                        call_id="c2",
-                        name="read_observation",
-                        arguments={"obs_id": "obs-0-0"},
-                    )
-                ]
-            ),
-            ToolCallResponse(text="done"),
-        ]
-    )
-    agent = ReActAgent(
-        gateway=_tool_gateway(provider), registry=registry, max_steps=6, use_native_tools=True
-    )
+    registry.register(_big_blob_skill("y" * 3000))
+    model = scripted_chat_model([("big_blob", {}), "done"])
+    agent = ReActAgent(model=model, registry=registry, max_steps=6, observation_char_limit=200)
 
-    result = agent.run("fetch and restore natively")
+    result = agent.run("fetch, truncated tight")
 
-    full = _dumps({"blob": blob})
-    assert result.steps[0].is_truncated is True
-    marker = result.steps[0].observation
-    assert 'read_observation(obs_id="obs-0-0")' in marker
-    assert "read_observation" in marker
-    assert agent._overflow["obs-0-0"] == full
-    read_step = result.steps[1]
-    assert read_step.action == "read_observation"
-    assert not read_step.is_error
-    assert read_step.result is not None
-    assert read_step.result["content"] == full
+    step = result.steps[0]
+    assert step.is_truncated is True
+    assert step.observation_chars == len(step.observation)
+    assert step.observation_chars < 3000
 
 
 def test_observation_within_limit_is_byte_identical(tmp_path) -> None:
-    # BACK-COMPAT (byte-level): the canonical small-project trajectory has every observation under
-    # the limit, so NOTHING is truncated, NOTHING is stored, and each non-error observation is
-    # exactly _dumps(result) — no marker/bytes appended. Proves the untruncated path is unchanged.
+    # BACK-COMPAT (byte-level): the canonical small-project trajectory has every observation
+    # under the limit, so NOTHING is truncated, NOTHING is stored, and each non-error
+    # observation is exactly the canonical sorted-JSON dump of the structured result — no
+    # marker/bytes appended. Proves the untruncated path is unchanged.
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    agent = ReActAgent(gateway=_gateway(OfflineReactProvider()), registry=registry, max_steps=6)
+    agent = ReActAgent(model=OfflineReactChatModel(), registry=registry, max_steps=6)
 
     result = agent.run("Get this world ready to export.")
 
@@ -703,7 +553,7 @@ def test_observation_within_limit_is_byte_identical(tmp_path) -> None:
     for step in result.steps:
         assert step.is_truncated is False
         if not step.is_error:
-            assert step.observation == _dumps(step.result)
+            assert step.observation == dumps_observation(step.result)
 
 
 def test_obs_ids_unique_across_multiple_truncations(tmp_path) -> None:
@@ -713,16 +563,8 @@ def test_obs_ids_unique_across_multiple_truncations(tmp_path) -> None:
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
     registry.register(_big_blob_skill("x" * 9000))
-    provider = _ScriptedProvider(
-        [
-            "Thought: big 1\nAction: big_blob\nAction Input: {}",
-            "Thought: big 2\nAction: big_blob\nAction Input: {}",
-            "Thought: done\nFinal Answer: reported",
-        ]
-    )
-    agent = ReActAgent(
-        gateway=_gateway(provider), registry=registry, max_steps=6, use_native_tools=False
-    )
+    model = scripted_chat_model([("big_blob", {}), ("big_blob", {}), "reported"])
+    agent = ReActAgent(model=model, registry=registry, max_steps=6)
 
     agent.run("two big fetches")
 
@@ -737,12 +579,12 @@ def test_early_stopping_defaults_to_force_and_rejects_bad_values(tmp_path) -> No
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    agent = ReActAgent(gateway=_gateway(OfflineReactProvider()), registry=registry, max_steps=6)
+    agent = ReActAgent(model=OfflineReactChatModel(), registry=registry, max_steps=6)
     assert agent.early_stopping == "force"
 
     with pytest.raises(ValueError, match="early_stopping"):
         ReActAgent(
-            gateway=_gateway(OfflineReactProvider()),
+            model=OfflineReactChatModel(),
             registry=registry,
             max_steps=6,
             early_stopping="bogus",  # type: ignore[arg-type]
@@ -755,22 +597,15 @@ def test_force_early_stopping_is_byte_identical_to_default(tmp_path) -> None:
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    turns = [
-        "Thought: t1\nAction: audit_project\nAction Input: {}",
-        "Thought: t2\nAction: audit_project\nAction Input: {}",
-    ]
+    script: list[Any] = [("audit_project", {}), ("audit_project", {})]
     default_agent = ReActAgent(
-        gateway=_gateway(_ScriptedProvider(list(turns))),
-        registry=registry,
-        max_steps=2,
-        use_native_tools=False,
+        model=scripted_chat_model(list(script)), registry=registry, max_steps=2
     )
     forced_agent = ReActAgent(
-        gateway=_gateway(_ScriptedProvider(list(turns))),
+        model=scripted_chat_model(list(script)),
         registry=registry,
         max_steps=2,
         early_stopping="force",
-        use_native_tools=False,
     )
 
     default_result = default_agent.run("byte identical check")
@@ -785,42 +620,26 @@ def test_generate_early_stopping_spends_one_extra_call_and_uses_its_answer(tmp_p
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    provider = _ScriptedProvider(
+    model = _recording(
         [
-            "Thought: t1\nAction: audit_project\nAction Input: {}",
-            "Thought: t2\nAction: audit_project\nAction Input: {}",
-            "Thought: wrapping up\nFinal Answer: Budget used, but the audit found real issues.",
+            AIMessage(content="t1", tool_calls=[_tool_call("audit_project", {}, "c1")]),
+            AIMessage(content="t2", tool_calls=[_tool_call("audit_project", {}, "c2")]),
+            AIMessage(
+                content=(
+                    "Thought: wrapping up\n"
+                    "Final Answer: Budget used, but the audit found real issues."
+                )
+            ),
         ]
     )
-    agent = ReActAgent(
-        gateway=_gateway(provider),
-        registry=registry,
-        max_steps=2,
-        early_stopping="generate",
-        use_native_tools=False,
-    )
+    agent = ReActAgent(model=model, registry=registry, max_steps=2, early_stopping="generate")
 
     result = agent.run("test generate finish")
 
     assert result.stop_reason == "max_steps_generate"
     assert result.final_answer == "Budget used, but the audit found real issues."
     assert result.step_count == 2  # the finish call is a planning call, not a tool step
-    assert provider.calls == 3  # 2 normal planning turns + exactly 1 finish call
-
-
-class _FinishFailsProvider:
-    """Answers the first `len(turns)` calls from the script, then raises — used to prove the
-    generate-mode finish call's own failure falls back to the 'force' stop honestly."""
-
-    def __init__(self, turns: list[str]) -> None:
-        self.turns = turns
-        self.calls = 0
-
-    def complete(self, *, system: str, user: str, model: str):
-        self.calls += 1
-        if self.calls <= len(self.turns):
-            return self.turns[self.calls - 1], 1, 1
-        raise RuntimeError("finish call boom")
+    assert len(model.seen) == 3  # 2 normal planning turns + exactly 1 finish call
 
 
 def test_generate_early_stopping_falls_back_to_force_when_finish_call_fails(
@@ -829,21 +648,17 @@ def test_generate_early_stopping_falls_back_to_force_when_finish_call_fails(
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    provider = _FinishFailsProvider(
-        [
-            "Thought: t1\nAction: audit_project\nAction Input: {}",
-            "Thought: t2\nAction: audit_project\nAction Input: {}",
-        ]
+    model = _ExhaustedRaisesModel(
+        messages=iter(
+            [
+                AIMessage(content="t1", tool_calls=[_tool_call("audit_project", {}, "c1")]),
+                AIMessage(content="t2", tool_calls=[_tool_call("audit_project", {}, "c2")]),
+            ]
+        )
     )
-    agent = ReActAgent(
-        gateway=_gateway(provider),
-        registry=registry,
-        max_steps=2,
-        early_stopping="generate",
-        use_native_tools=False,
-    )
+    agent = ReActAgent(model=model, registry=registry, max_steps=2, early_stopping="generate")
 
-    with caplog.at_level(logging.WARNING, logger="owcopilot.agent.react"):
+    with caplog.at_level(logging.WARNING, logger="owcopilot.agent.middleware"):
         result = agent.run("test generate finish failure")
 
     assert result.stop_reason == "max_steps"  # honest fallback, never crashes
@@ -852,77 +667,53 @@ def test_generate_early_stopping_falls_back_to_force_when_finish_call_fails(
         "Latest findings are in the steps above; "
         "re-run with a higher --max-steps to continue."
     )
-    assert provider.calls == 3  # 2 normal calls + 1 failed finish attempt
+    assert len(model.seen) == 3  # 2 normal calls + 1 failed finish attempt
     assert any("finish call failed" in r.message for r in caplog.records)
-
-
-class _ToolProviderWithFinish:
-    """Native-tools double: `complete_with_tools` always requests a tool (never finishes on its
-    own), and `complete` (used only by the generate-mode finish call) returns a scripted answer.
-    Calling `complete` without `finish_text` configured is treated as a test failure — it proves
-    the main native loop never uses the plain-text path."""
-
-    supports_tools = True
-    model = "deepseek-v4-pro"
-
-    def __init__(
-        self, tool_turns: list[ToolCallResponse], *, finish_text: str | None = None
-    ) -> None:
-        self.tool_turns = tool_turns
-        self.calls = 0
-        self.finish_calls = 0
-        self.finish_text = finish_text
-
-    def complete_with_tools(self, *, messages, tools, model: str) -> ToolCallResponse:
-        turn = self.tool_turns[min(self.calls, len(self.tool_turns) - 1)]
-        self.calls += 1
-        return turn
-
-    def complete(self, *, system: str, user: str, model: str):
-        self.finish_calls += 1
-        assert self.finish_text is not None, "complete() called without a configured finish_text"
-        return self.finish_text, 1, 1
 
 
 def test_native_generate_early_stopping_spends_one_extra_plain_call(tmp_path) -> None:
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    provider = _ToolProviderWithFinish(
-        [ToolCallResponse(tool_calls=[ToolCall(call_id="c", name="audit_project", arguments={})])],
-        finish_text="Thought: wrap\nFinal Answer: native budget exhausted, findings above.",
+    model = _recording(
+        [
+            AIMessage(content="", tool_calls=[_tool_call("audit_project", {}, "c1")]),
+            AIMessage(content="", tool_calls=[_tool_call("audit_project", {}, "c2")]),
+            AIMessage(
+                content="Thought: wrap\nFinal Answer: native budget exhausted, findings above."
+            ),
+        ]
     )
-    agent = ReActAgent(
-        gateway=_tool_gateway(provider),
-        registry=registry,
-        max_steps=2,
-        early_stopping="generate",
-        use_native_tools=True,
-    )
+    agent = ReActAgent(model=model, registry=registry, max_steps=2, early_stopping="generate")
 
     result = agent.run("loop forever, native")
 
     assert result.stop_reason == "max_steps_generate"
     assert result.final_answer == "native budget exhausted, findings above."
     assert result.step_count == 2
-    assert provider.finish_calls == 1  # exactly one extra plain-text finish call
-    assert provider.calls == 2  # main loop still ran exactly max_steps native turns
+    assert len(model.seen) == 3  # main loop ran exactly max_steps turns + ONE finish call
+    # The finish call is a PLAIN completion off the tool loop: its own system prompt (no tool
+    # schemas involved) plus the flattened transcript, and the exhaustion notice.
+    finish_messages = model.seen[2]
+    assert isinstance(finish_messages[0], SystemMessage)
+    assert "budget for this investigation is exhausted" in finish_messages[0].text
+    assert "The step budget above is exhausted" in finish_messages[1].text
 
 
 def test_native_force_early_stopping_never_calls_plain_complete(tmp_path) -> None:
-    # Default force: the native loop's budget exhaustion must NOT touch complete() at all — the
-    # _ToolProviderWithFinish fake asserts internally if it is (finish_text=None).
+    # Default force: the budget exhaustion must NOT spend any extra model call.
     content_root = tmp_path / "content"
     _dirty_project(content_root)
     registry = default_skill_registry(content_root=str(content_root))
-    provider = _ToolProviderWithFinish(
-        [ToolCallResponse(tool_calls=[ToolCall(call_id="c", name="audit_project", arguments={})])]
+    model = _recording(
+        [
+            AIMessage(content="", tool_calls=[_tool_call("audit_project", {}, "c1")]),
+            AIMessage(content="", tool_calls=[_tool_call("audit_project", {}, "c2")]),
+        ]
     )
-    agent = ReActAgent(
-        gateway=_tool_gateway(provider), registry=registry, max_steps=2, use_native_tools=True
-    )
+    agent = ReActAgent(model=model, registry=registry, max_steps=2)
 
     result = agent.run("loop forever, native, force")
 
     assert result.stop_reason == "max_steps"
-    assert provider.finish_calls == 0
+    assert len(model.seen) == 2  # exactly the budgeted planning calls, no finish call

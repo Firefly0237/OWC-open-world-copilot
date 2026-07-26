@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 from owcopilot.content.models import (
@@ -148,6 +149,39 @@ def test_unreal_target_is_a_superset_of_generic(tmp_path: Path) -> None:
     for item in ue_files:
         assert (tmp_path / item.path).exists()
         assert len(item.sha256) == 64
+
+
+def test_unreal_export_threads_row_struct_map_into_projection(tmp_path: Path) -> None:
+    """A1 (orchestration layer): export_content_bundle passes row_struct_map into the UE
+    projection so a renamed column reaches Quests.json and the C++ row header."""
+    export_content_bundle(
+        _bundle(),
+        tmp_path,
+        target_engine=EngineTarget.UNREAL,
+        row_struct_map={"quests": {"DisplayName": "sDisplayName"}},
+    )
+    quests = json.loads((tmp_path / "unreal" / "Quests.json").read_text(encoding="utf-8"))
+    row = next(r for r in quests if r["Name"] == "quest_patrol")
+    assert "sDisplayName" in row and "DisplayName" not in row
+    header = (tmp_path / "unreal" / "OWCopilotRows.h").read_text(encoding="utf-8")
+    assert "FText sDisplayName;" in header
+
+
+def test_unreal_export_row_struct_map_omitted_matches_library_default(tmp_path: Path) -> None:
+    """A2: omitting row_struct_map keeps the UE projection byte-for-byte identical to the direct
+    exporter default — the new passthrough parameter is inert when unused."""
+    from owcopilot.exporters.unreal_datatable import export_unreal_datatables
+
+    via_orchestrator = tmp_path / "orch"
+    export_content_bundle(_bundle(), via_orchestrator, target_engine=EngineTarget.UNREAL)
+
+    via_library = tmp_path / "lib"
+    export_unreal_datatables(_bundle(), via_library)  # library default: row_struct_map -> {}
+
+    for name in ("Quests.json", "Entities.json", "Dialogues.json", "OWCopilotRows.h"):
+        assert (via_orchestrator / "unreal" / name).read_bytes() == (
+            via_library / name
+        ).read_bytes()
 
 
 def _bundle_with_tree() -> ContentBundle:
@@ -338,3 +372,87 @@ def test_unity_localization_unknown_locale_falls_back_to_bare_code(tmp_path: Pat
     )
     rows = _read_string_table(tmp_path / "unity" / "localization" / "owcopilot_strings.csv")
     assert rows[0] == ["Key", "xx-custom"]  # no display name known -> bare code header
+
+
+# --- A1 (localization remediation): dialogue-tree text_key reaches every localization sink -------
+def _bundle_with_keyed_tree() -> ContentBundle:
+    """A dialogue tree where the root node and its choice opted into ``text_key`` (A1); the second
+    node stays key-less (pre-existing style) to prove the two coexist without cross-contamination.
+    """
+    bundle = _bundle()
+    bundle.dialogue_trees["dt_meet"] = DialogueTree(
+        id="dt_meet",
+        title="初遇玛拉",
+        quest_id="quest_patrol",
+        root_node="n_open",
+        nodes={
+            "n_open": DialogueNode(
+                id="n_open",
+                speaker_id="npc_mara",
+                text="你是谁？",
+                text_key="dt_meet.n_open",
+                choices=[
+                    DialogueChoice(
+                        text="我来帮你。", next_node="n_help", text_key="dt_meet.n_open.c0"
+                    )
+                ],
+            ),
+            "n_help": DialogueNode(id="n_help", text="那就跟我来。"),  # no text_key: stays out
+        },
+    )
+    return bundle
+
+
+def test_xliff_includes_keyed_dialogue_tree_text() -> None:
+    from owcopilot.exporters.xliff import render_xliff
+
+    xlf = render_xliff(_bundle_with_keyed_tree())
+    assert "<source>你是谁？</source>" in xlf
+    assert "<source>我来帮你。</source>" in xlf
+    assert 'id="dt_meet.n_open"' in xlf
+    assert 'id="dt_meet.n_open.c0"' in xlf
+    # the key-less node's text never reaches localization export
+    assert "那就跟我来。" not in xlf
+
+
+def test_localization_csv_includes_keyed_dialogue_tree_text(tmp_path: Path) -> None:
+    export_content_bundle(_bundle_with_keyed_tree(), tmp_path, target_engine=EngineTarget.GENERIC)
+    with (tmp_path / "localized_texts.csv").open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    by_key = {row["Key"]: row for row in rows}
+    assert by_key["dt_meet.n_open"]["Text"] == "你是谁？"
+    assert by_key["dt_meet.n_open"]["Locale"] == "zh"  # detected from the Han script (no explicit
+    # locale field on a node/choice — see xliff._dialogue_tree_units)
+    assert by_key["dt_meet.n_open.c0"]["Text"] == "我来帮你。"
+    assert "那就跟我来。" not in {row["Text"] for row in rows}
+
+
+def test_unity_localization_includes_keyed_dialogue_tree_text(tmp_path: Path) -> None:
+    export_content_bundle(
+        _bundle_with_keyed_tree(),
+        tmp_path,
+        target_engine=EngineTarget.UNITY,
+        unity_localization=True,
+    )
+    rows = _read_string_table(tmp_path / "unity" / "localization" / "owcopilot_strings.csv")
+    header, *data = rows
+    by_key = {row[0]: dict(zip(header[1:], row[1:], strict=True)) for row in data}
+    assert by_key["dt_meet.n_open"]["Chinese(zh)"] == "你是谁？"
+    assert by_key["dt_meet.n_open.c0"]["Chinese(zh)"] == "我来帮你。"
+    assert "dt_meet.n_help" not in by_key  # the key-less node contributes nothing
+
+
+def test_unity_localization_string_count_covers_dialogue_tree_keys(tmp_path: Path) -> None:
+    import json
+
+    export_content_bundle(
+        _bundle_with_keyed_tree(),
+        tmp_path,
+        target_engine=EngineTarget.UNITY,
+        unity_localization=True,
+    )
+    payload = json.loads(
+        (tmp_path / "unity" / "unity_import_manifest.json").read_text(encoding="utf-8")
+    )
+    # 1 pre-existing LocalizedText key ("dlg.hello") + the 2 newly-keyed dialogue-tree units.
+    assert payload["localization"]["string_count"] == 3

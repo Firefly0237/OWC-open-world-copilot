@@ -4,12 +4,9 @@ import json
 import logging
 
 from owcopilot.agent import ReActAgent, persist_agent_run
-from owcopilot.agent.offline import OfflineReactProvider
+from owcopilot.agent.offline import OfflineReactChatModel
 from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest
 from owcopilot.content.store import ContentStore
-from owcopilot.llm.cache import NoOpCache
-from owcopilot.llm.gateway import LLMGateway
-from owcopilot.llm.router import StaticRouter
 from owcopilot.skills import default_skill_registry
 from owcopilot.storage.sqlite import SQLiteStore
 
@@ -32,20 +29,10 @@ def _dirty_project(content_root) -> None:
     )
 
 
-def _gateway(provider) -> LLMGateway:
-    return LLMGateway(
-        providers={"cheap": provider},
-        router=StaticRouter(mapping={"agent_react": "cheap"}),
-        cache=NoOpCache(),
-    )
-
-
 def _real_result(content_root):
     """Drive the REAL ReAct agent (offline double) over a dirty world -> a genuine AgentResult."""
     registry = default_skill_registry(content_root=str(content_root))
-    return ReActAgent(gateway=_gateway(OfflineReactProvider()), registry=registry, max_steps=6).run(
-        GOAL
-    )
+    return ReActAgent(model=OfflineReactChatModel(), registry=registry, max_steps=6).run(GOAL)
 
 
 # --------------------------------------------------------------------------- store layer

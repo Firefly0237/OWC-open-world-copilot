@@ -46,18 +46,25 @@ Usage
         keep_recent=3,
         compression_threshold=0.70,
     )
-    # view is a list[str] to substitute for transcript in _user_prompt()
+    # view is a list[str] to substitute for the transcript in the model-facing view
     # stats.pre_compress_tokens / post_compress_tokens / context_compressions are
     # available for AgentResult fields.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from dataclasses import dataclass
+from typing import Any
 
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from ..config import CONTEXT_COMPRESSION_KEEP_RECENT, CONTEXT_COMPRESSION_THRESHOLD
 from ..llm.gateway import LLMGateway
+from ..llm.otel_bridge import gen_ai_compact_span
 from ..llm.tokenizer import count_tokens
 
 _log = logging.getLogger(__name__)
@@ -168,15 +175,18 @@ def _is_prefix(prefix: tuple[str, ...], whole: tuple[str, ...]) -> bool:
 
 
 def compress_transcript(
-    gateway: LLMGateway,
+    gateway: LLMGateway | None,
     transcript: list[str],
     token_budget: int,
     *,
-    keep_recent: int = 3,
-    compression_threshold: float = 0.70,
+    keep_recent: int = CONTEXT_COMPRESSION_KEEP_RECENT,
+    compression_threshold: float = CONTEXT_COMPRESSION_THRESHOLD,
     compact_task: str = "compact",
     compact_tier: str | None = None,
     cache: CompressionCache | None = None,
+    chat_model: BaseChatModel | None = None,
+    tracer: Any | None = None,
+    model: str = "",
 ) -> tuple[list[str], CompressionStats]:
     """Return a read-time view of *transcript* with oldest turns LLM-summarised if needed.
 
@@ -184,7 +194,8 @@ def compress_transcript(
     ----------
     gateway:
         The LLM gateway used for the micro-compact call (``task="compact"``).  The call is
-        recorded by the gateway's own TelemetryCollector automatically.
+        recorded by the gateway's own TelemetryCollector automatically.  May be ``None`` when
+        *chat_model* is supplied instead (the LangGraph middleware path).
     transcript:
         The agent's append-only turn list.  This list is **never modified**.
     token_budget:
@@ -205,12 +216,29 @@ def compress_transcript(
         turns into the cached summary (incremental), and an identical head makes zero LLM calls —
         eliminating the O(steps) redundant re-summarisation of overlapping content.  When None,
         every round compresses the full head from scratch (the original stateless behaviour).
+    chat_model:
+        Alternative compaction caller: a LangChain chat model invoked directly (T2 additive
+        support — the gateway call surface keeps working unchanged for existing callers).  The
+        call is made with ``tags=[compact_task]`` / ``metadata={"owc_task": compact_task}`` so an
+        attached :class:`~owcopilot.llm.telemetry_callback.TelemetryCallbackHandler` attributes
+        it separately from the planning calls.  Takes precedence when both are supplied; exactly
+        one of *gateway* / *chat_model* must be non-``None``.
+    tracer:
+        Optional OTEL tracer.  When supplied (the middleware path), the *chat_model* compaction
+        call is wrapped in a dedicated ``gen_ai.chat`` compact span, so its latency is a separately
+        measured child of the planning span rather than folded invisibly into it.  ``None`` (direct
+        callers / unit tests) opens no span — behaviour is byte-identical.
+    model:
+        Model id for the compact span's ``gen_ai.request.model`` attribute (only used when *tracer*
+        is set).
 
     Returns
     -------
     (view, stats) where *view* is the list of strings to substitute for *transcript* in
     the prompt, and *stats* carries token accounting and compression metadata.
     """
+    if gateway is None and chat_model is None:
+        raise ValueError("compress_transcript needs a gateway or a chat_model to compact with")
     stats = CompressionStats()
 
     if not transcript:
@@ -264,10 +292,13 @@ def compress_transcript(
     else:
         summary_text = _run_compaction(
             gateway=gateway,
+            chat_model=chat_model,
             reuse_summary=reuse_summary,
             to_compress=to_compress,
             compact_task=compact_task,
             compact_tier=compact_tier,
+            tracer=tracer,
+            model=model,
         )
         if summary_text is None:
             # Gateway failed — graceful fallback to the uncompressed view (not a silent downgrade:
@@ -305,18 +336,23 @@ def compress_transcript(
 
 def _run_compaction(
     *,
-    gateway: LLMGateway,
+    gateway: LLMGateway | None,
+    chat_model: BaseChatModel | None = None,
     reuse_summary: str | None,
     to_compress: list[str],
     compact_task: str,
     compact_tier: str | None,
+    tracer: Any | None = None,
+    model: str = "",
 ) -> str | None:
-    """Summarise *to_compress* (optionally folding in a prior *reuse_summary*) via the gateway.
+    """Summarise *to_compress* (optionally folding in a prior *reuse_summary*) via the LLM.
 
-    Returns the summary text, or ``None`` if the gateway call failed (caller falls back to the
+    Returns the summary text, or ``None`` if the compaction call failed (caller falls back to the
     uncompressed view).  When *reuse_summary* is supplied, the prompt asks the model to extend the
     existing summary with only the new turns — this is the incremental path that keeps the LLM
-    input bounded instead of re-summarising the whole growing head every round.
+    input bounded instead of re-summarising the whole growing head every round.  The caller
+    (:func:`compress_transcript`) guarantees at least one of *gateway* / *chat_model* is set;
+    *chat_model* takes precedence.  A *tracer* wraps the *chat_model* call in its own compact span.
     """
     n_new = len(to_compress)
     turns_text = "\n\n---\n\n".join(to_compress)
@@ -333,6 +369,37 @@ def _run_compaction(
             f"{turns_text}"
         )
 
+    if chat_model is not None:
+        # Own span for the compaction call so its latency is a separately measured child of the
+        # planning span (a trace tool's planning "self time" = duration − children, so this keeps
+        # compaction out of the planning call's own time), not folded invisibly into it. No tracer
+        # (direct callers / unit tests) ⇒ nullcontext, byte-identical to a run without a span.
+        compact_span = (
+            gen_ai_compact_span(tracer, model=model)
+            if tracer is not None
+            else contextlib.nullcontext()
+        )
+        try:
+            with compact_span:
+                reply = chat_model.invoke(
+                    [
+                        SystemMessage(content=_COMPACT_SYSTEM_PROMPT),
+                        HumanMessage(content=user_prompt),
+                    ],
+                    # Label the call for telemetry (task="compact") without touching the inherited
+                    # callbacks: ensure_config only overwrites the keys this config carries.
+                    config={"tags": [compact_task], "metadata": {"owc_task": compact_task}},
+                )
+            return str(reply.text)
+        except Exception as exc:
+            _log.warning(
+                "context_compressor: chat_model compact call (task=%r) failed (%r); "
+                "returning uncompressed transcript view.",
+                compact_task,
+                exc,
+            )
+            return None
+    assert gateway is not None  # compress_transcript validated the pair
     try:
         return gateway.complete(
             task=compact_task,

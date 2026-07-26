@@ -29,6 +29,7 @@ from owcopilot.extraction import (
 )
 from owcopilot.llm.gateway import LLMGateway
 from owcopilot.llm.router import StaticRouter
+from owcopilot.llm.tokenizer import count_tokens
 
 _MANUSCRIPT = (
     "沈青澜说道：雾隐城的灯不该是绿的。沈青澜与陆惊鸿前往枯叶林。\n\n"
@@ -48,9 +49,11 @@ def _service() -> ExtractionService:
 
 def test_chunk_text_splits_long_paragraphs_with_overlap() -> None:
     text = "甲" * 9000
-    chunks = chunk_text(text, max_chars=3500, overlap_chars=200)
+    chunks = chunk_text(text, max_tokens=3500, overlap_chars=200)
     assert len(chunks) >= 3
-    assert all(len(chunk) <= 3500 for chunk in chunks)
+    # The cap is BPE tokens (llm/tokenizer.py), not characters -- a char cap would under-size a
+    # CJK chunk's actual token cost (see chunk_text's module-level comment).
+    assert all(count_tokens(chunk) <= 3500 for chunk in chunks)
 
 
 def test_plan_coverage_short_doc_is_full_fine_granularity() -> None:
@@ -66,19 +69,19 @@ def test_plan_coverage_long_doc_coarsens_but_covers_everything() -> None:
     # A doc whose fine-grained chunking exceeds the budget must still be covered 100% by
     # enlarging chunk size — never silently truncated.
     paragraphs = "\n\n".join(f"第{i}段：沈青澜在雾隐城走了很久很久。" * 30 for i in range(400))
-    chunks, report = plan_coverage(paragraphs, budget_chunks=48, base_chunk_chars=3500)
+    chunks, report = plan_coverage(paragraphs, budget_chunks=48, base_chunk_tokens=3500)
     assert report.granularity == "coarsened"
     assert len(chunks) <= 48
     assert report.covered_chars == report.total_chars  # whole document covered
-    assert report.chunk_chars > 3500  # granularity was coarsened to fit the budget
+    assert report.chunk_tokens > 3500  # granularity was coarsened to fit the budget
     assert report.complete is True
 
 
 def test_plan_coverage_enormous_doc_reports_partial_honestly() -> None:
-    # Larger than the entire budget (budget * max_chunk_chars): the head is read and the tail is
+    # Larger than the entire budget (budget * max_chunk_tokens): the head is read and the tail is
     # reported as uncovered rather than dropped in silence.
     huge = "甲" * 5_000_000
-    chunks, report = plan_coverage(huge, budget_chunks=8, max_chunk_chars=16000)
+    chunks, report = plan_coverage(huge, budget_chunks=8, max_chunk_tokens=16000)
     assert report.granularity == "partial"
     assert report.complete is False
     assert len(chunks) == 8
@@ -113,7 +116,14 @@ def test_offline_extraction_builds_entities_relations_beats_and_gaps() -> None:
     draft = _service().extract(title="第一章", text=_MANUSCRIPT)
     names = {entity.name for entity in draft.bundle.entities.values()}
     assert {"沈青澜", "顾长风", "天机阁"} <= names
-    assert any(rel.kind == "认识" for rel in draft.bundle.relations)
+    # Relations now go through the §8 guards: kind is a controlled-vocabulary id ("knows"/相识, no
+    # longer the free string "认识"), and every kept relation carries the verbatim evidence span it
+    # was grounded on plus a source_ref — the overlay walks the full guarded path even offline ($0).
+    grounded = [rel for rel in draft.bundle.relations if rel.kind == "knows"]
+    assert grounded, "the guarded relation overlay must run in the offline path too"
+    assert all(rel.metadata.get("evidence") for rel in grounded)
+    assert all(rel.metadata["evidence"] in _MANUSCRIPT for rel in grounded)
+    assert all(rel.source_ref is not None for rel in grounded)
     assert draft.plot_beats and draft.plot_beats[0].order == 1
     assert any(gap.field == "description" for gap in draft.gaps)
     assert draft.stats["entities"] == len(draft.bundle.entities)
@@ -283,7 +293,10 @@ def test_corrupt_binary_documents_raise_cleanly() -> None:
 
 
 class _AliasAndRelationProvider:
-    """Emits the same person under two names (linked by an alias) plus a described relation."""
+    """Emits the same person under two names (linked by an alias) plus a described relation.
+
+    The relation names the merged-away alias (李太白) as its source and carries a controlled-vocab
+    kind + verbatim evidence, so it survives the §8 guards and still exercises alias remapping."""
 
     def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
         import json
@@ -295,7 +308,14 @@ class _AliasAndRelationProvider:
                 {"name": "高力士", "description": "宦官"},
             ],
             "relations": [
-                {"source": "李太白", "target": "高力士", "kind": "敌对", "description": "脱靴结怨"}
+                {
+                    "source": "李太白",
+                    "target": "高力士",
+                    "kind": "enemy_of",
+                    "evidence": "李白与高力士",
+                    "confidence": 0.9,
+                    "description": "脱靴结怨",
+                }
             ],
         }
         return json.dumps(payload, ensure_ascii=False), 5, 5

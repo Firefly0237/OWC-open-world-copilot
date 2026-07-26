@@ -95,7 +95,5 @@ def plan_bundle_import(
         )
 
     if not tables:
-        warnings.append(
-            f"目录内未发现 DataTable JSON（应为按 Name 键控的行对象数组）：{base}"
-        )
+        warnings.append(f"目录内未发现 DataTable JSON（应为按 Name 键控的行对象数组）：{base}")
     return BundleImportPlan(unreal_dir=str(base), tables=tables, warnings=warnings)

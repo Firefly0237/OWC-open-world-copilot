@@ -31,7 +31,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from ..llm.tokenizer import count_tokens, truncate_to_token_budget
-from . import SkillError
+from . import SkillConflictError, SkillNotFoundError
 
 # The run-scoped overflow: obs_id -> the FULL untruncated observation text. Unset (None) outside an
 # agent run, so ``read_observation`` gives a guided out-of-run error instead of crashing.
@@ -110,12 +110,14 @@ def read_observation(obs_id: str) -> dict[str, Any]:
     """
     store = _overflow_store.get()
     if store is None:
-        raise SkillError(
+        raise SkillConflictError(
             "read_observation is only available during an agent run "
             "(there is no truncated observation to restore outside one)."
         )
     if obs_id not in store:
         valid = ", ".join(sorted(store)) or "(none)"
-        raise SkillError(f"unknown obs_id {obs_id!r}. Valid obs_id values from this run: {valid}.")
+        raise SkillNotFoundError(
+            f"unknown obs_id {obs_id!r}. Valid obs_id values from this run: {valid}."
+        )
     content = store[obs_id]
     return {"obs_id": obs_id, "content": content, "chars": len(content)}

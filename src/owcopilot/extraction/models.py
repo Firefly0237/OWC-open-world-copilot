@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from ..content.models import ContentBundle
@@ -21,7 +23,10 @@ class CoverageReport(BaseModel):
     total_chars: int = 0
     covered_chars: int = 0
     chunk_count: int = 0
-    chunk_chars: int = 0
+    # BPE tokens (llm/tokenizer.py), not characters: chunk *sizing* is token-based (a char cap
+    # sends very different actual token counts per call depending on language) even though the
+    # coverage accounting above (total_chars/covered_chars) stays character-denominated.
+    chunk_tokens: int = 0
     # "full" = whole doc at fine granularity; "coarsened" = whole doc at larger chunks to stay
     # within the call budget; "partial" = doc exceeds the budget, only the head was read.
     granularity: str = "full"
@@ -94,7 +99,13 @@ class ExtractionDraft(BaseModel):
     bundle: ContentBundle
     plot_beats: list[PlotBeat] = Field(default_factory=list)
     gaps: list[ExtractionGap] = Field(default_factory=list)
-    unresolved_relations: list[dict[str, str]] = Field(default_factory=list)
+    unresolved_relations: list[dict[str, Any]] = Field(default_factory=list)
+    # Relation candidates the §8 guards rejected — the headline case being "no verbatim evidence in
+    # the source" (also: endpoint outside the chunk's entities, off-vocabulary kind, below the
+    # confidence floor, duplicate). Each entry is the guard's human-readable reason, of the form
+    # "source→target [kind]：<原因>". Surfaced as an honest "疑似·缺证据" report so a reviewer can
+    # decide, never silently dropped — mirrors contradiction.judge_skipped / the sweep counters.
+    suspected_relations: list[str] = Field(default_factory=list)
     # Extracted objects whose name is not found in the source text — surfaced for human verification
     # rather than passed off as faithfully grounded (the round-26 "don't mask, surface" discipline).
     unsupported: list[UnsupportedItem] = Field(default_factory=list)

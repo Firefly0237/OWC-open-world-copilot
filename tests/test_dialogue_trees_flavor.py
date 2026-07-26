@@ -132,6 +132,37 @@ def test_dialogue_audit_rules_catch_broken_unknown_and_unreachable() -> None:
     assert "DIALOGUE_TREE_UNREACHABLE_NODE" in codes
 
 
+def test_dialogue_audit_rule_flags_text_without_text_key() -> None:
+    """A1 (localization remediation): a node/choice with real text but no text_key is a WARNING —
+    that line cannot reach XLIFF/Unity CSV/UE StringTable export (see exporters/xliff.py,
+    exporters/unity_localization.py, exporters/unreal_datatable.py)."""
+    bundle = _bundle_with_npcs()
+    bundle.dialogue_trees["dlg_mix"] = DialogueTree(
+        id="dlg_mix",
+        root_node="n0",
+        nodes={
+            "n0": DialogueNode(
+                id="n0",
+                speaker_id="npc_mara",
+                text="有键的台词",
+                text_key="dlg_mix.n0",
+                choices=[
+                    DialogueChoice(text="有键的选项", text_key="dlg_mix.n0.c0", next_node="n1"),
+                    DialogueChoice(text="没键的选项", next_node="n1"),
+                ],
+            ),
+            "n1": DialogueNode(id="n1", text="没键的台词"),  # no text_key
+        },
+    )
+    issues = AuditRunner(build_default_rule_registry()).run(AuditContext.from_bundle(bundle)).issues
+    hits = [i for i in issues if i.rule_code == "DIALOGUE_TREE_MISSING_TEXT_KEY"]
+    paths = {e.path for issue in hits for e in issue.evidence}
+    assert "nodes/n1" in paths  # key-less node text flagged
+    assert "nodes/n0/choices/1" in paths  # key-less choice text flagged
+    assert "nodes/n0" not in paths  # keyed node not flagged
+    assert "nodes/n0/choices/0" not in paths  # keyed choice not flagged
+
+
 def test_dialogue_tree_action_lands_via_review(tmp_path: Path) -> None:
     root = tmp_path / "content"
     _write_project(root)

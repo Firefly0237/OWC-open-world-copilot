@@ -4,6 +4,10 @@ These pin the two canonical estimators to their published closed forms (τ-bench
 Chen-2021 pass@k), the cross-check invariants they must satisfy, the guided ValueErrors for
 out-of-domain inputs, and the τ-bench mean-over-tasks aggregation. Tests assemble inputs and assert
 outputs of the production functions — they do not re-derive the binomials.
+
+W1-2 标注：估计量本身在这里被 n>1 覆盖测试过，是正确实现；但项目里唯一的生产调用点
+（``evaluation/agent_eval.py::run_jd_dimension_scorecard``）永远只喂 n_trials=1 的数据，那里报出
+的 pass_hat_k 实为 pass@1 改名，不是真正的 k>1 可靠性——见 ``reliability.py`` 模块头。
 """
 
 from __future__ import annotations

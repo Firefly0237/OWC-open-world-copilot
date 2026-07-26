@@ -28,23 +28,37 @@ from ..content.models import (
     QuestStage,
     Relation,
     ReviewStatus,
+    SourceRef,
     Term,
 )
+from ..content.relation_kinds import relation_kind_catalog
 from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json_object
+from ..llm.tokenizer import count_tokens, split_by_token_budget
+from ..recognize.llm_relations import ProposedRelation, propose_relations_guarded
 from ..util import unique_id
 from .faithfulness import check_deterministic, llm_unsupported
 from .models import CoverageReport, ExtractionDraft, ExtractionGap, PlotBeat
 
 # Coverage budget: the WHOLE document is always read, but in at most this many model calls.
 # When the natural fine-grained chunking would exceed the budget, chunk size is enlarged (up
-# to MAX_CHUNK_CHARS) so coverage stays 100% while cost stays bounded. Only a document larger
-# than BUDGET * MAX_CHUNK_CHARS (~768K chars — longer than most single novels) is read
-# partially, and the uncovered tail is then reported honestly. These are server-side constants
-# on purpose: choosing a coverage/cost trade-off is the system's responsibility, not the user's.
+# to MAX_CHUNK_TOKENS) so coverage stays 100% while cost stays bounded. Chunk size is measured
+# in BPE tokens (via the project's tokenizer, see llm/tokenizer.py) rather than characters: a
+# char cap sends wildly different actual token counts per call depending on language (measured
+# ~1.4 tokens/char for CJK narrative prose vs ~0.24 tokens/char for English on cl100k_base — a
+# ~6x disparity), so a char-based cap under- or over-shoots the intended per-call cost/latency
+# depending on the manuscript's language. The constants below are the previous char caps
+# (3500 / 16000) converted via that measured ~1.4 tokens/char CJK ratio — this project's
+# dominant real content — so a CJK manuscript keeps roughly the same "how large a document is
+# still fully covered" headroom as before (48 * 22000 ≈ 1.05M tokens, ≈ the previous ~768K CJK
+# chars at ~1.4 tokens/char); an English manuscript now gets substantially MORE headroom for the
+# same call budget, since English costs far fewer tokens per char. Only a document larger than
+# BUDGET * MAX_CHUNK_TOKENS is read partially, and the uncovered tail is then reported honestly.
+# These are server-side constants on purpose: choosing a coverage/cost trade-off is the system's
+# responsibility, not the user's.
 _COVERAGE_BUDGET_CHUNKS = 48
-_BASE_CHUNK_CHARS = 3500
-_MAX_CHUNK_CHARS = 16000
+_BASE_CHUNK_TOKENS = 5000
+_MAX_CHUNK_TOKENS = 22000
 _CHUNK_OVERLAP_CHARS = 200
 
 _KIND_PREFIX = {
@@ -54,17 +68,41 @@ _KIND_PREFIX = {
     EntityType.ITEM: "item",
 }
 
+# 关系抽取叠加：块内抽取当 proposer，产物过 recognize.llm_relations.propose_relations_guarded 五门
+# （闭世界 / 逐字证据接地 / kind 受控词表 / 置信阈值 / 去重）。词表复用 content.relation_kinds 的
+# 26 条策展目录（英文稳定 id + 中文标签），不另起一套并行分类以免制造矛盾词表——用户点名的 7 组
+# （亲属/组织从属/立场/师承/情感/剧情因果/空间来源）都被该目录覆盖。
+_RELATION_KIND_DEFS = relation_kind_catalog()
+_RELATION_KIND_IDS = [kind.id for kind in _RELATION_KIND_DEFS]
+# 块内抽取自身已在剧情上下文里判定关系成立（召回优先）；证据接地才是精度主门，故置信只在模型
+# **自报**低于阈值时才拦（缺省视为模型已确信，见 _relation_candidate）。
+_RELATION_MIN_CONFIDENCE = 0.5
+
+
+def _relation_kind_prompt() -> str:
+    """把关系词表按 category 分组渲成一段紧凑清单（id（label）），注入抽取 prompt，避免手抄漂移。"""
+    grouped: dict[str, list[str]] = {}
+    for kind in _RELATION_KIND_DEFS:
+        grouped.setdefault(kind.category, []).append(f"{kind.id}（{kind.label}）")
+    return "\n".join(f"  {category}：{'、'.join(items)}" for category, items in grouped.items())
+
+
 _SYSTEM_PROMPT = (
     "You are a narrative-design archivist for a game studio. Extract structured facts from "
     "ONE chunk of a manuscript (novel, script or design notes). Return ONE JSON object only, "
     "no markdown fences. Keys: characters, locations, factions, items, terms "
     "(each a list of {name, description, aliases?, traits?}), relations "
-    "(list of {source, target, kind, description?} using names, where description says HOW or "
-    "WHY they are related), beats "
-    "(list of {title, summary, location?, participants?} describing plot beats in order). "
+    "(list of {source, target, kind, evidence, confidence, description?} using entity names), "
+    "beats (list of {title, summary, location?, participants?} describing plot beats in order). "
+    "For EACH relation: `kind` MUST be one of the controlled-vocabulary ids listed below (use the "
+    "English id, not the Chinese label); `evidence` MUST be a short span copied VERBATIM from THIS "
+    "chunk that proves the relation (no paraphrase, quote it exactly); `confidence` is 0.0-1.0; "
+    "`description` says HOW or WHY they are related. If you cannot quote verbatim evidence, or the "
+    "relation kind is not in the vocabulary, DO NOT emit that relation. "
     "List EVERY alternate name a character is called in the chunk under aliases, so the same "
     "person is not recorded twice. Only record facts present in the chunk; leave description "
-    "empty when the chunk gives none. Keep names exactly as written in the manuscript."
+    "empty when the chunk gives none. Keep names exactly as written in the manuscript.\n\n"
+    "关系类型受控词表（relations 的 kind 只能取以下英文 id）：\n" + _relation_kind_prompt()
 )
 
 _FILL_SYSTEM_PROMPT = (
@@ -126,6 +164,10 @@ class ExtractionService:
         system = f"{_SYSTEM_PROMPT}\n\n{directive}"
         merged = _MergedFacts()
         failed: list[int] = []
+        # Relation candidates the §8 guards rejected (no verbatim evidence / off-vocabulary kind /
+        # endpoint outside the chunk's entities / below confidence / duplicate). Surfaced as an
+        # honest "疑似·缺证据" report rather than silently dropped — mirrors sweep.judge_skipped.
+        suspected_relations: list[str] = []
         for index, chunk in enumerate(chunks):
             if progress is not None:
                 progress("chunk", {"index": index + 1, "total": len(chunks)})
@@ -135,9 +177,23 @@ class ExtractionService:
                 # it honestly below — never crash the whole run, never drop it in silence.
                 failed.append(index + 1)
                 continue
+            # Overlay: the block extraction is the RELATION PROPOSER; its candidates only reach
+            # canon after passing the guards, carrying their verbatim evidence + chunk locator.
+            payload["relations"] = self._guard_relations(
+                payload, chunk, index, _payload_entity_names(payload), suspected_relations
+            )
             merged.add(payload, chunk_order=index)
             self._glean_chunk(
-                system, title, source_kind, chunk, index, len(chunks), payload, merged, glean_rounds
+                system,
+                title,
+                source_kind,
+                chunk,
+                index,
+                len(chunks),
+                payload,
+                merged,
+                glean_rounds,
+                suspected_relations,
             )
         if failed:
             _record_failed_chunks(coverage, failed)
@@ -151,6 +207,7 @@ class ExtractionService:
             existing=self.bundle,
             source_text=clean,
             coverage=coverage,
+            suspected_relations=suspected_relations,
         )
         # optional RAGAS-style tier: NLI-judge each structured relation claim against the source,
         # catching invented links the deterministic co-occurrence pass let through. Opt-in (one
@@ -185,6 +242,65 @@ class ExtractionService:
                 continue
         return None
 
+    def _guard_relations(
+        self,
+        payload: dict[str, Any],
+        chunk: str,
+        chunk_index: int,
+        known_names: set[str],
+        suspected: list[str],
+    ) -> list[dict[str, Any]]:
+        """Run the block extractor's relations through the §8 guards, block extraction as proposer.
+
+        The guards (recognize.llm_relations.propose_relations_guarded) enforce, in order: closed
+        world (both endpoints among ``known_names``), verbatim evidence grounding against ``chunk``,
+        controlled kind vocabulary, a confidence floor, and de-duplication. Kept relations carry
+        their evidence span + a chunk locator into the merge (→ Relation.source_ref/metadata in
+        canon). Every rejection is appended to ``suspected`` — the honest "疑似·缺证据" report —
+        rather than dropped in silence."""
+        candidates = [_dict(item) for item in _list(payload.get("relations"))]
+        if not candidates:
+            return []
+        # The guard's ProposedRelation does not carry the block extractor's HOW/WHY description;
+        # recover it after guarding, keyed by the (source, target, kind) triple it dedups on.
+        description_by_key: dict[tuple[str, str, str], str] = {}
+        for raw in candidates:
+            key = (
+                str(raw.get("source") or "").strip(),
+                str(raw.get("target") or "").strip(),
+                str(raw.get("kind") or "").strip(),
+            )
+            desc = str(raw.get("description") or "").strip()
+            if desc:
+                description_by_key.setdefault(key, desc)
+
+        def proposer(_text: str, _ids: list[str]) -> list[dict[str, Any]]:
+            return [_relation_candidate(raw) for raw in candidates]
+
+        kept: list[ProposedRelation]
+        dropped: list[str]
+        kept, dropped = propose_relations_guarded(
+            chunk,
+            sorted(known_names),
+            proposer=proposer,
+            allowed_kinds=_RELATION_KIND_IDS,
+            min_confidence=_RELATION_MIN_CONFIDENCE,
+        )
+        suspected.extend(dropped)
+        locator = f"chunk:{chunk_index + 1}"
+        return [
+            {
+                "source": rel.source,
+                "target": rel.target,
+                "kind": rel.kind,
+                "evidence": rel.evidence,
+                "confidence": rel.confidence,
+                "locator": locator,
+                "description": description_by_key.get((rel.source, rel.target, rel.kind), ""),
+            }
+            for rel in kept
+        ]
+
     def _glean_chunk(
         self,
         system: str,
@@ -196,13 +312,17 @@ class ExtractionService:
         first_pass: dict[str, Any],
         merged: _MergedFacts,
         rounds: int,
+        suspected: list[str],
     ) -> None:
         """Run up to ``rounds`` recovery passes, merging only genuinely new findings.
 
         Stops early once a pass surfaces no new names (diminishing returns). Best-effort: a glean
-        pass that fails to parse is simply skipped — the first pass already landed."""
+        pass that fails to parse is simply skipped — the first pass already landed. Relations a
+        glean pass surfaces are guarded too, with the closed world widened to the entities seen on
+        earlier passes of this chunk (so a link onto a first-pass entity is not rejected)."""
         glean_system = system + _GLEAN_INSTRUCTION
         seen = _payload_names(first_pass)
+        known_entities = _payload_entity_names(first_pass)
         for _ in range(max(0, rounds)):
             known = "、".join(sorted(seen)) or "（无）"
             user = (
@@ -217,6 +337,10 @@ class ExtractionService:
             new_names = _payload_names(extra) - seen
             if not new_names:
                 return
+            known_entities |= _payload_entity_names(extra)
+            extra["relations"] = self._guard_relations(
+                extra, chunk, index, known_entities, suspected
+            )
             merged.add(extra, chunk_order=index)
             seen |= new_names
 
@@ -323,41 +447,44 @@ def plan_coverage(
     text: str,
     *,
     budget_chunks: int = _COVERAGE_BUDGET_CHUNKS,
-    base_chunk_chars: int = _BASE_CHUNK_CHARS,
-    max_chunk_chars: int = _MAX_CHUNK_CHARS,
+    base_chunk_tokens: int = _BASE_CHUNK_TOKENS,
+    max_chunk_tokens: int = _MAX_CHUNK_TOKENS,
     overlap_chars: int = _CHUNK_OVERLAP_CHARS,
 ) -> tuple[list[str], CoverageReport]:
     """Plan how to read ``text`` completely within a bounded number of model calls.
 
     Strategy, in order:
-      1. Chunk at fine granularity (``base_chunk_chars``). If that fits the call budget, done —
+      1. Chunk at fine granularity (``base_chunk_tokens``). If that fits the call budget, done —
          coverage is "full".
       2. Otherwise enlarge chunk size just enough to fit the whole document in ``budget_chunks``
-         chunks (capped at ``max_chunk_chars``) — coverage is still 100%, granularity "coarsened".
-      3. Only if the document is larger than ``budget_chunks * max_chunk_chars`` do we read the
+         chunks (capped at ``max_chunk_tokens``) — coverage is still 100%, granularity "coarsened".
+      3. Only if the document is larger than ``budget_chunks * max_chunk_tokens`` do we read the
          head and report the rest as uncovered — granularity "partial", never silent.
 
     ``chunk_text`` packs every paragraph into some chunk, so a non-truncated plan genuinely
-    covers the whole source; the report states which case applies and in what language.
+    covers the whole source; the report states which case applies and in what language. Coverage
+    itself (``total_chars`` / ``covered_chars``) stays character-denominated — a language-neutral,
+    human-facing "how much of the source did we read" measure — only the chunk *sizing* decision
+    is token-based (see the module-level comment on why chars mis-size a chunk's actual LLM cost).
     """
     clean = text.strip()
     total = len(clean)
     profile = detect_language(clean)
-    chunks = chunk_text(clean, max_chars=base_chunk_chars, overlap_chars=overlap_chars)
-    chunk_chars = base_chunk_chars
+    chunks = chunk_text(clean, max_tokens=base_chunk_tokens, overlap_chars=overlap_chars)
+    chunk_tokens = base_chunk_tokens
     granularity = "full"
 
     if len(chunks) > budget_chunks:
         # Enlarge chunk size until the whole document fits in `budget_chunks` chunks. Paragraph
         # packing leaves slack (a chunk stops before exceeding its cap), so a single proportional
-        # estimate can fall short — grow iteratively until it fits or we hit max_chunk_chars.
+        # estimate can fall short — grow iteratively until it fits or we hit max_chunk_tokens.
         granularity = "coarsened"
-        while len(chunks) > budget_chunks and chunk_chars < max_chunk_chars:
+        while len(chunks) > budget_chunks and chunk_tokens < max_chunk_tokens:
             scale = len(chunks) / budget_chunks
-            chunk_chars = min(
-                max_chunk_chars, max(chunk_chars + 500, math.ceil(chunk_chars * scale))
+            chunk_tokens = min(
+                max_chunk_tokens, max(chunk_tokens + 500, math.ceil(chunk_tokens * scale))
             )
-            chunks = chunk_text(clean, max_chars=chunk_chars, overlap_chars=overlap_chars)
+            chunks = chunk_text(clean, max_tokens=chunk_tokens, overlap_chars=overlap_chars)
 
     if len(chunks) > budget_chunks:
         # The document exceeds the whole budget. Read the head and be honest about the tail.
@@ -368,7 +495,7 @@ def plan_coverage(
             total_chars=total,
             covered_chars=covered,
             chunk_count=len(kept),
-            chunk_chars=chunk_chars,
+            chunk_tokens=chunk_tokens,
             granularity="partial",
             language=profile.label,
             languages=profile.labels,
@@ -381,7 +508,7 @@ def plan_coverage(
         total_chars=total,
         covered_chars=total,
         chunk_count=len(chunks),
-        chunk_chars=chunk_chars,
+        chunk_tokens=chunk_tokens,
         granularity=granularity,
         language=profile.label,
         languages=profile.labels,
@@ -400,6 +527,44 @@ def _payload_names(payload: dict[str, Any]) -> set[str]:
             if name:
                 names.add(name)
     return names
+
+
+def _payload_entity_names(payload: dict[str, Any]) -> set[str]:
+    """Entity names + aliases in one payload — the closed-world set the relation guard restricts
+    endpoints to. Terms are excluded on purpose: relations connect the four entity kinds, and this
+    mirrors the name→id resolution in _draft_from_merged (which maps only entity names/aliases)."""
+    names: set[str] = set()
+    for key in ("characters", "locations", "factions", "items"):
+        for item in _list(payload.get(key)):
+            raw = _dict(item)
+            name = str(raw.get("name") or "").strip()
+            if name:
+                names.add(name)
+            for alias in _list(raw.get("aliases")):
+                alias_name = str(alias).strip()
+                if alias_name:
+                    names.add(alias_name)
+    return names
+
+
+def _relation_candidate(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a block-extractor relation into the proposer shape the §8 guards expect.
+
+    A missing or unparsable confidence defaults to 1.0: the block extractor already committed to the
+    relation in narrative context (recall-first), so verbatim evidence grounding — not a
+    self-reported score — is the real precision gate. Only a score the model *explicitly* reports
+    below the floor should trigger abstention."""
+    try:
+        confidence = float(raw.get("confidence"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        confidence = 1.0
+    return {
+        "source": str(raw.get("source") or "").strip(),
+        "target": str(raw.get("target") or "").strip(),
+        "kind": str(raw.get("kind") or "").strip(),
+        "evidence": str(raw.get("evidence") or "").strip(),
+        "confidence": confidence,
+    }
 
 
 def _record_failed_chunks(coverage: CoverageReport, failed: list[int]) -> None:
@@ -430,20 +595,41 @@ def _coverage_note(
     return f"全文已整篇覆盖（{total:,} 字 / {chunks} 块）。{lang}。"
 
 
-def chunk_text(text: str, *, max_chars: int = 3500, overlap_chars: int = 200) -> list[str]:
+def chunk_text(text: str, *, max_tokens: int = 5000, overlap_chars: int = 200) -> list[str]:
+    """Pack paragraphs into chunks capped at ``max_tokens`` BPE tokens (see llm/tokenizer.py).
+
+    Sizing is token-based so a chunk's actual LLM cost is what ``max_tokens`` says regardless of
+    language (a char cap sends far more tokens per CJK chunk than per English chunk of the same
+    length — see the module-level comment above). ``overlap_chars`` stays character-denominated
+    (it is converted to an equivalent token count, per-paragraph, only where it is actually spent
+    below): it only applies to the rare within-paragraph hard split, as a small slop that carries
+    a bit of the previous cut's tail forward for context continuity.
+    """
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
     chunks: list[str] = []
     current = ""
+    current_tokens = 0
     for paragraph in paragraphs or [text.strip()]:
-        if len(current) + len(paragraph) + 2 <= max_chars:
-            current = f"{current}\n\n{paragraph}".strip()
+        paragraph_tokens = count_tokens(paragraph)
+        if current_tokens + paragraph_tokens <= max_tokens:
+            current = f"{current}\n\n{paragraph}".strip() if current else paragraph
+            current_tokens += paragraph_tokens
             continue
         if current:
             chunks.append(current)
-        while len(paragraph) > max_chars:
-            chunks.append(paragraph[:max_chars].strip())
-            paragraph = paragraph[max(0, max_chars - overlap_chars) :].strip()
-        current = paragraph
+        if paragraph_tokens > max_tokens:
+            # One encode pass sliced into overlapping windows -- NOT truncate_to_token_budget in
+            # a loop, which would re-encode the shrinking remainder every iteration (quadratic for
+            # one huge paragraph with no natural break). The char->token overlap conversion is a
+            # cheap, paragraph-local estimate (tokenizes only the first overlap_chars chars).
+            overlap_tokens = count_tokens(paragraph[:overlap_chars]) if overlap_chars > 0 else 0
+            pieces = split_by_token_budget(paragraph, max_tokens, overlap_tokens=overlap_tokens)
+            chunks.extend(piece.strip() for piece in pieces[:-1])
+            current = pieces[-1].strip()
+            current_tokens = count_tokens(current)
+        else:
+            current = paragraph
+            current_tokens = paragraph_tokens
     if current:
         chunks.append(current)
     return chunks
@@ -459,7 +645,10 @@ class _MergedFacts:
             EntityType.ITEM: {},
         }
         self.terms: dict[str, dict[str, Any]] = {}
-        self.relations: list[dict[str, str]] = []
+        # Relations here are already §8-guarded (see ExtractionService._guard_relations): each
+        # carries the verbatim ``evidence`` span, its ``confidence`` and a chunk ``locator`` so the
+        # provenance survives merge → alias-resolve → id-mapping into the final Relation.
+        self.relations: list[dict[str, Any]] = []
         self.beats: list[dict[str, Any]] = []
 
     def add(self, payload: dict[str, Any], *, chunk_order: int) -> None:
@@ -496,14 +685,19 @@ class _MergedFacts:
             raw = _dict(item)
             source = str(raw.get("source") or "").strip()
             target = str(raw.get("target") or "").strip()
-            rel_kind = str(raw.get("kind") or "").strip() or "相关"
-            if source and target and source != target:
+            # kind is already constrained to the controlled vocabulary by the guard; no "相关"
+            # free-string fallback any more (an unguarded kind never reaches this point).
+            rel_kind = str(raw.get("kind") or "").strip()
+            if source and target and rel_kind and source != target:
                 self.relations.append(
                     {
                         "source": source,
                         "target": target,
                         "kind": rel_kind,
                         "description": str(raw.get("description") or "").strip(),
+                        "evidence": str(raw.get("evidence") or "").strip(),
+                        "confidence": float(raw.get("confidence") or 0.0),
+                        "locator": str(raw.get("locator") or "").strip(),
                     }
                 )
         for item in _list(payload.get("beats")):
@@ -551,6 +745,7 @@ def _draft_from_merged(
     existing: ContentBundle,
     source_text: str = "",
     coverage: CoverageReport | None = None,
+    suspected_relations: list[str] | None = None,
 ) -> ExtractionDraft:
     bundle = ContentBundle()
     name_to_id: dict[str, str] = {}
@@ -588,7 +783,7 @@ def _draft_from_merged(
             review_status=ReviewStatus.PENDING_REVIEW,
         )
 
-    unresolved: list[dict[str, str]] = []
+    unresolved: list[dict[str, Any]] = []
     relation_by_key: dict[tuple[str, str, str], Relation] = {}
     for relation in merged.relations:
         source_id = name_to_id.get(relation["source"])
@@ -598,20 +793,35 @@ def _draft_from_merged(
             continue
         key = (source_id, relation["kind"], target_id)
         description = relation.get("description", "")
+        evidence = str(relation.get("evidence") or "").strip()
         existing_rel = relation_by_key.get(key)
         if existing_rel is not None:
-            # Same edge seen again: keep the more informative "how/why" description.
+            # Same edge seen again: keep the more informative "how/why" description and the first
+            # verbatim evidence span we grounded (do not overwrite a grounded span with a blank).
             if len(description) > len(existing_rel.metadata.get("description", "")):
                 existing_rel.metadata["description"] = description
+            if evidence and not existing_rel.metadata.get("evidence"):
+                existing_rel.metadata["evidence"] = evidence
             continue
         rel_meta = dict(meta)
         if description:
             rel_meta["description"] = description
+        # Provenance back-link: the verbatim span the §8 guard grounded + the chunk it came from,
+        # so a reviewer can click a relation back to the exact source text (G4 in the Station-1).
+        if evidence:
+            rel_meta["evidence"] = evidence
+        locator = str(relation.get("locator") or "").strip()
+        if locator:
+            rel_meta["source_locator"] = locator
+        confidence = relation.get("confidence")
+        if isinstance(confidence, int | float):
+            rel_meta["relation_confidence"] = f"{float(confidence):.2f}"
         new_rel = Relation(
             source=source_id,
             target=target_id,
             kind=relation["kind"],
             metadata=rel_meta,
+            source_ref=SourceRef(path=title) if evidence else None,
             origin=Origin.AI_DRAFT,
             review_status=ReviewStatus.PENDING_REVIEW,
         )
@@ -652,6 +862,7 @@ def _draft_from_merged(
             )
 
     unsupported = check_deterministic(bundle, source_text)
+    suspected = list(suspected_relations or [])
 
     summary = (
         f"从《{title}》提炼：角色 {len(merged.by_kind[EntityType.NPC])}、"
@@ -668,6 +879,7 @@ def _draft_from_merged(
         plot_beats=beats,
         gaps=gaps,
         unresolved_relations=unresolved,
+        suspected_relations=suspected,
         unsupported=unsupported,
         coverage=coverage,
         stats={
@@ -677,6 +889,9 @@ def _draft_from_merged(
             "beats": len(beats),
             "gaps": len(gaps),
             "unsupported": len(unsupported),
+            # honest counter: relation candidates the guards rejected (headline case = no verbatim
+            # evidence). Mirrors contradiction.judge_skipped / sweep — surfaced, never silent.
+            "suspected_relations": len(suspected),
         },
     )
 

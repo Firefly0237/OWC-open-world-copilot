@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from ..errors import OWCopilotError
+
 
 class CostTier(str, Enum):
     """How expensive a skill is to run."""
@@ -37,9 +39,28 @@ class SideEffect(str, Enum):
     WRITES_CANON = "writes_canon"  # writes approved content (never auto-invoked by the agent)
 
 
-class SkillError(ValueError):
+class SkillError(OWCopilotError, ValueError):
     """Raised for an unknown skill name or invalid arguments. The agent feeds the message back to
-    the model as an observation so it can self-correct (e.g. supply a missing argument)."""
+    the model as an observation so it can self-correct (e.g. supply a missing argument).
+
+    Kept a ``ValueError`` (backward compatibility for every ``except ValueError`` / ``except
+    SkillError`` site) *and* an :class:`~owcopilot.errors.OWCopilotError`. The three subtypes below
+    name the failure *mode* so the recovery layer can classify by type (``isinstance``) rather than
+    by scraping the message text — see :func:`owcopilot.skills.errors.classify_error`."""
+
+
+class SkillNotFoundError(SkillError):
+    """A skill / obs_id does not exist or is out of the agent's allowed scope → ``NOT_FOUND``."""
+
+
+class SkillConflictError(SkillError):
+    """The call is not allowed in this state or policy (WRITES_CANON auto-invoke ban, a
+    double-registration, ``read_observation`` outside a run) → ``CONFLICT`` (do not just retry)."""
+
+
+class SkillArgumentError(SkillError):
+    """The arguments are missing / wrong type / wrong enum — a fixable argument problem →
+    ``INVALID_ARG``. Bare :class:`SkillError` raises fall here too (the argument default)."""
 
 
 # Map our compact parameter type names to JSON-schema types for the OpenAI tools serialization.
@@ -126,12 +147,12 @@ def _coerce_arg(skill_name: str, param: SkillParameter, value: Any) -> Any:
     genuine type or enum violation."""
     coerced = _coerce_type(param.type, value)
     if coerced is _INVALID:
-        raise SkillError(
+        raise SkillArgumentError(
             f"skill '{skill_name}' argument '{param.name}' expects {param.type}, "
             f"got {type(value).__name__} ({value!r})"
         )
     if param.enum is not None and coerced not in param.enum:
-        raise SkillError(
+        raise SkillArgumentError(
             f"skill '{skill_name}' argument '{param.name}' must be one of "
             f"{list(param.enum)}, got {coerced!r}"
         )
@@ -174,13 +195,13 @@ class Skill:
         # any future skill mis-classified as WRITES_CANON fails loudly at first call rather than
         # silently writing approved content without a human in the loop.
         if self.side_effect is SideEffect.WRITES_CANON:
-            raise SkillError(
+            raise SkillConflictError(
                 f"skill '{self.name}' has side_effect=WRITES_CANON and cannot be "
                 "auto-invoked by the agent. Canon writes require human review."
             )
         missing = [p.name for p in self.parameters if p.required and p.name not in args]
         if missing:
-            raise SkillError(
+            raise SkillArgumentError(
                 f"skill '{self.name}' is missing required argument(s): {', '.join(missing)}"
             )
         # Only declared parameters are forwarded, and each is validated/coerced against its type
@@ -254,14 +275,14 @@ class SkillRegistry:
 
     def register(self, skill: Skill) -> None:
         if skill.name in self._skills:
-            raise SkillError(f"skill '{skill.name}' is already registered")
+            raise SkillConflictError(f"skill '{skill.name}' is already registered")
         self._skills[skill.name] = skill
 
     def get(self, name: str) -> Skill:
         skill = self._skills.get(name)
         if skill is None:
             known = ", ".join(self.names()) or "(none)"
-            raise SkillError(f"unknown skill '{name}'. Available skills: {known}")
+            raise SkillNotFoundError(f"unknown skill '{name}'. Available skills: {known}")
         return skill
 
     def names(self) -> list[str]:
@@ -307,13 +328,22 @@ class SkillRegistry:
 
 
 from .builtin import default_skill_registry  # noqa: E402  re-exported after the abstraction
+from .scope import (  # noqa: E402  execution-time scoping, imported after the abstraction
+    ScopedSkillRegistry,
+    scoped_registry,
+)
 
 __all__ = [
     "CostTier",
+    "ScopedSkillRegistry",
     "SideEffect",
     "Skill",
+    "SkillArgumentError",
+    "SkillConflictError",
     "SkillError",
+    "SkillNotFoundError",
     "SkillParameter",
     "SkillRegistry",
     "default_skill_registry",
+    "scoped_registry",
 ]

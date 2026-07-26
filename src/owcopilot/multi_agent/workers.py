@@ -16,10 +16,8 @@ Architecture compliance (SUPERVISOR_rubric):
         message is the hand-off, not a Python return value).
 
 Offline / $0 operation:
-  Workers accept an ``LLMGateway``.  In tests, the gateway is built with MockProvider so
-  no real LLM calls happen.  The mock's canned output will NOT match the ReAct format
-  exactly, so the worker will hit max_steps and return a "max_steps" stop_reason — this
-  is expected and tested for.  The important things are:
+  Workers accept a LangChain chat model.  In tests, that is a deterministic fake (a routed
+  or static chat double), so no real LLM calls happen.  The important things are:
   (a) A WorkerAgent instance is created and has an independent transcript.
   (b) It writes a task_result message to the blackboard.
   (c) It never shares transcript with any other agent.
@@ -29,8 +27,10 @@ from __future__ import annotations
 
 import logging
 
+from langchain_core.language_models.chat_models import BaseChatModel
+
 from ..agent.react import AgentResult, ReActAgent
-from ..llm.gateway import LLMGateway
+from ..llm.telemetry import TelemetryCollector
 from ..skills import SkillRegistry
 from .blackboard import AgentBlackboard
 from .messages import AgentMessage, TaskAssignPayload, TaskResultPayload
@@ -54,14 +54,16 @@ class WorkerAgent:
         self,
         *,
         agent_id: str,
-        gateway: LLMGateway,
+        model: BaseChatModel,
         registry: SkillRegistry,
         max_steps: int = 4,
+        telemetry: TelemetryCollector | None = None,
     ) -> None:
         self.agent_id = agent_id
-        self._gateway = gateway
+        self._model = model
         self._registry = registry
         self._max_steps = max_steps
+        self._telemetry = telemetry
         # The ReActAgent is created fresh per instance — its transcript list is private.
         # Creating it here (not inside run_task) lets tests inspect agent._transcript after
         # run_task to verify transcript isolation between two WorkerAgent instances.
@@ -73,16 +75,17 @@ class WorkerAgent:
         """Instantiate a fresh ReActAgent bound to this worker's settings.
 
         ``allowed_skills`` is enforced at BOTH layers:
-          - prompt: the manifest only shows the allowed tools (via ReActAgent.allowed_skills);
+          - schema: the model is bound only the allowed tools (via ReActAgent.allowed_skills);
           - execution: the registry is wrapped by ``scoped_registry`` so any out-of-scope
             skill is DENIED at ``run()`` time — a read-only worker physically cannot invoke
             ``propose_fix``, it only ever sees an is_error observation and self-corrects.
         """
         return ReActAgent(
-            gateway=self._gateway,
+            model=self._model,
             registry=scoped_registry(self._registry, allowed_skills),
             max_steps=max_steps if max_steps is not None else self._max_steps,
             task=f"worker_{self.agent_id}",
+            telemetry=self._telemetry,
             allowed_skills=allowed_skills,
         )
 
@@ -210,15 +213,17 @@ class DiagWorker(WorkerAgent):
         self,
         *,
         agent_id: str = "diag_01",
-        gateway: LLMGateway,
+        model: BaseChatModel,
         registry: SkillRegistry,
         max_steps: int = 4,
+        telemetry: TelemetryCollector | None = None,
     ) -> None:
         super().__init__(
             agent_id=agent_id,
-            gateway=gateway,
+            model=model,
             registry=registry,
             max_steps=max_steps,
+            telemetry=telemetry,
         )
 
 
@@ -236,15 +241,17 @@ class RepairWorker(WorkerAgent):
         self,
         *,
         agent_id: str = "repair_01",
-        gateway: LLMGateway,
+        model: BaseChatModel,
         registry: SkillRegistry,
         max_steps: int = 4,
+        telemetry: TelemetryCollector | None = None,
     ) -> None:
         super().__init__(
             agent_id=agent_id,
-            gateway=gateway,
+            model=model,
             registry=registry,
             max_steps=max_steps,
+            telemetry=telemetry,
         )
 
 

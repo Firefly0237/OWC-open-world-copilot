@@ -58,9 +58,17 @@ class ProjectContext:
         embedder: Embedder | None = None,
         world_id: str = DEFAULT_WORLD_ID,
         version: str = DEFAULT_VERSION,
+        migrate: bool = False,
     ) -> ProjectContext:
         root = Path(content_root)
         content_store = ContentStore(root)
+        # ``migrate=True`` transparently opens the world on its working line (creating it once, on
+        # first open) instead of the baseline -- so editing/ingest write to the working version and
+        # the baseline stays a frozen seed. It is opt-in so the huge existing single-world test/CLI
+        # surface is untouched; the "open a world" boundary (managed worlds) turns it on. The
+        # migration is lossless: a fresh working line is a byte-identical copy-on-write branch.
+        if migrate:
+            version = content_store.ensure_migrated()
         sqlite_store = SQLiteStore(sqlite_path, world_id=world_id, version=version)
         # Load the *effective* bundle for this (world, version) scope via the copy-on-write
         # overlay. The graph, audit and impact analysis then all run on the current version's
@@ -140,6 +148,20 @@ class ProjectContext:
         self.reference_context_builder = ReferenceContextBuilder(
             self.sqlite_store, embedder=self.embedder
         )
+
+    def resync_scope(self) -> None:
+        """Re-point the project at the world's current working line, then reload.
+
+        Update-ingest lands a merge as a NEW frozen merge point + working line (the copy-on-write
+        ratchet in :meth:`ContentStore.advance_head`), so the working version the project opened on
+        is now the previous one. This picks up the advanced working line from the head and rebuilds
+        the scope so subsequent reads/writes hit the freshly merged content. A no-op on an
+        un-migrated world (no head)."""
+        head = self.content_store.read_head()
+        if head is not None:
+            self.version = str(head["working"])
+            self.sqlite_store.set_scope(self.world_id, self.version)
+        self.reload()
 
     def close(self) -> None:
         self.sqlite_store.close()

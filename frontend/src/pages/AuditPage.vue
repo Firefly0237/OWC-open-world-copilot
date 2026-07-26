@@ -22,6 +22,11 @@ interface Issue {
   target_ref: string;
   message: string;
   status?: string;
+  // 六要素里的定位与建议动作。后端在定位不出来时整组字段不下发，所以全是可选。
+  source_path?: string;
+  source_line?: number;
+  node_ref?: string;
+  suggested_action?: string;
 }
 
 interface Candidate {
@@ -73,7 +78,13 @@ interface Contra {
 }
 const contraScanning = ref(false);
 const contraRan = ref(false);
-const contra = ref<{ contradictions: Contra[]; review_suggested: Contra[]; llm_used: boolean }>({
+const contra = ref<{
+  contradictions: Contra[];
+  review_suggested: Contra[];
+  llm_used: boolean;
+  // honesty counter: candidate pairs past the judge cap that were kept for review, never judged
+  judge_skipped?: number;
+}>({
   contradictions: [],
   review_suggested: [],
   llm_used: false,
@@ -211,6 +222,17 @@ function toggleDetail(id: string): void {
 function formatRef(ref: string): string {
   return ref.replace(/^[a-z_]+:/, "");
 }
+
+// 「去哪儿改」这一行：文件 + 行号 + 对话节点。后端定位不出来时留空，这里整行不显示——
+// 报告只声称真定位到的那部分。
+function locationOf(issue: Issue): string {
+  const parts: string[] = [];
+  if (issue.source_path) {
+    parts.push(issue.source_line ? `${issue.source_path} 第 ${issue.source_line} 行` : issue.source_path);
+  }
+  if (issue.node_ref) parts.push(`对话节点 ${issue.node_ref}`);
+  return parts.join("，");
+}
 </script>
 
 <template>
@@ -231,13 +253,20 @@ function formatRef(ref: string): string {
 
     <div class="pane contra">
       <div class="contra-head">
-        <div class="section"><span class="t">设定矛盾检测</span></div>
+        <div class="section"><span class="t">防吃书 · 设定矛盾检测</span></div>
         <button class="ghost" :disabled="contraScanning" @click="scanContradictions">
           {{ contraScanning ? "扫描中…" : "扫描设定矛盾" }}
         </button>
       </div>
       <p class="muted small">
-        规则审计看不出「语义矛盾」——比如同一对势力在不同地方分别写成盟友和死敌。这里用 AI 扫描可疑的矛盾对，标出来让你来判断是否真的有问题，有问题的手动修正。
+        规则审计看不出「语义矛盾」——比如同一对势力在不同地方分别写成盟友和死敌。导入或更新素材后在这里扫一遍，AI 会标出与既有设定冲突的可疑对，你来判断是否真有问题，有问题的手动修正。
+      </p>
+      <p class="muted small ingest-tip">
+        新素材还没入库？先到
+        <RouterLink to="/extraction" class="golink">文稿提炼</RouterLink>
+        或
+        <RouterLink to="/import" class="golink">表格导入</RouterLink>
+        把更新材料接进来，再回到这里扫矛盾。
       </p>
       <div v-if="contraRan">
         <p v-if="!contra.contradictions.length && !contra.review_suggested.length" class="ok-text">
@@ -253,6 +282,9 @@ function formatRef(ref: string): string {
           <p class="contra-point">{{ c.point }}</p>
           <p v-for="(s, i) in c.statements" :key="i" class="contra-stmt mono">{{ s }}</p>
         </div>
+        <p v-if="contra.judge_skipped" class="muted small">
+          还有 {{ contra.judge_skipped }} 对可疑设定超出本次判定上限，未逐一判定，已保留待人工复查。
+        </p>
       </div>
     </div>
 
@@ -274,6 +306,8 @@ function formatRef(ref: string): string {
           </button>
         </div>
         <p class="msg">{{ issue.message }}</p>
+        <p v-if="locationOf(issue)" class="where">📍 {{ locationOf(issue) }}</p>
+        <p v-if="issue.suggested_action" class="advice">✏️ {{ issue.suggested_action }}</p>
         <div v-if="detailOpen[issue.id]" class="detail-panel">
           <span class="detail-row"><span class="detail-k">规则代码</span><span class="rule mono">{{ issue.rule_code }}</span></span>
           <span class="detail-row"><span class="detail-k">引用对象</span><span class="ref mono">{{ issue.target_ref }}</span></span>
@@ -434,6 +468,16 @@ button.ghost.sm {
 .contra .small {
   font-size: 0.8rem;
   margin: 0.2rem 0 0.5rem;
+}
+.ingest-tip {
+  padding: 0.35rem 0.6rem;
+  border-left: 2px solid var(--ow-gold-soft);
+  background: rgba(240, 210, 138, 0.05);
+}
+.golink {
+  color: var(--ow-gold-bright);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 .contra-card {
   border: 1px solid var(--ow-line);
@@ -618,6 +662,25 @@ button.ghost.sm {
   margin: 0.4rem 0 0.5rem;
   font-size: 0.88rem;
   line-height: 1.6;
+}
+
+.where,
+.advice {
+  margin: 0 0 0.35rem;
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.where {
+  color: var(--fg-muted, #8a8f98);
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.advice {
+  padding: 0.4rem 0.6rem;
+  border-left: 2px solid var(--accent, #6ea8fe);
+  background: var(--bg-subtle, rgba(110, 168, 254, 0.08));
+  border-radius: 0 4px 4px 0;
 }
 
 .issue-actions {

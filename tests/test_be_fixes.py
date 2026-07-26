@@ -536,43 +536,126 @@ def test_be9_cli_skills_none_when_not_provided() -> None:
     assert args.skills is None
 
 
-def test_be9_react_agent_allowed_skills_filters_manifest() -> None:
-    """[BE-9 集成] ReActAgent stores allowed_skills and passes them to registry.manifest."""
-    from owcopilot.agent.offline import OfflineReactProvider
+def test_be9_react_agent_allowed_skills_filters_tool_schema() -> None:
+    """[BE-9 集成] ReActAgent passes allowed_skills to the schema layer: the model is bound only
+    the filtered tools (the manifest's post-migration equivalent — the tool list travels in the
+    tools schema)."""
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+    from pydantic import Field
+
     from owcopilot.agent.react import ReActAgent
-    from owcopilot.llm.cache import NoOpCache
-    from owcopilot.llm.gateway import LLMGateway
-    from owcopilot.llm.router import StaticRouter
+    from owcopilot.skills import default_skill_registry
 
-    gateway = LLMGateway(
-        providers={"react": OfflineReactProvider()},
-        router=StaticRouter(mapping={"agent_react": "react"}),
-        cache=NoOpCache(),
-    )
+    class _ToolRecordingModel(GenericFakeChatModel):
+        bound: list[list[str]] = Field(default_factory=list)
 
-    captured: list[set[str] | None] = []
+        def bind_tools(self, tools, **kwargs):
+            self.bound.append([t.name for t in tools])
+            return self
 
-    class _MockRegistry:
-        def manifest(self, allowed: set[str] | None = None) -> str:
-            captured.append(allowed)
-            if allowed is None:
-                return "- audit_project()\n- list_issues()\n- quality_harness()"
-            return "\n".join(f"- {s}()" for s in sorted(allowed))
-
-        def run(self, name: str, args: dict) -> dict:
-            return {"status": "ok"}
-
-    registry = _MockRegistry()
+    model = _ToolRecordingModel(messages=iter([AIMessage(content="done")]))
+    registry = default_skill_registry(content_root=".")
     agent = ReActAgent(
-        gateway=gateway,
-        registry=registry,  # type: ignore[arg-type]
+        model=model,
+        registry=registry,
         max_steps=1,
         allowed_skills={"audit_project", "list_issues"},
     )
-    # Run the agent — it will call registry.manifest(allowed=self.allowed_skills) in run()
     agent.run("test goal")
 
-    # Verify manifest was called with the restricted skill set
-    assert any(a == {"audit_project", "list_issues"} for a in captured), (
-        f"manifest must be called with allowed_skills set; captured={captured}"
+    # The model only ever saw the restricted tool face.
+    assert model.bound, "the agent must bind its tools onto the model"
+    assert set(model.bound[-1]) == {"audit_project", "list_issues"}
+
+
+# ---------------------------------------------------------------------------
+# W1-1 (SECURITY): --skills must gate EXECUTION, not just what the model sees.
+#
+# The gap: the CLI agent bound `--skills` only to the schema layer
+# (ReActAgent.allowed_skills). The execution-layer fallback dispatch
+# (_RegistryFallbackMiddleware) held the FULL registry, so a model that emitted
+# an out-of-scope skill call (a name never bound as a tool) had it dispatched
+# through `registry.run` and REALLY EXECUTED. The fix converges the permission
+# to one place: the CLI hands ReActAgent a `scoped_registry(...)`, so both the
+# schema layer and the execution layer share the same scope.
+# ---------------------------------------------------------------------------
+
+
+def _dirty_world(content_root) -> None:
+    """A minimal world with one dangling quest ref, so audit_project reports a real error."""
+    from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest
+    from owcopilot.content.store import ContentStore
+
+    ContentStore(content_root).save(
+        ContentBundle(
+            entities={
+                "npc_aldric": Entity(
+                    id="npc_aldric",
+                    name="Aldric",
+                    type=EntityType.NPC,
+                    description="Caravan master",
+                )
+            },
+            quests={"q1": Quest(id="q1", title="Q1", giver_npc="npc_missing")},
+        )
     )
+
+
+def test_w1_1_cli_skills_gates_execution_not_just_schema(tmp_path, capsys, monkeypatch) -> None:
+    """[W1-1 复现] Only audit_project is whitelisted, but the model directly calls the
+    filtered-out propose_fix (a PROPOSES_PATCH skill). The allowlist must reject it at the
+    EXECUTION layer (SkillError observation, handler never runs), and the emitted `skills`
+    manifest must reflect the ACTUAL allow-set — not the full registry."""
+    import json
+
+    import owcopilot.cli.main as cli_main
+    from owcopilot.fakes import scripted_chat_model
+
+    content_root = tmp_path / "content"
+    _dirty_world(content_root)
+
+    # The model tries the out-of-scope skill first, then the allowed one, then reports.
+    model = scripted_chat_model(
+        [("propose_fix", {"issue_id": "q1"}), ("audit_project", {}), "reported"]
+    )
+    monkeypatch.setattr(cli_main, "_agent_chat_model", lambda args: model)
+
+    code = cli_main.main(
+        [
+            "agent",
+            "--content-root",
+            str(content_root),
+            "--sqlite-path",
+            ":memory:",
+            "--goal",
+            "diagnose only",
+            "--skills",
+            "audit_project",
+            "--max-steps",
+            "5",
+            "--no-recall",
+            "--llm-mode",
+            "offline",
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    steps = payload["steps"]
+
+    # 1) The out-of-scope skill was DENIED at execution — its handler never ran.
+    propose_steps = [s for s in steps if s["action"] == "propose_fix"]
+    assert propose_steps, "expected the model's propose_fix attempt to be recorded as a step"
+    assert all(s["is_error"] for s in propose_steps), (
+        "out-of-scope propose_fix must be rejected, not executed"
+    )
+    assert any(
+        "not in this agent's allowed tool set" in s["observation"] for s in propose_steps
+    ), "the denial must be the scoped registry's own SkillError, fed back as a recoverable obs"
+
+    # 2) The in-scope skill still runs normally.
+    audit_steps = [s for s in steps if s["action"] == "audit_project"]
+    assert audit_steps and not any(s["is_error"] for s in audit_steps)
+
+    # 3) The emitted skills manifest reflects the ACTUAL allow-set (no lying log).
+    assert payload["skills"] == ["audit_project"]

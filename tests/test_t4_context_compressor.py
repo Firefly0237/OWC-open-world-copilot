@@ -17,7 +17,6 @@ import pytest
 
 from owcopilot.agent.context_compressor import (
     CompressionCache,
-    CompressionStats,
     _is_checkpoint,
     compress_transcript,
 )
@@ -308,6 +307,87 @@ def test_compress_transcript_task_compact_in_telemetry() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Compaction gets its OWN gen_ai.chat span (child of the planning span)
+# ---------------------------------------------------------------------------
+
+
+def test_compaction_emits_its_own_compact_span_nested_under_planning() -> None:
+    """The chat_model compaction call is wrapped in a dedicated compact span, opened as a child of
+    the surrounding planning span so its latency is measured apart from the planning call."""
+    pytest.importorskip("opentelemetry.sdk.trace", reason="opentelemetry-sdk not installed")
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+
+    from owcopilot.llm.otel_bridge import (
+        InMemoryExporter,
+        build_test_tracer,
+        gen_ai_chat_span,
+    )
+
+    tracer, exporter = build_test_tracer(InMemoryExporter())
+    chat_model = GenericFakeChatModel(messages=iter([AIMessage(content="a concise summary")]))
+    turns = [_big_turn(100) for _ in range(4)]
+
+    # Simulate the middleware structure: the compaction runs INSIDE the planning gen_ai.chat span.
+    with gen_ai_chat_span(tracer, model="deepseek-x", step_idx=0):
+        _view, stats = compress_transcript(
+            None,
+            turns,
+            200,  # threshold = 140 tokens; the ~400-token transcript triggers compaction
+            keep_recent=1,
+            compression_threshold=0.70,
+            chat_model=chat_model,
+            tracer=tracer,
+            model="deepseek-x",
+        )
+    assert stats.triggered is True
+
+    spans = exporter.get_finished_spans()
+    chat_spans = [s for s in spans if s.name == "gen_ai.chat"]
+    compact_spans = [s for s in chat_spans if dict(s.attributes or {}).get("gen_ai.owc.task")]
+    planning_spans = [s for s in chat_spans if not dict(s.attributes or {}).get("gen_ai.owc.task")]
+
+    assert len(compact_spans) == 1, f"expected exactly one compact span, got {len(chat_spans)}"
+    compact = compact_spans[0]
+    attrs = dict(compact.attributes or {})
+    assert attrs["gen_ai.owc.task"] == "compact"
+    assert attrs["gen_ai.request.model"] == "deepseek-x"
+    assert attrs["gen_ai.operation.name"] == "chat"
+    # The compact span is a CHILD of the planning span (so planning "self time" excludes it).
+    assert planning_spans, "planning span missing"
+    planning = planning_spans[0]
+    assert compact.parent is not None
+    assert compact.parent.span_id == planning.get_span_context().span_id
+
+
+def test_compaction_opens_no_span_without_a_tracer() -> None:
+    """No tracer (direct callers / unit tests): the compaction call opens no span — the added
+    telemetry wiring is opt-in and byte-identical to a run without it."""
+    pytest.importorskip("opentelemetry.sdk.trace", reason="opentelemetry-sdk not installed")
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+
+    from owcopilot.llm.otel_bridge import InMemoryExporter, build_test_tracer, gen_ai_chat_span
+
+    tracer, exporter = build_test_tracer(InMemoryExporter())
+    chat_model = GenericFakeChatModel(messages=iter([AIMessage(content="summary")]))
+    turns = [_big_turn(100) for _ in range(4)]
+
+    with gen_ai_chat_span(tracer, model="deepseek-x", step_idx=0):
+        _view, stats = compress_transcript(
+            None,
+            turns,
+            200,
+            keep_recent=1,
+            compression_threshold=0.70,
+            chat_model=chat_model,  # no tracer= passed → no compact span
+        )
+    assert stats.triggered is True
+    chat_spans = [s for s in exporter.get_finished_spans() if s.name == "gen_ai.chat"]
+    assert not any(dict(s.attributes or {}).get("gen_ai.owc.task") for s in chat_spans)
+
+
+# ---------------------------------------------------------------------------
 # Graceful fallback on gateway failure
 # ---------------------------------------------------------------------------
 
@@ -336,71 +416,85 @@ def test_compress_transcript_gateway_failure_fallback() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_agent_result_compression_fields(monkeypatch) -> None:
-    """AgentResult.context_compressions >= 1 and pre/post tokens set when compression fires."""
+def test_agent_result_compression_fields() -> None:
+    """End-to-end on the REAL agent path: when read-time compression fires during a run, the
+    AgentResult carries context_compressions >= 1 and pre/post token accounting."""
+    from collections.abc import Sequence
+    from typing import Any
+
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage, SystemMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
     from owcopilot.agent.react import ReActAgent
-    from owcopilot.skills import SkillRegistry
+    from owcopilot.skills import CostTier, SideEffect, Skill, SkillParameter, SkillRegistry
 
-    # Build a provider that returns a scripted ReAct turn then a Final Answer
-    class _ScriptedProvider:
-        def __init__(self) -> None:
-            self._calls = 0
+    class _PlannerWithCompactModel(BaseChatModel):
+        """One model serving both roles (as in production): compact calls (recognised by the
+        compressor's own system prompt) get a short summary; planning calls script 4 echo tool
+        turns then a final answer — counted on the model, NOT from the (compressed) view."""
 
-        def complete(self, *, system: str, user: str, model: str) -> tuple:
-            self._calls += 1
-            if self._calls <= 1:
-                return "Thought: first\nFinal Answer: done", 5, 5
-            return "Thought: done\nFinal Answer: complete", 5, 5
+        planning_calls: int = 0
 
-    provider = _ScriptedProvider()
-    compress_provider = _MockProvider("Summarised earlier turns.")
+        @property
+        def _llm_type(self) -> str:
+            return "planner-with-compact-fake"
 
-    # Two separate providers: one for "compact", one for agent_react
-    gw = LLMGateway(
-        providers={"cheap": compress_provider, "agent": provider},
-        router=StaticRouter(mapping={"compact": "cheap", "agent_react": "agent"}),
-        cache=NoOpCache(),
-    )
+        def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> Any:
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            system = messages[0] if messages and isinstance(messages[0], SystemMessage) else None
+            if system is not None and "transcript compressor" in str(system.text):
+                message = AIMessage(content="summarised earlier turns")
+            elif self.planning_calls < 4:
+                i = self.planning_calls
+                self.planning_calls += 1
+                message = AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "echo",
+                            "args": {"v": f"alpha beta gamma delta epsilon zeta eta turn {i}"},
+                            "id": f"c{i}",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            else:
+                message = AIMessage(content="done")
+            return ChatResult(generations=[ChatGeneration(message=message)])
 
     registry = SkillRegistry()
-
-    # Patch compress_transcript to force triggering (even with short transcript)
-    from owcopilot.agent import context_compressor as cc_mod
-
-    def _forced_compress(gateway, transcript, token_budget, **kwargs):
-        if not transcript:
-            stats = CompressionStats()
-            return [], stats
-        # Force compression to trigger
-        summary = gateway.complete(task="compact", system="sys", user="usr")
-        stats = CompressionStats(
-            pre_compress_tokens=500,
-            post_compress_tokens=50,
-            context_compressions=1,
-            triggered=True,
-            summary_marker=f"[Summary of turns 1-2 (compressed): {summary}]",
+    registry.register(
+        Skill(
+            name="echo",
+            description="echo the value back",
+            cost_tier=CostTier.DETERMINISTIC,
+            side_effect=SideEffect.READ_ONLY,
+            handler=lambda v: {"value": v},
+            parameters=(SkillParameter("v", "string", "value", required=True),),
         )
-        view = [stats.summary_marker] + list(transcript[-1:])
-        return view, stats
-
-    monkeypatch.setattr(cc_mod, "compress_transcript", _forced_compress)
+    )
 
     agent = ReActAgent(
-        gateway=gw,
+        model=_PlannerWithCompactModel(),
         registry=registry,
-        max_steps=2,
-        transcript_token_budget=100,  # small budget to encourage compression
+        max_steps=8,
+        transcript_token_budget=60,  # small budget so the growing transcript crosses it
         compression_threshold=0.5,
+        compression_keep_recent=1,
     )
 
     result = agent.run("test compression fields")
 
-    # The forced compression should have been applied
-    assert result.context_compressions >= 0  # may be 0 if final answer on step 0
-    # Key: pre_compress_tokens and post_compress_tokens are ints (not default 0 if triggered)
-    assert isinstance(result.context_compressions, int)
-    assert isinstance(result.pre_compress_tokens, int)
-    assert isinstance(result.post_compress_tokens, int)
+    assert result.stop_reason == "finished"
+    assert result.step_count == 4
+    # Compression genuinely fired on the real path, and the accounting flowed to the result.
+    assert result.context_compressions >= 1
+    assert result.pre_compress_tokens > 0
+    assert result.post_compress_tokens > 0
+    assert result.post_compress_tokens < result.pre_compress_tokens
 
 
 # ---------------------------------------------------------------------------

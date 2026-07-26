@@ -195,6 +195,37 @@ def test_bundle_with_tree_but_no_effects_is_byte_stable() -> None:
     assert "effects" not in json.dumps(payload)
 
 
+# --- A1 (localization remediation): text_key omission mirrors the effects/style_rubrics sentinel --
+def test_empty_text_key_does_not_serialize() -> None:
+    """A DialogueNode/DialogueChoice with the default (empty) text_key never emits the key, so
+    every dialogue tree written before A1 keeps hashing/exporting byte-identically."""
+    plain_choice = DialogueChoice(text="hi")
+    assert "text_key" not in plain_choice.model_dump(mode="json", exclude_none=True)
+    assert "text_key" not in json.loads(plain_choice.model_dump_json())
+    plain_node = DialogueNode(id="n", text="hi")
+    assert "text_key" not in plain_node.model_dump(mode="json", exclude_none=True)
+    assert "text_key" not in json.loads(plain_node.model_dump_json())
+
+    keyed_choice = DialogueChoice(text="hi", text_key="dlg.n.c0")
+    assert keyed_choice.model_dump(mode="json")["text_key"] == "dlg.n.c0"
+    keyed_node = DialogueNode(id="n", text="hi", text_key="dlg.n")
+    assert keyed_node.model_dump(mode="json")["text_key"] == "dlg.n"
+
+    # round-trip: a dump without the key validates back to the default empty string
+    assert DialogueChoice.model_validate({"text": "hi"}).text_key == ""
+    assert DialogueNode.model_validate({"id": "n"}).text_key == ""
+
+
+def test_bundle_with_tree_but_no_text_key_is_byte_stable() -> None:
+    tree = DialogueTree(
+        id="t",
+        root_node="a",
+        nodes={"a": DialogueNode(id="a", text="hi", choices=[DialogueChoice(text="ok")])},
+    )
+    payload = ContentBundle(dialogue_trees={"t": tree}).model_dump(mode="json", exclude_none=True)
+    assert "text_key" not in json.dumps(payload)
+
+
 # --- product entry: the dialogue CLI (blocker fix — walk/explore reachable by users) --------------
 def test_cli_dialogue_walk_and_composed_simulate(tmp_path, capsys) -> None:
     import json as _json
@@ -248,8 +279,8 @@ def _audit_issues(tree: DialogueTree, quest: Quest) -> list[str]:
 def test_audit_flags_undeclared_effect_var_and_passes_declared() -> None:
     quest = _gated_quest()
     good = _tree()  # helped IS declared in q_gate's logic
-    assert not any("effect mutates" in m for m in _audit_issues(good, quest))
+    assert not any("选中后会修改变量" in m for m in _audit_issues(good, quest))
     bad = _tree()
     bad.nodes["n0"].choices[1].effects.append(Effect(var="ghost_var", op="set", value=True))
     messages = _audit_issues(bad, quest)
-    assert any("effect mutates 'ghost_var'" in m for m in messages)
+    assert any("选中后会修改变量 'ghost_var'" in m for m in messages)

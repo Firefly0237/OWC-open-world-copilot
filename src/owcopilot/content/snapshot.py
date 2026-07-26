@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from ..trust.security import resolve_under_root
 from .hash import content_hash
-from .models import ContentBundle
+from .models import ContentBundle, Relation
 from .normalize import _FORBIDDEN_ID_CHARS, _validate_id_chars
 from .store import ContentStore
 
@@ -38,6 +38,10 @@ _COLLECTIONS: list[tuple[str, str, str]] = [
     # the world's writing voice/rules feed every generation stage, so an edit to one is a real
     # canon change the version history must show (it was silently missing from the diff).
     ("style_guide", "style_guides", "id"),
+    # the 12th canon type (D5): a versioned element checklist. ``label`` is its human name (falls
+    # back to id via ``_name`` when blank), matching the store's own dict_kinds slot for this kind
+    # (content/store.py's COW diff/tombstone list) -- same registration shape, same position.
+    ("style_rubric", "style_rubrics", "label"),
 ]
 
 
@@ -220,6 +224,10 @@ _MERGE_DICT_KINDS = (
     ("localized_text", "localized_texts"),
     ("term", "terms"),
     ("style_guide", "style_guides"),
+    # the 12th canon type (D5): without this entry ``merge_bundles_three_way`` silently dropped
+    # every ``style_rubrics`` entry from ``merged`` (it iterates only the kinds listed here) --
+    # real data loss on any three-way merge touching a world with rubrics.
+    ("style_rubric", "style_rubrics"),
     ("quest_event_ref", "quest_event_refs"),
 )
 
@@ -232,18 +240,32 @@ def merge_versions(
     For each object: if both sides agree, or only one side changed vs the merge base, that value is
     taken automatically; if both sides changed it differently (add/add, both-changed, or
     modify/delete) it is a CONFLICT -- collected, never auto-applied. ``merged`` carries every
-    non-conflicting resolution (a conflict keeps ``ours`` as a placeholder); relations are unioned.
-    Nothing is written to canon: the caller reviews the conflicts and persists via ``save_scoped`` +
-    the review queue, so human review stays the only canon-write path."""
+    non-conflicting resolution (a conflict keeps ``ours`` as a placeholder); relations are merged
+    three-way (deletions propagate). Nothing is written to canon: the caller reviews the conflicts
+    and persists via ``save_scoped`` + the review queue, so human review stays the only canon-write
+    path."""
     base = store.load_scoped(world_id=world_id, version=store.common_base_version(ours, theirs))
     ours_b = store.load_scoped(world_id=world_id, version=ours)
     theirs_b = store.load_scoped(world_id=world_id, version=theirs)
+    return merge_bundles_three_way(base=base, ours=ours_b, theirs=theirs_b)
+
+
+def merge_bundles_three_way(
+    *, base: ContentBundle, ours: ContentBundle, theirs: ContentBundle
+) -> MergeResult:
+    """Pure three-way merge over three already-loaded bundles (the core of :func:`merge_versions`).
+
+    Extracted so an in-memory caller (update-ingest's dry-run, which must not persist a mirror
+    version just to compare) merges through the *same* logic the persisted path uses -- there is one
+    merge implementation, exercised identically on dry-run and write. Semantics are the diff3 table:
+    both-agree / one-sided-change auto-resolve; a divergent change on both sides is a conflict that
+    keeps ``ours`` as a placeholder."""
     merged = ContentBundle()
     conflicts: list[MergeConflict] = []
     for kind, attr in _MERGE_DICT_KINDS:
         base_map = getattr(base, attr)
-        ours_map = getattr(ours_b, attr)
-        theirs_map = getattr(theirs_b, attr)
+        ours_map = getattr(ours, attr)
+        theirs_map = getattr(theirs, attr)
         out = getattr(merged, attr)
         for oid in set(base_map) | set(ours_map) | set(theirs_map):
             bo, oo, to = base_map.get(oid), ours_map.get(oid), theirs_map.get(oid)
@@ -265,12 +287,37 @@ def merge_versions(
                 resolved = oo
             if resolved is not None:
                 out[oid] = resolved
-    merged.relations = list(ours_b.relations)
-    seen = {_rel_sig(r.model_dump(mode="json")) for r in merged.relations}
-    for rel in theirs_b.relations:
-        if _rel_sig(rel.model_dump(mode="json")) not in seen:
-            merged.relations.append(rel)
+    merged.relations = _merge_relations(
+        base=base.relations, ours=ours.relations, theirs=theirs.relations
+    )
     return MergeResult(merged=merged, conflicts=conflicts)
+
+
+def _merge_relations(
+    *, base: list[Relation], ours: list[Relation], theirs: list[Relation]
+) -> list[Relation]:
+    """Three-way set merge of relations, keyed on each relation's full canonical payload.
+
+    ``relations`` is a list whose semantics are a set, so a merge must be a real three-way set
+    operation, not the union it used to be (union could never propagate a deletion -- an external
+    source dropping a relation was silently re-added from ``ours``). Full-payload identity means a
+    metadata change is a delete + add rather than a silent overwrite. A relation survives iff both
+    sides still carry it, or it is new versus the base on at least one side (an addition the other
+    side never had the chance to delete); a base relation dropped by either side is removed."""
+    base_keys = {content_hash(r) for r in base}
+    ours_keys = {content_hash(r) for r in ours}
+    theirs_keys = {content_hash(r) for r in theirs}
+    kept: dict[str, Relation] = {}
+    # ours first, then theirs-only, so an unchanged shared relation keeps ours' object identity and
+    # the on-disk order stays deterministic (ContentBundle re-sorts by relation_sort_key anyway).
+    for rel in [*ours, *theirs]:
+        key = content_hash(rel)
+        if key in kept:
+            continue
+        both_keep = key in ours_keys and key in theirs_keys
+        if both_keep or key not in base_keys:
+            kept[key] = rel
+    return list(kept.values())
 
 
 def _diff_relations(

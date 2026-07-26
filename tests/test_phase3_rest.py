@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -92,6 +93,25 @@ def test_unity_export_localization_optin_flows_through_request(client: TestClien
     assert on.status_code == 200, on.text
     on_kinds = {f["kind"] for f in on.json()["manifest"]["files"]}
     assert {"unity_localization_csv", "unity_localization_readme"} <= on_kinds
+
+
+def test_export_row_struct_map_renames_columns_through_request(client: TestClient) -> None:
+    """A1 (REST entry): the row_struct_map request field threads into the UE projection — the
+    renamed column reaches Quests.json and the C++ row header, proving the field is wired."""
+    resp = client.post(
+        "/projects/demo/exports",
+        json={
+            "target_engine": "unreal",
+            "row_struct_map": {"quests": {"DisplayName": "sDisplayName"}},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    unreal_dir = Path(resp.json()["output_dir"]) / "unreal"
+    quests = json.loads((unreal_dir / "Quests.json").read_text(encoding="utf-8"))
+    row = next(r for r in quests if r["Name"] == "q_edit")
+    assert "sDisplayName" in row and "DisplayName" not in row
+    header = (unreal_dir / "OWCopilotRows.h").read_text(encoding="utf-8")
+    assert "FText sDisplayName;" in header
 
 
 def test_engine_import_queues_changes_for_review(client: TestClient) -> None:

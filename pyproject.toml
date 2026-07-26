@@ -35,6 +35,11 @@ dependencies = [
     "sqlite-vec==0.1.9",
     # Optional on-disk ANN backend for larger corpora; exact fallback remains available.
     "usearch==2.25.3",
+    # Agent-normalization round: standard orchestration + model layer (LangGraph/LangChain).
+    # langchain_core also supplies the standard fake chat models used as test doubles.
+    "langchain>=1.3",
+    "langgraph>=1.2",
+    "langgraph-checkpoint-sqlite>=3.1",
 ]
 
 # No [project.urls] yet — the project is local-only (not published to a public repo).
@@ -49,7 +54,9 @@ dev = [
     "pre-commit>=3.7",      # local commit-time gate
     "fakeredis>=2.20",      # in-memory Redis stand-in for the RedisCache tests (offline, $0)
 ]
-live = ["openai>=1.0"]            # real provider (DeepSeek/OpenAI-compatible); offline runs don't need it
+# Real provider via the LangChain model layer (ChatDeepSeek by default; ChatOpenAI for custom
+# OpenAI-compatible base_url endpoints); offline runs don't need it.
+live = ["openai>=1.0", "langchain-deepseek>=1.1", "langchain-openai>=1.3"]
 semantic = ["sentence-transformers>=3.0"]   # real multilingual embeddings (bge-m3) for hybrid RAG; pulls torch
 serve = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]   # the deployable HTTP API (service/api.py)
 redis = ["redis>=5.0"]            # optional RedisCache backend for multi-instance stateless deploys

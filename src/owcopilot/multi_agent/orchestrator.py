@@ -13,34 +13,40 @@ Architecture compliance (SUPERVISOR_rubric P3-1, P3-2, P3-6, P3-7):
         hand-off point (satisfying P3-3 by transitivity through session.py).
 
 LLM decomposition (offline-safe):
-  ``_decompose_goal`` sends a JSON-structured prompt to the gateway.  In offline/mock mode
-  the provider returns a canned string; ``_parse_subtasks`` tries to extract a JSON list and
-  falls back to two built-in subtasks (diagnosis + repair_proposal) if parsing fails.  This
+  ``_decompose_goal`` sends a JSON-structured prompt to the chat model.  In offline/mock mode
+  the model returns a canned non-JSON string; ``_parse_subtasks`` tries to extract a JSON list
+  and falls back to two built-in subtasks (diagnosis + repair_proposal) if parsing fails.  This
   ensures offline tests run at $0 while the production path uses real LLM reasoning.
 
 Decomposition strategy (no ReAct theatre):
-  ``_decompose_goal`` is a TWO-pass *gateway* strategy — both passes are direct
-  ``gateway.complete`` calls, not a ReActAgent loop.  Pass-1 asks for a JSON array of
-  subtasks; if that does not parse, pass-2 retries with a stricter "JSON ONLY, no prose"
-  system prompt (the most common real-LLM failure is prose wrapped around valid JSON, which
-  a re-ask with a harder constraint fixes).  Only if BOTH passes fail does it fall back to
-  the static template (``degraded=True``) — surfaced, never silent.
+  ``_decompose_goal`` is a TWO-pass direct chat-model strategy — both passes are direct
+  ``model.invoke([SystemMessage, HumanMessage])`` calls, not a ReActAgent loop.  Pass-1 asks
+  for a JSON array of subtasks; if that does not parse, pass-2 retries with a stricter "JSON
+  ONLY, no prose" system prompt (the most common real-LLM failure is prose wrapped around
+  valid JSON, which a re-ask with a harder constraint fixes).  Only if BOTH passes fail does
+  it fall back to the static template (``degraded=True``) — surfaced, never silent.
 
   Earlier revisions wired a ReActAgent loaded with *audit* tools into pass-2 to "extract JSON
   from verbose output".  That was structurally doomed (audit tools are irrelevant to JSON
   extraction, and the offline double never reaches a Final Answer in 2 steps), so it
   contributed nothing but the appearance of agent activation.  It has been removed in favour
-  of the honest second gateway call above — no performative ReActAgent.
+  of the honest second model call above — no performative ReActAgent.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..llm.gateway import LLMGateway
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
+
+from ..agent.react import _AGENT_TIER, _model_id_of
+from ..llm.jsonio import extract_json
+from ..llm.telemetry import TelemetryCollector
+from ..llm.telemetry_callback import TelemetryCallbackHandler
 from ..skills import SkillRegistry
 from .blackboard import AgentBlackboard
 from .messages import AgentMessage, TaskAssignPayload, TaskResultPayload, VerifyResultPayload
@@ -80,9 +86,9 @@ class MultiAgentReport:
 class OrchestratorAgent:
     """Decomposes a goal, routes subtasks to workers via blackboard, reads results, synthesizes.
 
-    This is a first-class agent with its own ``agent_id`` and its own independent gateway call
+    This is a first-class agent with its own ``agent_id`` and its own independent model call
     path.  It does NOT share transcript or context with any WorkerAgent or VerifierAgent — its
-    decomposition runs through dedicated ``orchestrator_decompose`` gateway tasks, distinct
+    decomposition runs through dedicated ``orchestrator_decompose`` chat-model calls, distinct
     from the ``worker_*`` / ``verifier_*`` tasks the other agents use.
     """
 
@@ -90,17 +96,22 @@ class OrchestratorAgent:
         self,
         *,
         agent_id: str = "orchestrator",
-        gateway: LLMGateway,
+        model: BaseChatModel,
         registry: SkillRegistry,
         # role → registered worker agent_id. Injected into the decomposition prompt (the model
         # must address real workers, not invent ids) and used to normalise near-miss ids after
         # parsing. None keeps the legacy behaviour (no constraint, no normalisation).
         registered_workers: dict[str, str] | None = None,
+        # Per-call accounting for the decompose chat-model calls. Decomposition happens OUTSIDE
+        # an agent.invoke context, so the TelemetryCallbackHandler is attached explicitly on the
+        # invoke config (§1.3) — None ⇒ no accounting (its cost simply is not recorded).
+        telemetry: TelemetryCollector | None = None,
     ) -> None:
         self.agent_id = agent_id
-        self._gateway = gateway
+        self._model = model
         self._registry = registry
         self._registered_workers = dict(registered_workers or {})
+        self._telemetry = telemetry
 
     # ------------------------------------------------------------------
     # Public API
@@ -275,10 +286,37 @@ class OrchestratorAgent:
     # Private: goal decomposition
     # ------------------------------------------------------------------
 
+    def _invoke_decompose(self, system: str, user: str) -> str:
+        """One decompose chat-model call — the direct-invoke analogue of ``gateway.complete``.
+
+        Mirrors :func:`owcopilot.agent.reflexion.distill_reflection`: the call happens OUTSIDE an
+        ``agent.invoke`` context, so the :class:`TelemetryCallbackHandler` (billing each call into
+        the shared collector under ``orchestrator_decompose``) must be attached explicitly on the
+        invoke config. Returns the reply text for ``_parse_subtasks`` — no ``response_format`` is
+        set (the decomposition asks for a JSON *array*, which ``json_object`` mode would reject).
+        """
+        config: RunnableConfig | None = None
+        if self._telemetry is not None:
+            config = {
+                "callbacks": [
+                    TelemetryCallbackHandler(
+                        self._telemetry,
+                        tier=_AGENT_TIER,
+                        model=_model_id_of(self._model),
+                        default_task="orchestrator_decompose",
+                    )
+                ]
+            }
+        reply = self._model.invoke(
+            [SystemMessage(content=system), HumanMessage(content=user)], config=config
+        )
+        return str(reply.text)
+
     def _decompose_goal(self, goal: str) -> tuple[list[SubTask], bool]:
         """Break a high-level goal into worker subtasks.
 
-        Two-pass *gateway* strategy (both passes are direct gateway calls — no ReAct loop):
+        Two-pass direct chat-model strategy (both passes are direct ``model.invoke`` calls — no
+        ReAct loop):
         1. Ask for a JSON array of subtasks.
         2. If that does not parse, re-ask with a stricter "JSON ONLY, no prose, no fences"
            system prompt.  The common real-LLM failure is valid JSON wrapped in prose; a
@@ -323,14 +361,14 @@ class OrchestratorAgent:
             "Repair workers use skills: propose_fix, quality_harness. "
             "Output JSON array only."
         )
-        # Pass 1: direct gateway call
-        raw = self._gateway.complete(task="orchestrator_decompose", system=system, user=user)
+        # Pass 1: direct chat-model call
+        raw = self._invoke_decompose(system, user)
         subtasks, degraded = _parse_subtasks(raw, goal)
 
         if not degraded:
             return self._normalise_worker_ids(subtasks), False
 
-        # Pass 2: honest second gateway call with a stricter JSON-only constraint.
+        # Pass 2: honest second chat-model call with a stricter JSON-only constraint.
         # No ReActAgent / no audit tools — those are irrelevant to JSON extraction and would
         # only be performative.  We just re-ask harder.
         logger.debug(
@@ -347,9 +385,7 @@ class OrchestratorAgent:
         )
         strict_user = f"Goal: {goal}\n\nReturn the JSON array of subtasks now. JSON only."
         try:
-            raw2 = self._gateway.complete(
-                task="orchestrator_decompose", system=strict_system, user=strict_user
-            )
+            raw2 = self._invoke_decompose(strict_system, strict_user)
             subtasks2, degraded2 = _parse_subtasks(raw2, goal)
             if not degraded2:
                 logger.debug("orchestrator: pass-2 strict-JSON decomposition succeeded")
@@ -527,26 +563,36 @@ def _coerce_subtask_steps(value: Any) -> int | None:
 def _parse_subtasks(raw: str, goal: str) -> tuple[list[SubTask], bool]:
     """Try to parse LLM JSON response; fall back to built-in subtasks on any failure.
 
+    Extraction uses :func:`~owcopilot.llm.jsonio.extract_json` — the array-capable member of the
+    same shared tolerant JSON-extraction module every other generation surface in the codebase
+    uses (``barks.py``'s variant list reads this same function; ``worldgen/service.py``'s
+    per-stage payload reads the object-only sibling ``extract_json_object``) — rather than a
+    hand-rolled fence-strip + bracket-find. That also makes this MORE tolerant than the previous
+    ad hoc version: it locates the JSON span regardless of surrounding prose, not just a fence at
+    the very start of the reply (the module docstring's own "most common real-LLM failure" is
+    prose wrapped AROUND the JSON, which a start-anchored fence strip does not handle).
+
+    ``complete_structured`` (``llm/structured.py``, the project's Pydantic-validated structured
+    output layer) is deliberately NOT used here: it validates a single ``BaseModel`` per call via
+    ``LLMGateway.complete``, whereas decomposition emits a JSON *array* of heterogeneous subtask
+    dicts into a plain ``@dataclass`` (not a ``BaseModel``) via a direct ``BaseChatModel.invoke``
+    (no gateway) with a graceful-degrade contract (fall back to the static template, never raise) —
+    the opposite of ``complete_structured``'s "never return a default, raise
+    ``StructuredOutputError`` instead" discipline. Forcing that shape through it would mean
+    introducing an envelope ``BaseModel`` (changing the model-facing wire contract this module's
+    own prompt tests pin), replacing the two-pass *different-system-prompt* retry with its
+    single-prompt error-appending repair loop, and inverting the degrade-vs-raise contract every
+    caller here depends on — a redesign, not a reuse. This mirrors the same, already-established
+    call in ``worldgen/service.py``'s ``parse_world_seed_payload`` (see its "Kept off
+    complete_structured" comment) for the same reason: a loose multi-shape payload, not one
+    Pydantic model per call.
+
     Returns:
         (subtasks, degraded) — degraded=True means parse failed and _FALLBACK_SUBTASKS used.
         ② The degraded flag must be surfaced by callers — never silent.
     """
     try:
-        # Strip markdown fences if present
-        text = raw.strip()
-        for fence in ("```json", "```JSON", "```"):
-            if text.startswith(fence):
-                text = text[len(fence) :].strip()
-        if text.endswith("```"):
-            text = text[:-3].strip()
-
-        # Find JSON array
-        start = text.find("[")
-        end = text.rfind("]") + 1
-        if start == -1 or end == 0:
-            return _FALLBACK_SUBTASKS, True
-
-        data = json.loads(text[start:end])
+        data = extract_json(raw)
         if not isinstance(data, list) or len(data) == 0:
             return _FALLBACK_SUBTASKS, True
 
@@ -590,7 +636,9 @@ def _parse_subtasks(raw: str, goal: str) -> tuple[list[SubTask], bool]:
 
         return subtasks, False  # successfully parsed AND role-complete — not degraded
 
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+    # ValueError covers extract_json's "no balanced span" / "invalid JSON" raises (and
+    # json.JSONDecodeError, itself a ValueError subclass, should extract_json ever let one through).
+    except (KeyError, TypeError, ValueError):
         return _FALLBACK_SUBTASKS, True
 
 

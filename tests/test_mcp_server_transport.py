@@ -31,11 +31,27 @@ def test_create_mcp_server_registers_tools_when_fastmcp_is_available(monkeypatch
             self.name = name
             self.tools: list[str] = []
             self.annotations: dict[str, Any] = {}
+            self.resources: list[str] = []
+            self.prompts: list[str] = []
 
         def tool(self, **kwargs: Any):
             def decorator(func):
                 self.tools.append(func.__name__)
                 self.annotations[func.__name__] = kwargs.get("annotations")
+                return func
+
+            return decorator
+
+        def resource(self, uri: str, **kwargs: Any):
+            def decorator(func):
+                self.resources.append(uri)
+                return func
+
+            return decorator
+
+        def prompt(self, **kwargs: Any):
+            def decorator(func):
+                self.prompts.append(kwargs.get("name") or func.__name__)
                 return func
 
             return decorator
@@ -75,3 +91,18 @@ def test_create_mcp_server_registers_tools_when_fastmcp_is_available(monkeypatch
     assert server.annotations["export_project"].readOnlyHint is False
     assert server.annotations["export_project"].destructiveHint is False
     assert server.annotations["export_project"].idempotentHint is False
+    # Read-only Resources + a Prompt template are registered alongside the tools.
+    assert server.resources == ["owcopilot://canon", "owcopilot://issues/open"]
+    assert server.prompts == ["consistency_review"]
+
+
+def test_resource_readers_require_a_bound_project() -> None:
+    """The Resource read helpers read the serve-bound project; with none bound they raise a guided
+    error pointing at the serve entry, never a bare AttributeError on None."""
+    from owcopilot.mcp_server import tools
+    from owcopilot.mcp_server.transport import _canon_resource, _open_issues_resource
+
+    assert tools._shared_project.get() is None
+    for reader in (_canon_resource, _open_issues_resource):
+        with pytest.raises(RuntimeError, match="mcp-serve"):
+            reader()

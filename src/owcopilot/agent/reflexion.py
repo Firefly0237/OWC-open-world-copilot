@@ -20,18 +20,23 @@ the trial driver is task-shaped rather than a standalone generic API.
 
 The offline deterministic template ``_offline_reflection`` is the project-sanctioned $0 stand-in for
 the Self-Reflection LLM (gated by ``OWCOPILOT_ALLOW_OFFLINE_LLM``, exactly like
-``OfflineReactProvider`` substitutes the actor LLM) — it never leaks into a real deployment, which
+``OfflineReactChatModel`` substitutes the actor LLM) — it never leaks into a real deployment, which
 always takes the LLM path. A blank model reply raises :class:`ReflexionError` rather than degrading
 silently into plain retry.
 """
 
 from __future__ import annotations
 
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
+
+from ..errors import OWCopilotError
 from ..llm.gateway import offline_llm_allowed
-from .react import ReActAgent
+from ..llm.telemetry_callback import TelemetryCallbackHandler
+from .react import _AGENT_TIER, ReActAgent, _model_id_of
 
 
-class ReflexionError(RuntimeError):
+class ReflexionError(OWCopilotError, RuntimeError):
     """Raised when self-reflection cannot produce a real reflection (blank model output).
 
     Guarantees "no silent downgrade": rather than feeding an empty reflection forward (which would
@@ -50,7 +55,8 @@ _REFLECTION_SYSTEM_PROMPT = (
 
 def distill_reflection(*, agent: ReActAgent, goal: str, trial_index: int, feedback: str) -> str:
     """Convert a failed trial's ``feedback`` into one short verbal reflection (the paper's
-    Self-Reflection model). One LLM call per failed trial, through the agent's own gateway/task.
+    Self-Reflection model). One LLM call per failed trial, through the agent's own chat model
+    (billed to the agent's collector under its task label, when one is wired).
 
     Offline ($0) path: when ``OWCOPILOT_ALLOW_OFFLINE_LLM`` is set (tests / CI / eval), use the
     deterministic template — the sanctioned stand-in for the Self-Reflection LLM. A real deployment
@@ -60,12 +66,30 @@ def distill_reflection(*, agent: ReActAgent, goal: str, trial_index: int, feedba
     if offline_llm_allowed():
         return _offline_reflection(trial_index=trial_index, feedback=feedback)
 
-    raw = agent.gateway.complete(
-        task=agent.task,
-        system=_REFLECTION_SYSTEM_PROMPT,
-        user=_reflection_prompt(goal=goal, trial_index=trial_index, feedback=feedback),
+    config: RunnableConfig | None = None
+    if agent.telemetry is not None:
+        # Same per-call accounting as the agent loop itself: distillation happens OUTSIDE an
+        # agent.invoke context, so the callback handler must be attached explicitly here.
+        config = {
+            "callbacks": [
+                TelemetryCallbackHandler(
+                    agent.telemetry,
+                    tier=_AGENT_TIER,
+                    model=_model_id_of(agent.model),
+                    default_task=agent.task,
+                )
+            ]
+        }
+    reply = agent.model.invoke(
+        [
+            SystemMessage(content=_REFLECTION_SYSTEM_PROMPT),
+            HumanMessage(
+                content=_reflection_prompt(goal=goal, trial_index=trial_index, feedback=feedback)
+            ),
+        ],
+        config=config,
     )
-    reflection = raw.strip()
+    reflection = str(reply.text or "").strip()
     if not reflection:
         raise ReflexionError(
             f"self-reflection produced an empty reflection for trial {trial_index} "

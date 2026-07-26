@@ -2,8 +2,8 @@
 """Deterministic offline providers for manuscript extraction.
 
 Not language models: cheap pattern extractors that exercise the full pipeline —
-chunking, merging, id mapping, gap detection, review queue — at $0. Real runs swap in
-`OpenAICompatProvider`; nothing else changes.
+chunking, merging, id mapping, gap detection, review queue — at $0. Real runs swap in the
+LangChain-backed real provider (`--llm-mode real`); nothing else changes.
 """
 
 from __future__ import annotations
@@ -56,12 +56,24 @@ class OfflineExtractionProvider:
         factions = _collect(_FACTION_PATTERNS, body)
         terms = _unique(_TERM_PATTERN.findall(body))
         relations = []
-        for source, target in _PAIR_PATTERN.findall(body):
-            source = _snap_to_known(source, characters)
-            target = _snap_to_known(target, characters)
+        for match in _PAIR_PATTERN.finditer(body):
+            source = _snap_to_known(match.group(1), characters)
+            target = _snap_to_known(match.group(2), characters)
             if source == target:
                 continue
-            relations.append({"source": source, "target": target, "kind": "认识"})
+            # The matched "X和/与Y" text is a verbatim slice of the chunk, so it passes evidence
+            # grounding; "knows" (相识) is the controlled-vocabulary id, so it passes the kind gate.
+            # The deterministic double thus walks the full §8-guarded relation path at $0 — the
+            # overlay is not real-model-only.
+            relations.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "kind": "knows",
+                    "evidence": match.group(0),
+                    "confidence": 0.9,
+                }
+            )
             for name in (source, target):  # a pair endpoint is a character sighting too
                 if name not in characters:
                     characters.append(name)

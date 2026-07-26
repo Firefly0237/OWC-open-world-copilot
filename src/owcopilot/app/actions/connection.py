@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from ...llm.gateway import OpenAICompatProvider
+from ...llm.chat_model import ChatModelProvider
 
 
 def probe_llm_connection_action(
@@ -39,7 +39,7 @@ def probe_llm_connection_action(
                 os.environ[key] = value
             else:
                 os.environ.pop(key, None)
-        probe = provider or OpenAICompatProvider(model=model, timeout=timeout, max_output_tokens=64)
+        probe = provider or ChatModelProvider(model=model, timeout=timeout, max_output_tokens=64)
         started = time.perf_counter()
         result = probe.complete(
             system="You are a connectivity probe.",

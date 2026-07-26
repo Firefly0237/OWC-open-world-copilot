@@ -32,6 +32,7 @@ def export_content_bundle(
     *,
     target_engine: EngineTarget | str = EngineTarget.GENERIC,
     unity_localization: bool = False,
+    row_struct_map: dict[str, dict[str, str]] | None = None,
 ) -> ExportManifest:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -53,8 +54,13 @@ def export_content_bundle(
     # UNREAL target is a superset: keep the generic bundle above byte-for-byte, then add the UE
     # DataTable projection under unreal/. Preflight may raise UnrealExportError (guided) before any
     # UE file is written; the generic files already on disk stay valid.
+    # ``row_struct_map`` (canonical field name -> the project's own export column name, keyed by
+    # table) is meaningful only for the UNREAL projection; None/omit keeps the default {} so the
+    # generic and unity outputs stay byte-for-byte identical to before.
     if engine is EngineTarget.UNREAL:
-        ue_result = export_unreal_datatables(bundle, output / _UNREAL_SUBDIR)
+        ue_result = export_unreal_datatables(
+            bundle, output / _UNREAL_SUBDIR, row_struct_map=row_struct_map
+        )
         for item in ue_result.files:
             files.append(
                 ExportedFile(

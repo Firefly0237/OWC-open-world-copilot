@@ -1,6 +1,7 @@
 """Tests for the OWCopilot multi-agent system (T3).
 
-ALL tests run offline at $0 (MockProvider via conftest autouse fixture).
+ALL tests run offline at $0: the orchestrator's decompose calls and the worker/verifier ReAct
+loops all run on deterministic LangChain chat-model fakes.
 No real LLM calls, no network, no model downloads.
 
 Verified against SUPERVISOR_rubric P3-1 through P3-7:
@@ -11,18 +12,25 @@ Verified against SUPERVISOR_rubric P3-1 through P3-7:
   P3-5: VerifierAgent is independent — doesn't read worker transcript
   P3-6: Every blackboard row has from_agent / to_agent attribution
   P3-7: Agents are dispatched via blackboard messages, not nested function calls
+
+诚实说明（W1-2 标注）：以上都是架构/结构性断言（这个类存在、这条边被走过、这个字段被写入），不是
+协作质量评测。本文件不产出任何任务成功率/协作质量/错误级联率数字——多 agent 编排本身**未评测**，
+见 owcopilot.multi_agent 模块头 与 owcopilot.evaluation 模块头 的对应说明。
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Sequence
+from typing import Any
 
 import pytest
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
 
-from owcopilot.fakes import MockProvider
-from owcopilot.llm.gateway import LLMGateway
-from owcopilot.llm.telemetry import TelemetryCollector
 from owcopilot.multi_agent import (
     AgentBlackboard,
     AgentMessage,
@@ -40,21 +48,93 @@ from owcopilot.multi_agent import (
 )
 
 # ---------------------------------------------------------------------------
+# Chat-model doubles for the worker/verifier ReAct loops (the gateway text doubles
+# stay only for the orchestrator's decompose surface)
+# ---------------------------------------------------------------------------
+
+
+class _StaticChatModel(BaseChatModel):
+    """Chat double answering every call with a fixed plain final answer (records each call).
+
+    The MockProvider analogue for worker/verifier loops: the loop terminates immediately with
+    an unparseable-count answer, so verifier fallbacks honestly yield needs_more.
+    """
+
+    reply: str = "[mock] ok"
+    seen: list[list[BaseMessage]] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "static-chat-fake"
+
+    def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> Any:
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.seen.append(list(messages))
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.reply))])
+
+
+class _RoutedChatModel(BaseChatModel):
+    """Message-routed chat double: ``route(messages)`` decides each reply — the chat-model
+    generation of the retired prompt-routed text providers (goal text lives in the first
+    HumanMessage, injected reflections in the SystemMessage suffix, tool results as
+    ToolMessages)."""
+
+    route: Any
+    seen: list[list[BaseMessage]] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "routed-chat-fake"
+
+    def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> Any:
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.seen.append(list(messages))
+        return ChatResult(generations=[ChatGeneration(message=self.route(list(messages)))])
+
+
+def _system_text(messages: list[BaseMessage]) -> str:
+    return str(messages[0].text) if messages and isinstance(messages[0], SystemMessage) else ""
+
+
+def _human_text(messages: list[BaseMessage]) -> str:
+    return next((str(m.text) for m in messages if isinstance(m, HumanMessage)), "")
+
+
+def _tool_results(messages: list[BaseMessage]) -> int:
+    return sum(1 for m in messages if isinstance(m, ToolMessage))
+
+
+def _tool_call_reply(name: str, args: dict[str, Any], *, thought: str = "") -> AIMessage:
+    return AIMessage(
+        content=thought,
+        tool_calls=[{"name": name, "args": args, "id": f"call_{name}", "type": "tool_call"}],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
-def offline_gateway() -> LLMGateway:
-    """$0 offline LLM gateway backed by MockProvider.
+def offline_orchestrator_model() -> _StaticChatModel:
+    """$0 offline chat model for the orchestrator decompose calls.
 
-    Registered under 'cheap' because StaticRouter defaults unmapped tasks to 'cheap'.
+    Its fixed non-JSON reply makes ``_parse_subtasks`` fail, so decomposition degrades to the
+    static fallback — the chat-model analogue of the retired MockProvider gateway (byte-identical
+    degrade behaviour: a canned non-JSON reply the parser cannot read).
     """
-    mock = MockProvider()
-    return LLMGateway(
-        {"cheap": mock, "frontier": mock},
-        telemetry=TelemetryCollector(),
-    )
+    return _StaticChatModel()
+
+
+@pytest.fixture()
+def offline_model() -> _StaticChatModel:
+    """$0 offline chat model for the worker/verifier ReAct loops."""
+    return _StaticChatModel()
 
 
 @pytest.fixture()
@@ -142,9 +222,13 @@ def _make_audit_registry(open_errors: int):
 
 
 @pytest.fixture()
-def session(offline_gateway: LLMGateway, minimal_registry) -> MultiAgentSession:
-    """Full MultiAgentSession wired to offline providers."""
-    return MultiAgentSession(gateway=offline_gateway, registry=minimal_registry)
+def session(offline_orchestrator_model, offline_model, minimal_registry) -> MultiAgentSession:
+    """Full MultiAgentSession wired to offline doubles."""
+    return MultiAgentSession(
+        orchestrator_model=offline_orchestrator_model,
+        model=offline_model,
+        registry=minimal_registry,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -152,13 +236,17 @@ def session(offline_gateway: LLMGateway, minimal_registry) -> MultiAgentSession:
 # ---------------------------------------------------------------------------
 
 
-def test_p3_1_distinct_agent_classes(offline_gateway, minimal_registry) -> None:
+def test_p3_1_distinct_agent_classes(
+    offline_orchestrator_model, offline_model, minimal_registry
+) -> None:
     """P3-1: OrchestratorAgent, DiagWorker, RepairWorker, VerifierAgent are distinct classes."""
-    gw, reg = offline_gateway, minimal_registry
-    orch = OrchestratorAgent(agent_id="orchestrator", gateway=gw, registry=reg)
-    diag = DiagWorker(agent_id="diag_01", gateway=gw, registry=reg)
-    repair = RepairWorker(agent_id="repair_01", gateway=gw, registry=reg)
-    verifier = VerifierAgent(agent_id="verifier_01", gateway=gw, registry=reg)
+    reg = minimal_registry
+    orch = OrchestratorAgent(
+        agent_id="orchestrator", model=offline_orchestrator_model, registry=reg
+    )
+    diag = DiagWorker(agent_id="diag_01", model=offline_model, registry=reg)
+    repair = RepairWorker(agent_id="repair_01", model=offline_model, registry=reg)
+    verifier = VerifierAgent(agent_id="verifier_01", model=offline_model, registry=reg)
 
     agent_ids = {orch.agent_id, diag.agent_id, repair.agent_id, verifier.agent_id}
     assert len(agent_ids) == 4, f"Expected 4 distinct agent_ids, got: {agent_ids}"
@@ -176,10 +264,10 @@ def test_p3_1_distinct_agent_classes(offline_gateway, minimal_registry) -> None:
     assert not isinstance(verifier, WorkerAgent)
 
 
-def test_p3_1_independent_transcripts(offline_gateway, minimal_registry) -> None:
+def test_p3_1_independent_transcripts(offline_model, minimal_registry) -> None:
     """P3-1: Two workers must have independent transcript objects — not the same list."""
-    diag = DiagWorker(agent_id="diag_01", gateway=offline_gateway, registry=minimal_registry)
-    repair = RepairWorker(agent_id="repair_01", gateway=offline_gateway, registry=minimal_registry)
+    diag = DiagWorker(agent_id="diag_01", model=offline_model, registry=minimal_registry)
+    repair = RepairWorker(agent_id="repair_01", model=offline_model, registry=minimal_registry)
 
     # Each ReActAgent initialises its transcript inside run() as a local list.
     # We verify the two agents' underlying ReActAgent objects are distinct instances.
@@ -206,13 +294,13 @@ def test_p3_1_session_has_four_participants(session: MultiAgentSession) -> None:
 
 
 def test_p3_2_orchestrator_decomposes_goal(
-    offline_gateway: LLMGateway, minimal_registry, blackboard: AgentBlackboard
+    offline_orchestrator_model, minimal_registry, blackboard: AgentBlackboard
 ) -> None:
     """P3-2: post_task_assignments posts ≥2 task_assign messages to the blackboard."""
     import uuid
 
     orch = OrchestratorAgent(
-        agent_id="orchestrator", gateway=offline_gateway, registry=minimal_registry
+        agent_id="orchestrator", model=offline_orchestrator_model, registry=minimal_registry
     )
     sid = str(uuid.uuid4())
 
@@ -229,13 +317,13 @@ def test_p3_2_orchestrator_decomposes_goal(
 
 
 def test_p3_2_orchestrator_is_not_if_else_router(
-    offline_gateway: LLMGateway, minimal_registry, blackboard: AgentBlackboard
+    offline_orchestrator_model, minimal_registry, blackboard: AgentBlackboard
 ) -> None:
     """P3-2: Orchestrator routes to named workers via blackboard, not a static decision tree."""
     import uuid
 
     orch = OrchestratorAgent(
-        agent_id="orchestrator", gateway=offline_gateway, registry=minimal_registry
+        agent_id="orchestrator", model=offline_orchestrator_model, registry=minimal_registry
     )
     sid = str(uuid.uuid4())
 
@@ -258,25 +346,26 @@ def test_p3_2_orchestrator_is_not_if_else_router(
     )
 
 
-class _JsonDecomposeProvider:
-    """Mock provider that returns a valid decompose JSON array for the orchestrator.
+class _JsonDecomposeModel(BaseChatModel):
+    """Chat model returning a valid decompose JSON array for the orchestrator.
 
-    This exercises the PRODUCTION JSON-parse path in ``_decompose_goal`` /
-    ``_parse_subtasks`` (not the offline fallback). For non-decompose tasks
-    (worker / verifier ReAct loops) it returns a trivial Final Answer so those
-    loops terminate quickly. Still $0 — no network, no real model.
+    Exercises the PRODUCTION JSON-parse path in ``_decompose_goal`` / ``_parse_subtasks`` (not
+    the offline fallback). The orchestrator holds its own model, so only decompose calls reach
+    this double. Still $0 — no network, no real model.
     """
 
-    def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-        if "task-decomposition" in system or "Decompose into subtasks" in user:
-            payload = (
-                '[{"role": "diagnosis", "description": "Audit and list open errors", '
-                '"allowed_skills": ["audit_project", "list_issues"], "worker_id": "diag_01"}, '
-                '{"role": "repair_proposal", "description": "Propose fixes for top errors", '
-                '"allowed_skills": ["propose_fix"], "worker_id": "repair_01"}]'
-            )
-            return payload, 10, 10
-        return "Thought: done.\nFinal Answer: ok", 5, 2
+    @property
+    def _llm_type(self) -> str:
+        return "json-decompose-fake"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        payload = (
+            '[{"role": "diagnosis", "description": "Audit and list open errors", '
+            '"allowed_skills": ["audit_project", "list_issues"], "worker_id": "diag_01"}, '
+            '{"role": "repair_proposal", "description": "Propose fixes for top errors", '
+            '"allowed_skills": ["propose_fix"], "worker_id": "repair_01"}]'
+        )
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=payload))])
 
 
 def test_p3_2_orchestrator_parses_real_decompose_json(
@@ -284,15 +373,14 @@ def test_p3_2_orchestrator_parses_real_decompose_json(
 ) -> None:
     """P3-2 (production path): a valid decompose JSON is parsed into NAMED subtasks.
 
-    The default offline mock falls back to built-in subtasks; this test feeds a provider
+    The default offline mock falls back to built-in subtasks; this test feeds a model
     that returns a real JSON array, proving ``_parse_subtasks`` parses LLM output (not just
     the fallback) and routes each parsed subtask to its named worker via the blackboard.
     """
     import uuid
 
-    provider = _JsonDecomposeProvider()
-    gateway = LLMGateway({"cheap": provider, "frontier": provider}, telemetry=TelemetryCollector())
-    orch = OrchestratorAgent(agent_id="orchestrator", gateway=gateway, registry=minimal_registry)
+    model = _JsonDecomposeModel()
+    orch = OrchestratorAgent(agent_id="orchestrator", model=model, registry=minimal_registry)
     sid = str(uuid.uuid4())
 
     posted, degraded = orch.post_task_assignments(
@@ -349,7 +437,7 @@ def test_p3_3_blackboard_stores_messages(blackboard: AgentBlackboard) -> None:
 
 
 def test_p3_3_blackboard_roundtrip_task_assign_to_result(
-    offline_gateway: LLMGateway, minimal_registry, blackboard: AgentBlackboard
+    offline_model, minimal_registry, blackboard: AgentBlackboard
 ) -> None:
     """P3-3: Full assign→claim→result cycle flows through the blackboard, not function args."""
     import uuid
@@ -372,7 +460,7 @@ def test_p3_3_blackboard_roundtrip_task_assign_to_result(
     blackboard.post_message(assign_msg)
 
     # Worker claims and runs — the blackboard is the handoff, not a Python argument
-    worker = DiagWorker(agent_id="diag_01", gateway=offline_gateway, registry=minimal_registry)
+    worker = DiagWorker(agent_id="diag_01", model=offline_model, registry=minimal_registry)
     claimed = blackboard.claim_task("diag_01", sid)
     assert claimed is not None, "Worker should be able to claim the posted task"
     assert claimed.msg_type == "task_assign"
@@ -423,7 +511,7 @@ def test_p3_3_claim_prevents_double_claim(
 
 
 def test_p3_4_worker_goal_contains_original_goal_and_subtask(
-    offline_gateway: LLMGateway, minimal_registry, blackboard: AgentBlackboard
+    offline_model, minimal_registry, blackboard: AgentBlackboard
 ) -> None:
     """P3-4: The goal string built for the ReActAgent contains both original_goal and subtask."""
     import uuid
@@ -444,7 +532,7 @@ def test_p3_4_worker_goal_contains_original_goal_and_subtask(
     )
     blackboard.post_message(assign_msg)
 
-    worker = DiagWorker(agent_id="diag_01", gateway=offline_gateway, registry=minimal_registry)
+    worker = DiagWorker(agent_id="diag_01", model=offline_model, registry=minimal_registry)
     claimed = blackboard.claim_task("diag_01", sid)
     assert claimed is not None
 
@@ -483,20 +571,18 @@ def test_p3_4_worker_goal_contains_original_goal_and_subtask(
 # ---------------------------------------------------------------------------
 
 
-def test_p3_5_verifier_has_independent_agent_instance(
-    offline_gateway: LLMGateway, minimal_registry
-) -> None:
+def test_p3_5_verifier_has_independent_agent_instance(offline_model, minimal_registry) -> None:
     """P3-5: VerifierAgent has its own ReActAgent, distinct from any worker's agent."""
-    gw, reg = offline_gateway, minimal_registry
-    worker = DiagWorker(agent_id="diag_01", gateway=gw, registry=reg)
-    verifier = VerifierAgent(agent_id="verifier_01", gateway=gw, registry=reg)
+    reg = minimal_registry
+    worker = DiagWorker(agent_id="diag_01", model=offline_model, registry=reg)
+    verifier = VerifierAgent(agent_id="verifier_01", model=offline_model, registry=reg)
 
     assert verifier.agent is not worker.agent, "Verifier must have its own ReActAgent"
     assert verifier.agent_id != worker.agent_id
 
 
 def test_p3_5_verifier_only_reads_blackboard_not_worker_transcript(
-    offline_gateway: LLMGateway, minimal_registry, blackboard: AgentBlackboard
+    offline_model, minimal_registry, blackboard: AgentBlackboard
 ) -> None:
     """P3-5: Verifier reads task_result from blackboard, not from the worker object."""
     import uuid
@@ -531,9 +617,7 @@ def test_p3_5_verifier_only_reads_blackboard_not_worker_transcript(
     blackboard.post_message(verify_req)
 
     # Verifier runs — it MUST NOT receive the worker object, only the blackboard
-    verifier = VerifierAgent(
-        agent_id="verifier_01", gateway=offline_gateway, registry=minimal_registry
-    )
+    verifier = VerifierAgent(agent_id="verifier_01", model=offline_model, registry=minimal_registry)
     result_msg = verifier.verify(verify_req, blackboard)
 
     # Verify result is on the blackboard
@@ -637,9 +721,9 @@ def test_p3_7_worker_transcripts_are_not_same_object(
     # Verifier's agent is also distinct
     assert diag.agent is not session.verifier.agent
     assert repair.agent is not session.verifier.agent
-    # The orchestrator does NOT hold a ReActAgent — it decomposes via direct gateway calls,
+    # The orchestrator does NOT hold a ReActAgent — it decomposes via direct chat-model calls,
     # not a (previously performative) ReAct meta-loop.  Its independence is structural: a
-    # distinct agent_id and dedicated orchestrator_decompose gateway task.
+    # distinct agent_id and dedicated orchestrator_decompose model call.
     assert not hasattr(session.orchestrator, "agent")
     assert session.orchestrator.agent_id == "orchestrator"
 
@@ -780,7 +864,7 @@ def test_task_assign_payload_always_has_both_fields() -> None:
 
 
 def test_rt3_1_worker_crash_recorded_not_silent(
-    offline_gateway: LLMGateway, minimal_registry, blackboard: AgentBlackboard
+    offline_orchestrator_model, offline_model, minimal_registry, blackboard: AgentBlackboard
 ) -> None:
     """① worker.run_task crash → failed task_result on blackboard, NOT silent code=0.
 
@@ -791,7 +875,11 @@ def test_rt3_1_worker_crash_recorded_not_silent(
     """
     from owcopilot.multi_agent.session import MultiAgentSession
 
-    session = MultiAgentSession(gateway=offline_gateway, registry=minimal_registry)
+    session = MultiAgentSession(
+        orchestrator_model=offline_orchestrator_model,
+        model=offline_model,
+        registry=minimal_registry,
+    )
 
     # Patch DiagWorker.run_task to raise
     original_run_task = session.diag_worker.__class__.run_task
@@ -825,18 +913,22 @@ def test_rt3_1_worker_crash_recorded_not_silent(
 
 
 def test_rt3_2_fallback_decomposition_is_not_silent(
-    offline_gateway: LLMGateway, minimal_registry
+    offline_orchestrator_model, offline_model, minimal_registry
 ) -> None:
     """② LLM decomposition fallback must NOT be silent — report.decomposition_degraded=True.
 
-    MockProvider returns garbage (not valid JSON), so _parse_subtasks falls back.
+    The offline model returns a fixed non-JSON reply, so _parse_subtasks falls back.
     The report must carry decomposition_degraded=True and the synthesis must contain
     the degradation notice string, never hiding the fact from callers.
     """
     from owcopilot.multi_agent.session import MultiAgentSession
 
-    session = MultiAgentSession(gateway=offline_gateway, registry=minimal_registry)
-    # MockProvider's output is not valid JSON for the decompose prompt → fallback fires
+    session = MultiAgentSession(
+        orchestrator_model=offline_orchestrator_model,
+        model=offline_model,
+        registry=minimal_registry,
+    )
+    # The offline model's reply is not valid JSON for the decompose prompt → fallback fires
     report = session.run("test fallback goal")
 
     assert report.decomposition_degraded is True, (
@@ -852,45 +944,41 @@ def test_rt3_2_fallback_decomposition_is_not_silent(
     )
 
 
-def test_rt3_3_unknown_worker_recorded_not_silent(
-    offline_gateway: LLMGateway, minimal_registry
-) -> None:
+def test_rt3_3_unknown_worker_recorded_not_silent(minimal_registry) -> None:
     """③ Unknown worker_id must not silent-continue — blackboard gets a failed task_result.
 
-    We inject a task_assign for a non-existent worker_id via a custom provider that
+    We inject a task_assign for a non-existent worker_id via a custom model that
     returns a JSON subtask targeting 'nonexistent_worker_99'.  The session must NOT
     silently skip it — it must record an unrouted task_result on the blackboard.
     """
     from owcopilot.multi_agent.session import MultiAgentSession
 
-    class _UnknownWorkerProvider:
-        def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-            if "task-decomposition" in system or "Decompose" in user:
-                # Role-complete decomposition (diagnosis + repair_proposal) PLUS a third subtask
-                # whose role is unregistered — orchestrator id-normalisation cannot remap an
-                # unknown role (a known role with an invented id would be remapped to the
-                # registered worker instead), so the session's unrouted path is exercised
-                # without tripping the role-completeness degradation check.
-                return (
-                    (
-                        '[{"role": "diagnosis", "description": "Diagnose", '
-                        '"allowed_skills": ["audit_project"], "worker_id": "diag_01"}, '
-                        '{"role": "repair_proposal", "description": "Repair", '
-                        '"allowed_skills": ["propose_fix"], "worker_id": "repair_01"}, '
-                        '{"role": "lore_review", "description": "Review lore", '
-                        '"allowed_skills": ["list_issues"], "worker_id": "nonexistent_worker_99"}]'
-                    ),
-                    10,
-                    10,
-                )
-            return "Thought: done.\nFinal Answer: ok", 5, 2
+    class _UnknownWorkerModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "unknown-worker-fake"
 
-    from owcopilot.llm.telemetry import TelemetryCollector
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            # Role-complete decomposition (diagnosis + repair_proposal) PLUS a third subtask
+            # whose role is unregistered — orchestrator id-normalisation cannot remap an
+            # unknown role (a known role with an invented id would be remapped to the
+            # registered worker instead), so the session's unrouted path is exercised
+            # without tripping the role-completeness degradation check.
+            payload = (
+                '[{"role": "diagnosis", "description": "Diagnose", '
+                '"allowed_skills": ["audit_project"], "worker_id": "diag_01"}, '
+                '{"role": "repair_proposal", "description": "Repair", '
+                '"allowed_skills": ["propose_fix"], "worker_id": "repair_01"}, '
+                '{"role": "lore_review", "description": "Review lore", '
+                '"allowed_skills": ["list_issues"], "worker_id": "nonexistent_worker_99"}]'
+            )
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=payload))])
 
-    provider = _UnknownWorkerProvider()
-    gw = LLMGateway({"cheap": provider, "frontier": provider}, telemetry=TelemetryCollector())
-
-    session = MultiAgentSession(gateway=gw, registry=minimal_registry)
+    session = MultiAgentSession(
+        orchestrator_model=_UnknownWorkerModel(),
+        model=_StaticChatModel(),
+        registry=minimal_registry,
+    )
     report = session.run("test unknown worker goal")
 
     # The report must include the unrouted worker in worker_summaries (not silently absent)
@@ -916,9 +1004,7 @@ def test_rt3_3_unknown_worker_recorded_not_silent(
     )
 
 
-def test_rt3_4_repair_worker_reads_diag_findings(
-    offline_gateway: LLMGateway, minimal_registry
-) -> None:
+def test_rt3_4_repair_worker_reads_diag_findings(minimal_registry) -> None:
     """④ Repair worker's subtask must contain diag findings — true multi-agent handoff.
 
     After diag runs and posts its task_result, the repair worker's task_assign must
@@ -927,32 +1013,33 @@ def test_rt3_4_repair_worker_reads_diag_findings(
     """
     from owcopilot.multi_agent.session import MultiAgentSession
 
-    class _MarkerDiagProvider:
-        """DiagWorker will return a final answer containing a sentinel string."""
+    class _MarkerDecomposeModel(BaseChatModel):
+        """Valid decompose JSON so the enrich path is exercised (orchestrator model only)."""
 
-        def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-            if "task-decomposition" in system or "Decompose" in user:
-                # Return a valid decompose JSON so we test the enrich path
-                return (
-                    (
-                        '[{"role": "diagnosis", "description": "Diagnose project", '
-                        '"allowed_skills": ["audit_project"], "worker_id": "diag_01"}, '
-                        '{"role": "repair_proposal", "description": "Propose fixes", '
-                        '"allowed_skills": ["propose_fix"], "worker_id": "repair_01"}]'
-                    ),
-                    10,
-                    10,
-                )
-            if "diagnosis" in user.lower() or "diag" in user.lower():
-                return "Thought: done.\nFinal Answer: DIAG_SENTINEL_FINDINGS: ref-XYZ broken", 5, 2
-            return "Thought: done.\nFinal Answer: ok", 5, 2
+        @property
+        def _llm_type(self) -> str:
+            return "marker-decompose-fake"
 
-    from owcopilot.llm.telemetry import TelemetryCollector
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            payload = (
+                '[{"role": "diagnosis", "description": "Diagnose project", '
+                '"allowed_skills": ["audit_project"], "worker_id": "diag_01"}, '
+                '{"role": "repair_proposal", "description": "Propose fixes", '
+                '"allowed_skills": ["propose_fix"], "worker_id": "repair_01"}]'
+            )
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=payload))])
 
-    provider = _MarkerDiagProvider()
-    gw = LLMGateway({"cheap": provider, "frontier": provider}, telemetry=TelemetryCollector())
+    def _marker_diag(messages: list[BaseMessage]) -> AIMessage:
+        """DiagWorker returns a final answer containing a sentinel string."""
+        if "diagnosis" in _human_text(messages).lower():
+            return AIMessage(content="DIAG_SENTINEL_FINDINGS: ref-XYZ broken")
+        return AIMessage(content="ok")
 
-    session = MultiAgentSession(gateway=gw, registry=minimal_registry)
+    session = MultiAgentSession(
+        orchestrator_model=_MarkerDecomposeModel(),
+        model=_RoutedChatModel(route=_marker_diag),
+        registry=minimal_registry,
+    )
     report = session.run("find and fix broken refs")
 
     # Find the task_assign that repair_01 actually received
@@ -1053,6 +1140,23 @@ _REFLEXION_DECOMPOSE_JSON = (
 )
 
 
+class _ReflexionDecomposeModel(BaseChatModel):
+    """Chat-model double serving the fixed reflexion decompose JSON (decompose calls only)."""
+
+    @property
+    def _llm_type(self) -> str:
+        return "reflexion-decompose-fake"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content=_REFLEXION_DECOMPOSE_JSON))]
+        )
+
+
+def _decompose_provider() -> _ReflexionDecomposeModel:
+    return _ReflexionDecomposeModel()
+
+
 def test_reflexion_run_task_reflections_default_byte_identical(
     minimal_registry, blackboard: AgentBlackboard, monkeypatch
 ) -> None:
@@ -1066,16 +1170,7 @@ def test_reflexion_run_task_reflections_default_byte_identical(
     from owcopilot.agent.react import ReActAgent
     from owcopilot.multi_agent.workers import _extract_claimed_open_errors
 
-    class _RecordingProvider:
-        def __init__(self) -> None:
-            self.seen_user: list[str] = []
-
-        def complete(self, *, system: str, user: str, model: str):
-            self.seen_user.append(user)
-            return "Thought: done.\nFinal Answer: ok", 5, 2
-
-    provider = _RecordingProvider()
-    gw = LLMGateway({"cheap": provider, "frontier": provider}, telemetry=TelemetryCollector())
+    model = _StaticChatModel(reply="ok")
 
     sid = str(uuid.uuid4())
     assign = TaskAssignPayload(
@@ -1103,15 +1198,17 @@ def test_reflexion_run_task_reflections_default_byte_identical(
 
     monkeypatch.setattr(ReActAgent, "run", capturing_run)
 
-    worker = DiagWorker(agent_id="diag_01", gateway=gw, registry=minimal_registry)
+    worker = DiagWorker(agent_id="diag_01", model=model, registry=minimal_registry)
     claimed = blackboard.claim_task("diag_01", sid)
     assert claimed is not None
     result_msg = worker.run_task(claimed, blackboard)  # NO reflections kwarg (default path)
 
-    # reflections=None reached the actor, and no reflection block was rendered into any prompt.
+    # reflections=None reached the actor, and no reflection block was rendered into any context.
     assert captured["reflections"] is None
-    assert provider.seen_user
-    assert all("Reflections from previous attempts:" not in u for u in provider.seen_user)
+    assert model.seen
+    assert all(
+        "Reflections from previous attempts:" not in _system_text(turn) for turn in model.seen
+    )
 
     # The posted result equals a plain agent.run(goal) built the same way run_task builds it.
     tr = TaskResultPayload.from_dict(result_msg.payload)
@@ -1132,21 +1229,19 @@ def test_reflexion_pass_verdict_no_retry_inert(minimal_registry) -> None:
     """
     reg, _calls = _make_audit_registry(open_errors=2)
 
-    class _AllPassProvider:
+    def _all_pass(messages: list[BaseMessage]) -> AIMessage:
         """diag honestly audits (claims 2 == ground truth) → pass; repair makes no claim → pass."""
+        if "[Your specific subtask as diagnosis]" in _human_text(messages):
+            if _tool_results(messages) == 0:
+                return _tool_call_reply("audit_project", {}, thought="audit first.")
+            return AIMessage(content="一致性审计发现 2 个待修复错误。")
+        return AIMessage(content="已生成修复提案，等待人工审阅。")
 
-        def complete(self, *, system: str, user: str, model: str):
-            if "task-decomposition" in system or "Decompose into subtasks" in user:
-                return _REFLEXION_DECOMPOSE_JSON, 10, 10
-            if "[Your specific subtask as diagnosis]" in user:
-                if "Observation:" not in user:
-                    return "Thought: audit first.\nAction: audit_project\nAction Input: {}", 5, 5
-                return "Thought: done.\nFinal Answer: 一致性审计发现 2 个待修复错误。", 5, 5
-            return "Thought: done.\nFinal Answer: 已生成修复提案，等待人工审阅。", 5, 2
-
-    provider = _AllPassProvider()
-    gw = LLMGateway({"cheap": provider, "frontier": provider}, telemetry=TelemetryCollector())
-    session = MultiAgentSession(gateway=gw, registry=reg)
+    session = MultiAgentSession(
+        orchestrator_model=_decompose_provider(),
+        model=_RoutedChatModel(route=_all_pass),
+        registry=reg,
+    )
     report = session.run("diagnose and repair")
     flow = session.blackboard.session_flow(report.session_id)
 
@@ -1182,41 +1277,26 @@ def test_reflexion_fail_then_pass_single_retry(minimal_registry) -> None:
     """
     reg, _calls = _make_audit_registry(open_errors=3)
 
-    class _LazyThenDiligentProvider:
-        def __init__(self) -> None:
-            self.diag_prompts: list[str] = []
+    diag_prompts: list[str] = []
 
-        def complete(self, *, system: str, user: str, model: str):
-            if "task-decomposition" in system or "Decompose into subtasks" in user:
-                return _REFLEXION_DECOMPOSE_JSON, 10, 10
-            if "[Your specific subtask as diagnosis]" in user:
-                self.diag_prompts.append(user)
-                if "Reflections from previous attempts:" not in user:
-                    # Trial 0: lazy — never audits, asserts clean → verifier fail (ground truth 3).
-                    return (
-                        (
-                            "Thought: looks fine to me.\n"
-                            "Final Answer: The world is clean. I found 0 open errors."
-                        ),
-                        5,
-                        5,
-                    )
-                # Trial 1: the reflection says audit first — do it, then report the real count.
-                if "Observation:" not in user:
-                    return (
-                        (
-                            "Thought: audit first this time.\n"
-                            "Action: audit_project\nAction Input: {}"
-                        ),
-                        5,
-                        5,
-                    )
-                return "Thought: now I know.\nFinal Answer: 一致性审计发现 3 个待修复错误。", 5, 5
-            return "Thought: done.\nFinal Answer: 已生成修复提案，等待人工审阅。", 5, 2
+    def _lazy_then_diligent(messages: list[BaseMessage]) -> AIMessage:
+        system, human = _system_text(messages), _human_text(messages)
+        if "[Your specific subtask as diagnosis]" in human:
+            diag_prompts.append(f"{system}\n{human}")
+            if "Reflections from previous attempts:" not in system:
+                # Trial 0: lazy — never audits, asserts clean → verifier fail (ground truth 3).
+                return AIMessage(content="The world is clean. I found 0 open errors.")
+            # Trial 1: the reflection says audit first — do it, then report the real count.
+            if _tool_results(messages) == 0:
+                return _tool_call_reply("audit_project", {}, thought="audit first this time.")
+            return AIMessage(content="一致性审计发现 3 个待修复错误。")
+        return AIMessage(content="已生成修复提案，等待人工审阅。")
 
-    provider = _LazyThenDiligentProvider()
-    gw = LLMGateway({"cheap": provider, "frontier": provider}, telemetry=TelemetryCollector())
-    session = MultiAgentSession(gateway=gw, registry=reg)
+    session = MultiAgentSession(
+        orchestrator_model=_decompose_provider(),
+        model=_RoutedChatModel(route=_lazy_then_diligent),
+        registry=reg,
+    )
     report = session.run("diagnose and fix")
     flow = session.blackboard.session_flow(report.session_id)
 
@@ -1247,10 +1327,11 @@ def test_reflexion_fail_then_pass_single_retry(minimal_registry) -> None:
     assert retry_vr is not None
     assert VerifyResultPayload.from_dict(retry_vr.payload).verdict == "pass"
 
-    # The reflection was injected into the RETRY actor prompt, absent from the first attempt.
-    assert "Reflections from previous attempts:" not in provider.diag_prompts[0]
-    assert any("Reflections from previous attempts:" in p for p in provider.diag_prompts[1:])
-    assert any(rp.reflection in p for p in provider.diag_prompts[1:])
+    # The reflection was injected into the RETRY actor context (the system-message suffix),
+    # absent from the first attempt.
+    assert "Reflections from previous attempts:" not in diag_prompts[0]
+    assert any("Reflections from previous attempts:" in p for p in diag_prompts[1:])
+    assert any(rp.reflection in p for p in diag_prompts[1:])
 
 
 def test_reflexion_second_failure_falls_back_to_annotation(
@@ -1302,10 +1383,10 @@ def test_reflexion_reflection_message_terminal_done(
 def test_rt3_7_orchestrator_pass2_is_honest_second_gateway_call(
     minimal_registry,
 ) -> None:
-    """⑦ Pass-2 decomposition recovers via an HONEST second gateway call — no ReActAgent.
+    """⑦ Pass-2 decomposition recovers via an HONEST second model call — no ReActAgent.
 
     The orchestrator must NOT carry a performative ReActAgent.  Pass-2 is a plain second
-    gateway.complete with a stricter JSON-only prompt.  We prove it does real work by
+    model.invoke with a stricter JSON-only prompt.  We prove it does real work by
     making pass-1 fail (prose) and pass-2 succeed (clean JSON): the result must be a
     NON-degraded, goal-specific decomposition that the static fallback could never produce.
     """
@@ -1313,36 +1394,37 @@ def test_rt3_7_orchestrator_pass2_is_honest_second_gateway_call(
 
     from owcopilot.multi_agent.orchestrator import OrchestratorAgent
 
-    class _ProseThenJsonProvider:
-        """First decompose call returns prose (unparseable); second returns clean JSON."""
+    class _ProseThenJsonModel(BaseChatModel):
+        """First decompose call returns prose (unparseable); second returns clean JSON.
 
-        def __init__(self) -> None:
-            self.decompose_calls = 0
+        The orchestrator holds its own model, so every ``_generate`` call is a decompose pass —
+        the internal counter is the exact pass counter.
+        """
 
-        def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-            is_decompose = "task-decomposition" in system or "raw JSON array" in system
-            if is_decompose:
-                self.decompose_calls += 1
-                if self.decompose_calls == 1:
-                    # Pass-1: prose with no JSON array at all → parse fails → degraded
-                    return "Sure! Here is how I would break it down for you...", 5, 5
+        decompose_calls: int = 0
+
+        @property
+        def _llm_type(self) -> str:
+            return "prose-then-json-fake"
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            self.decompose_calls += 1
+            if self.decompose_calls == 1:
+                # Pass-1: prose with no JSON array at all → parse fails → degraded
+                content = "Sure! Here is how I would break it down for you..."
+            else:
                 # Pass-2 (strict prompt): clean JSON the parser accepts
-                return (
-                    (
-                        '[{"role": "diagnosis", "description": "PASS2_DIAG", '
-                        '"allowed_skills": ["audit_project"], "worker_id": "diag_01"}, '
-                        '{"role": "repair_proposal", "description": "PASS2_REPAIR", '
-                        '"allowed_skills": ["propose_fix"], "worker_id": "repair_01"}]'
-                    ),
-                    10,
-                    10,
+                content = (
+                    '[{"role": "diagnosis", "description": "PASS2_DIAG", '
+                    '"allowed_skills": ["audit_project"], "worker_id": "diag_01"}, '
+                    '{"role": "repair_proposal", "description": "PASS2_REPAIR", '
+                    '"allowed_skills": ["propose_fix"], "worker_id": "repair_01"}]'
                 )
-            return "Thought: done.\nFinal Answer: ok", 5, 2
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
-    provider = _ProseThenJsonProvider()
-    gw = LLMGateway({"cheap": provider, "frontier": provider}, telemetry=TelemetryCollector())
+    provider = _ProseThenJsonModel()
 
-    orch = OrchestratorAgent(agent_id="orchestrator", gateway=gw, registry=minimal_registry)
+    orch = OrchestratorAgent(agent_id="orchestrator", model=provider, registry=minimal_registry)
 
     # The orchestrator must NOT hold a ReActAgent (no performative meta-loop).
     assert not hasattr(orch, "agent")
@@ -1361,7 +1443,7 @@ def test_rt3_7_orchestrator_pass2_is_honest_second_gateway_call(
 
     # Pass-2 recovered: NOT degraded, and the descriptions came from the pass-2 JSON
     assert degraded is False, "pass-2 strict-JSON retry should recover a non-degraded decomposition"
-    assert provider.decompose_calls == 2, "exactly two gateway decompose calls (pass-1 + pass-2)"
+    assert provider.decompose_calls == 2, "exactly two model decompose calls (pass-1 + pass-2)"
     subtasks = {m.to_agent: TaskAssignPayload.from_dict(m.payload).subtask for m in posted}
     assert subtasks.get("diag_01") == "PASS2_DIAG"
     assert subtasks.get("repair_01") == "PASS2_REPAIR"
@@ -1514,27 +1596,28 @@ def test_t21_parse_subtasks_missing_budget_is_none() -> None:
     assert all(st.max_steps is None for st in subtasks)
 
 
-class _BudgetDecomposeProvider:
-    """Mock provider returning a role-complete decompose JSON, optionally carrying max_steps.
+class _BudgetDecomposeModel(BaseChatModel):
+    """Chat model returning a role-complete decompose JSON, optionally carrying max_steps.
 
     Exercises the production JSON parse + allocation path in ``post_task_assignments`` at $0.
     """
 
-    def __init__(self, *, with_budget: bool) -> None:
-        self._with_budget = with_budget
+    with_budget: bool
 
-    def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-        if "task-decomposition" in system or "Decompose into subtasks" in user:
-            diag_budget = ', "max_steps": 7' if self._with_budget else ""
-            repair_budget = ', "max_steps": 3' if self._with_budget else ""
-            payload = (
-                '[{"role": "diagnosis", "description": "d", '
-                '"allowed_skills": ["audit_project"], "worker_id": "diag_01"' + diag_budget + "}, "
-                '{"role": "repair_proposal", "description": "r", '
-                '"allowed_skills": ["propose_fix"], "worker_id": "repair_01"' + repair_budget + "}]"
-            )
-            return payload, 10, 10
-        return "Thought: done.\nFinal Answer: ok", 5, 2
+    @property
+    def _llm_type(self) -> str:
+        return "budget-decompose-fake"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        diag_budget = ', "max_steps": 7' if self.with_budget else ""
+        repair_budget = ', "max_steps": 3' if self.with_budget else ""
+        payload = (
+            '[{"role": "diagnosis", "description": "d", '
+            '"allowed_skills": ["audit_project"], "worker_id": "diag_01"' + diag_budget + "}, "
+            '{"role": "repair_proposal", "description": "r", '
+            '"allowed_skills": ["propose_fix"], "worker_id": "repair_01"' + repair_budget + "}]"
+        )
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=payload))])
 
 
 def test_t21_orchestrator_allocates_budget_onto_payload(
@@ -1543,9 +1626,8 @@ def test_t21_orchestrator_allocates_budget_onto_payload(
     """The orchestrator writes each subtask's decided budget onto its task_assign payload."""
     import uuid
 
-    provider = _BudgetDecomposeProvider(with_budget=True)
-    gateway = LLMGateway({"cheap": provider, "frontier": provider}, telemetry=TelemetryCollector())
-    orch = OrchestratorAgent(agent_id="orchestrator", gateway=gateway, registry=minimal_registry)
+    model = _BudgetDecomposeModel(with_budget=True)
+    orch = OrchestratorAgent(agent_id="orchestrator", model=model, registry=minimal_registry)
 
     posted, degraded = orch.post_task_assignments(
         goal="g", session_id=str(uuid.uuid4()), blackboard=blackboard
@@ -1567,9 +1649,8 @@ def test_t21_orchestrator_no_budget_is_byte_identical_default(
     """
     import uuid
 
-    provider = _BudgetDecomposeProvider(with_budget=False)
-    gateway = LLMGateway({"cheap": provider, "frontier": provider}, telemetry=TelemetryCollector())
-    orch = OrchestratorAgent(agent_id="orchestrator", gateway=gateway, registry=minimal_registry)
+    model = _BudgetDecomposeModel(with_budget=False)
+    orch = OrchestratorAgent(agent_id="orchestrator", model=model, registry=minimal_registry)
 
     posted, degraded = orch.post_task_assignments(
         goal="g", session_id=str(uuid.uuid4()), blackboard=blackboard
@@ -1588,13 +1669,13 @@ def test_t21_orchestrator_no_budget_is_byte_identical_default(
 
 
 def test_t21_normalise_worker_ids_preserves_budget(
-    offline_gateway: LLMGateway, minimal_registry
+    offline_orchestrator_model, minimal_registry
 ) -> None:
     """An id remap must carry the allocated budget across — dropping it is a silent downgrade."""
     from owcopilot.multi_agent.orchestrator import OrchestratorAgent, SubTask
 
     orch = OrchestratorAgent(
-        gateway=offline_gateway,  # unused by _normalise_worker_ids, passed to satisfy the ctor
+        model=offline_orchestrator_model,  # unused by _normalise_worker_ids, satisfies the ctor
         registry=minimal_registry,
         registered_workers={"diagnosis": "diag_01", "repair_proposal": "repair_01"},
     )
@@ -1621,19 +1702,21 @@ def test_t21_scaling_rules_embedded_in_decompose_prompt(
 
     from owcopilot.multi_agent.orchestrator import _MAX_SUBTASK_STEPS, _MIN_SUBTASK_STEPS
 
-    class _RecordingProvider:
+    class _RecordingDecomposeModel(BaseChatModel):
         """Records every system prompt; returns non-JSON so both passes fire and are captured."""
 
-        def __init__(self) -> None:
-            self.systems: list[str] = []
+        systems: list[str] = Field(default_factory=list)
 
-        def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-            self.systems.append(system)
-            return "not json", 1, 1
+        @property
+        def _llm_type(self) -> str:
+            return "recording-decompose-fake"
 
-    provider = _RecordingProvider()
-    gateway = LLMGateway({"cheap": provider, "frontier": provider}, telemetry=TelemetryCollector())
-    orch = OrchestratorAgent(agent_id="orchestrator", gateway=gateway, registry=minimal_registry)
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            self.systems.append(_system_text(messages))
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="not json"))])
+
+    provider = _RecordingDecomposeModel()
+    orch = OrchestratorAgent(agent_id="orchestrator", model=provider, registry=minimal_registry)
 
     orch.post_task_assignments(goal="g", session_id=str(uuid.uuid4()), blackboard=blackboard)
 
@@ -1690,7 +1773,7 @@ def _post_task_result(blackboard, sid, *, claimed_errors: int | None, final_answ
 
 
 def test_teamb_verifier_deterministic_real_verdict_offline(
-    offline_gateway: LLMGateway, blackboard: AgentBlackboard
+    offline_model, blackboard: AgentBlackboard
 ) -> None:
     """HIGH: offline verifier yields a REAL pass verdict from deterministic ground truth.
 
@@ -1709,7 +1792,7 @@ def test_teamb_verifier_deterministic_real_verdict_offline(
         final_answer="一致性审计发现 2 个待修复错误。",
     )
 
-    verifier = VerifierAgent(agent_id="verifier_01", gateway=offline_gateway, registry=reg)
+    verifier = VerifierAgent(agent_id="verifier_01", model=offline_model, registry=reg)
     result_msg = verifier.verify(verify_req, blackboard)
     vr = VerifyResultPayload.from_dict(result_msg.payload)
 
@@ -1725,7 +1808,7 @@ def test_teamb_verifier_deterministic_real_verdict_offline(
 
 
 def test_teamb_verifier_catches_worker_underreport(
-    offline_gateway: LLMGateway, blackboard: AgentBlackboard
+    offline_model, blackboard: AgentBlackboard
 ) -> None:
     """HIGH: verifier independently CATCHES a worker that under-reported errors → fail.
 
@@ -1743,7 +1826,7 @@ def test_teamb_verifier_catches_worker_underreport(
         final_answer="Looks clean to me, no errors found.",
     )
 
-    verifier = VerifierAgent(agent_id="verifier_01", gateway=offline_gateway, registry=reg)
+    verifier = VerifierAgent(agent_id="verifier_01", model=offline_model, registry=reg)
     vr = VerifyResultPayload.from_dict(verifier.verify(verify_req, blackboard).payload)
 
     assert vr.verdict == "fail", "verifier must catch the worker's under-report"
@@ -1752,7 +1835,7 @@ def test_teamb_verifier_catches_worker_underreport(
 
 
 def _run_real_worker_and_verify(
-    *, worker_provider, audit_open_errors: int, blackboard: AgentBlackboard
+    *, worker_model, audit_open_errors: int, blackboard: AgentBlackboard
 ):
     """Drive a REAL DiagWorker (no hand-set open_errors) then verify its posted result.
 
@@ -1763,10 +1846,6 @@ def _run_real_worker_and_verify(
     import uuid
 
     reg, _calls = _make_audit_registry(open_errors=audit_open_errors)
-    gw = LLMGateway(
-        {"cheap": worker_provider, "frontier": worker_provider},
-        telemetry=TelemetryCollector(),
-    )
     sid = str(uuid.uuid4())
     assign = TaskAssignPayload(
         original_goal="clean up the world",
@@ -1782,7 +1861,7 @@ def _run_real_worker_and_verify(
     )
     blackboard.post_message(assign_msg)
 
-    worker = DiagWorker(agent_id="diag_01", gateway=gw, registry=reg)
+    worker = DiagWorker(agent_id="diag_01", model=worker_model, registry=reg)
     claimed = blackboard.claim_task("diag_01", sid)
     assert claimed is not None
     tr_msg = worker.run_task(claimed, blackboard)
@@ -1797,7 +1876,7 @@ def _run_real_worker_and_verify(
     )
     blackboard.post_message(verify_req)
     # Verifier gets the SAME audit registry (its own independent audit call), distinct ReActAgent.
-    verifier = VerifierAgent(agent_id="verifier_01", gateway=gw, registry=reg)
+    verifier = VerifierAgent(agent_id="verifier_01", model=worker_model, registry=reg)
     vr = VerifyResultPayload.from_dict(verifier.verify(verify_req, blackboard).payload)
     return tr, vr
 
@@ -1817,24 +1896,17 @@ def test_teamb_verifier_real_worker_path_honest_not_misjudged(
     substring count), and the verifier must return PASS with delta 0.
     """
 
-    class _HonestChineseProvider:
+    def _honest_chinese(messages: list[BaseMessage]) -> AIMessage:
         """Audits, then reports in 中文 — the locale that broke the old substring metric."""
-
-        def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-            if user.count("Observation:") == 0:
-                return ("Thought: 先跑一致性审计。\nAction: audit_project\nAction Input: {}"), 5, 5
-            # Chinese final answer — contains ZERO Latin 'error' substrings on purpose.
-            return (
-                (
-                    "Thought: 审计完成，可以汇报了。\n"
-                    "Final Answer: 一致性审计发现若干待修复问题，已生成修复提案，请人工审阅。"
-                ),
-                5,
-                5,
-            )
+        if _tool_results(messages) == 0:
+            return _tool_call_reply("audit_project", {}, thought="先跑一致性审计。")
+        # Chinese final answer — contains ZERO Latin 'error' substrings on purpose.
+        return AIMessage(content="一致性审计发现若干待修复问题，已生成修复提案，请人工审阅。")
 
     tr, vr = _run_real_worker_and_verify(
-        worker_provider=_HonestChineseProvider(), audit_open_errors=4, blackboard=blackboard
+        worker_model=_RoutedChatModel(route=_honest_chinese),
+        audit_open_errors=4,
+        blackboard=blackboard,
     )
 
     # The worker's claim is the REAL audit integer (4), NOT a substring count (which would be 0).
@@ -1861,21 +1933,13 @@ def test_teamb_verifier_real_worker_path_liar_caught(
     and contradicts it with ground truth (8) → fail.
     """
 
-    class _LyingProvider:
-        """Never audits; immediately asserts the world is clean."""
-
-        def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-            return (
-                (
-                    "Thought: I'm sure it's fine.\n"
-                    "Final Answer: The world is clean. I found 0 open errors; nothing to fix."
-                ),
-                5,
-                5,
-            )
+    # Never audits; immediately asserts the world is clean.
+    lying_model = _StaticChatModel(
+        reply="The world is clean. I found 0 open errors; nothing to fix."
+    )
 
     tr, vr = _run_real_worker_and_verify(
-        worker_provider=_LyingProvider(), audit_open_errors=8, blackboard=blackboard
+        worker_model=lying_model, audit_open_errors=8, blackboard=blackboard
     )
 
     # The liar ran no audit, so it has no structured audit-backed claim.
@@ -1899,19 +1963,10 @@ def test_teamb_verifier_real_worker_no_claim_not_read_as_zero(
     a PASS annotated "no verifiable claim" — never a fail from silently reading None as 0.
     """
 
-    class _NoCountProvider:
-        def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-            return (
-                (
-                    "Thought: I'll summarise the plan.\n"
-                    "Final Answer: 已根据上游诊断生成修复提案，等待人工审阅。"
-                ),
-                5,
-                5,
-            )
+    no_count_model = _StaticChatModel(reply="已根据上游诊断生成修复提案，等待人工审阅。")
 
     tr, vr = _run_real_worker_and_verify(
-        worker_provider=_NoCountProvider(), audit_open_errors=5, blackboard=blackboard
+        worker_model=no_count_model, audit_open_errors=5, blackboard=blackboard
     )
 
     assert tr.open_errors is None
@@ -1923,7 +1978,7 @@ def test_teamb_verifier_real_worker_no_claim_not_read_as_zero(
 
 
 def test_teamb_verifier_negative_audit_count_rejected(
-    offline_gateway: LLMGateway, blackboard: AgentBlackboard
+    offline_model, blackboard: AgentBlackboard
 ) -> None:
     """LOW (bug): a NEGATIVE audit open_errors is refused, not passed through as a real verdict.
 
@@ -1961,7 +2016,7 @@ def test_teamb_verifier_negative_audit_count_rejected(
         claimed_errors=3,
         final_answer="一致性审计发现 3 个待修复错误",
     )
-    verifier = VerifierAgent(agent_id="verifier_01", gateway=offline_gateway, registry=reg)
+    verifier = VerifierAgent(agent_id="verifier_01", model=offline_model, registry=reg)
     vr = VerifyResultPayload.from_dict(verifier.verify(verify_req, blackboard).payload)
 
     # Negative count must NOT surface as the verified value; det path rejected it as malformed.
@@ -1973,7 +2028,7 @@ def test_teamb_verifier_negative_audit_count_rejected(
 
 @pytest.mark.parametrize("bad_audit", [[1, 2], None, "oops", 5])
 def test_teamb_verifier_non_dict_audit_does_not_crash(
-    offline_gateway: LLMGateway, blackboard: AgentBlackboard, bad_audit
+    offline_model, blackboard: AgentBlackboard, bad_audit
 ) -> None:
     """LOW (bug): a NON-dict audit result must not crash the verifier.
 
@@ -2014,7 +2069,7 @@ def test_teamb_verifier_non_dict_audit_does_not_crash(
         claimed_errors=3,
         final_answer="一致性审计发现 3 个待修复错误",
     )
-    verifier = VerifierAgent(agent_id="verifier_01", gateway=offline_gateway, registry=reg)
+    verifier = VerifierAgent(agent_id="verifier_01", model=offline_model, registry=reg)
     # Must NOT raise — a non-dict audit is malformed, not a crash.
     vr = VerifyResultPayload.from_dict(verifier.verify(verify_req, blackboard).payload)
 
@@ -2026,9 +2081,7 @@ def test_teamb_verifier_non_dict_audit_does_not_crash(
     assert vr.verdict in {"pass", "fail", "needs_more"}
 
 
-def test_teamb_verifier_chinese_answer_parsed_when_no_audit_tool(
-    offline_gateway: LLMGateway, blackboard: AgentBlackboard, minimal_registry
-) -> None:
+def test_teamb_verifier_chinese_answer_parsed_when_no_audit_tool() -> None:
     """The fallback parser understands a Chinese error count (no audit tool bound).
 
     When audit_project is absent we fall back to the agent answer; a Chinese
@@ -2043,9 +2096,7 @@ def test_teamb_verifier_chinese_answer_parsed_when_no_audit_tool(
     assert _extract_error_count("everything looks fine") is None
 
 
-def test_teamb_allowed_skills_enforced_at_execution(
-    offline_gateway: LLMGateway, blackboard: AgentBlackboard
-) -> None:
+def test_teamb_allowed_skills_enforced_at_execution(blackboard: AgentBlackboard) -> None:
     """MID: a read-only worker is DENIED propose_fix at EXECUTION, not just in the manifest.
 
     We build a DiagWorker (allowed: audit_project/list_issues/build_context_pack) whose
@@ -2057,26 +2108,17 @@ def test_teamb_allowed_skills_enforced_at_execution(
 
     reg, calls = _make_audit_registry(open_errors=1)
 
-    class _ProposeFixProvider:
+    def _propose_fix_route(messages: list[BaseMessage]) -> AIMessage:
         """Forces the worker's ReAct loop to call the out-of-scope propose_fix skill."""
+        if _tool_results(messages) == 0:
+            return _tool_call_reply(
+                "propose_fix",
+                {"issue_id": "issue-1"},
+                thought="I will try to propose a fix directly.",
+            )
+        return AIMessage(content="done")
 
-        def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-            if user.count("Observation:") == 0:
-                return (
-                    (
-                        "Thought: I will try to propose a fix directly.\n"
-                        "Action: propose_fix\n"
-                        'Action Input: {"issue_id": "issue-1"}'
-                    ),
-                    5,
-                    5,
-                )
-            return "Thought: ok.\nFinal Answer: done", 5, 2
-
-    gw = LLMGateway(
-        {"cheap": _ProposeFixProvider(), "frontier": _ProposeFixProvider()},
-        telemetry=TelemetryCollector(),
-    )
+    model = _RoutedChatModel(route=_propose_fix_route)
 
     sid = str(uuid.uuid4())
     assign = TaskAssignPayload(
@@ -2093,7 +2135,7 @@ def test_teamb_allowed_skills_enforced_at_execution(
     )
     blackboard.post_message(assign_msg)
 
-    worker = DiagWorker(agent_id="diag_01", gateway=gw, registry=reg)
+    worker = DiagWorker(agent_id="diag_01", model=model, registry=reg)
     claimed = blackboard.claim_task("diag_01", sid)
     assert claimed is not None
     worker.run_task(claimed, blackboard)
@@ -2112,9 +2154,7 @@ def test_teamb_allowed_skills_enforced_at_execution(
     assert any("not in this agent's allowed tool set" in s.observation for s in propose_steps)
 
 
-def test_teamb_scoped_registry_allows_in_scope_skill(
-    offline_gateway: LLMGateway,
-) -> None:
+def test_teamb_scoped_registry_allows_in_scope_skill() -> None:
     """The scoped registry still allows in-scope skills to run normally."""
     from owcopilot.multi_agent.skill_scope import scoped_registry
 
@@ -2153,8 +2193,8 @@ def _run_worker_with_assign(
     """Post ``assign`` to ``worker``, let it claim + run, and hand back the run worker.
 
     The worker's resolved tool face is observable at ``worker.agent.allowed_skills`` after
-    run_task (ReActAgent stores the set it was scoped to). The MockProvider makes the ReAct
-    loop hit max_steps harmlessly — we only inspect the resolved scope, not the answer.
+    run_task (ReActAgent stores the set it was scoped to). The static chat double finishes the
+    loop immediately with a plain answer — we only inspect the resolved scope, not the answer.
     """
     import uuid
 
@@ -2174,7 +2214,7 @@ def _run_worker_with_assign(
 
 
 def test_least_privilege_assign_subset_of_default_used_verbatim(
-    offline_gateway: LLMGateway, minimal_registry, blackboard: AgentBlackboard, caplog
+    offline_model, minimal_registry, blackboard: AgentBlackboard, caplog
 ) -> None:
     """① assign ⊆ role default → granted verbatim, no skills dropped, no warning.
 
@@ -2187,7 +2227,7 @@ def test_least_privilege_assign_subset_of_default_used_verbatim(
         subtask="s",
         allowed_skills=["audit_project", "list_issues"],  # ⊆ DiagWorker default
     )
-    worker = DiagWorker(agent_id="diag_01", gateway=offline_gateway, registry=minimal_registry)
+    worker = DiagWorker(agent_id="diag_01", model=offline_model, registry=minimal_registry)
     with caplog.at_level(logging.WARNING, logger="owcopilot.multi_agent.workers"):
         _run_worker_with_assign(worker, assign, blackboard)
 
@@ -2196,7 +2236,7 @@ def test_least_privilege_assign_subset_of_default_used_verbatim(
 
 
 def test_least_privilege_out_of_default_skill_is_dropped_and_warned(
-    offline_gateway: LLMGateway, minimal_registry, blackboard: AgentBlackboard, caplog
+    offline_model, minimal_registry, blackboard: AgentBlackboard, caplog
 ) -> None:
     """② assign contains a skill outside the role default → it is dropped and a warning is logged.
 
@@ -2210,7 +2250,7 @@ def test_least_privilege_out_of_default_skill_is_dropped_and_warned(
         subtask="s",
         allowed_skills=["propose_fix", "audit_project"],  # audit_project ∉ RepairWorker default
     )
-    worker = RepairWorker(agent_id="repair_01", gateway=offline_gateway, registry=minimal_registry)
+    worker = RepairWorker(agent_id="repair_01", model=offline_model, registry=minimal_registry)
     with caplog.at_level(logging.WARNING, logger="owcopilot.multi_agent.workers"):
         _run_worker_with_assign(worker, assign, blackboard)
 
@@ -2221,7 +2261,7 @@ def test_least_privilege_out_of_default_skill_is_dropped_and_warned(
 
 
 def test_least_privilege_disjoint_assign_is_deny_all_not_full_access(
-    offline_gateway: LLMGateway, minimal_registry, blackboard: AgentBlackboard, caplog
+    offline_model, minimal_registry, blackboard: AgentBlackboard, caplog
 ) -> None:
     """③ assign disjoint from role default → empty (deny-all) tool set + warning, NOT full access.
 
@@ -2235,7 +2275,7 @@ def test_least_privilege_disjoint_assign_is_deny_all_not_full_access(
         subtask="s",
         allowed_skills=["audit_project", "list_issues"],  # both ∉ RepairWorker default
     )
-    worker = RepairWorker(agent_id="repair_01", gateway=offline_gateway, registry=minimal_registry)
+    worker = RepairWorker(agent_id="repair_01", model=offline_model, registry=minimal_registry)
     with caplog.at_level(logging.WARNING, logger="owcopilot.multi_agent.workers"):
         _run_worker_with_assign(worker, assign, blackboard)
 
@@ -2249,7 +2289,7 @@ def test_least_privilege_disjoint_assign_is_deny_all_not_full_access(
 
 
 def test_least_privilege_empty_assign_falls_back_to_full_default(
-    offline_gateway: LLMGateway, minimal_registry, blackboard: AgentBlackboard, caplog
+    offline_model, minimal_registry, blackboard: AgentBlackboard, caplog
 ) -> None:
     """④ empty assign → the role's full default set (pre-existing behaviour, unchanged).
 
@@ -2258,7 +2298,7 @@ def test_least_privilege_empty_assign_falls_back_to_full_default(
     default) so the security change is a strict no-op here.
     """
     assign = TaskAssignPayload(original_goal="g", subtask="s", allowed_skills=[])
-    worker = DiagWorker(agent_id="diag_01", gateway=offline_gateway, registry=minimal_registry)
+    worker = DiagWorker(agent_id="diag_01", model=offline_model, registry=minimal_registry)
     with caplog.at_level(logging.WARNING, logger="owcopilot.multi_agent.workers"):
         _run_worker_with_assign(worker, assign, blackboard)
 
@@ -2266,9 +2306,7 @@ def test_least_privilege_empty_assign_falls_back_to_full_default(
     assert "out-of-scope" not in caplog.text, "an empty proposal drops nothing, so no warning"
 
 
-def test_teamb_max_steps_protocol_field_is_live(
-    offline_gateway: LLMGateway, blackboard: AgentBlackboard
-) -> None:
+def test_teamb_max_steps_protocol_field_is_live(blackboard: AgentBlackboard) -> None:
     """LOW (dead field → live): TaskAssignPayload.max_steps now drives the worker's budget.
 
     A subtask with max_steps=1 must cap the worker's ReAct loop at a single step
@@ -2278,15 +2316,9 @@ def test_teamb_max_steps_protocol_field_is_live(
 
     reg, _calls = _make_audit_registry(open_errors=0)
 
-    class _NeverFinishesProvider:
-        """Always emits an action, never a Final Answer — so step_count == max_steps."""
-
-        def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-            return "Thought: keep going.\nAction: audit_project\nAction Input: {}", 5, 5
-
-    gw = LLMGateway(
-        {"cheap": _NeverFinishesProvider(), "frontier": _NeverFinishesProvider()},
-        telemetry=TelemetryCollector(),
+    # Always emits a tool call, never a final answer — so step_count == max_steps.
+    never_finishes = _RoutedChatModel(
+        route=lambda messages: _tool_call_reply("audit_project", {}, thought="keep going.")
     )
 
     sid = str(uuid.uuid4())
@@ -2305,7 +2337,7 @@ def test_teamb_max_steps_protocol_field_is_live(
     )
     blackboard.post_message(assign_msg)
 
-    worker = DiagWorker(agent_id="diag_01", gateway=gw, registry=reg, max_steps=4)
+    worker = DiagWorker(agent_id="diag_01", model=never_finishes, registry=reg, max_steps=4)
     claimed = blackboard.claim_task("diag_01", sid)
     assert claimed is not None
     result_msg = worker.run_task(claimed, blackboard)
@@ -2477,14 +2509,17 @@ def run_demo() -> MultiAgentReport:
     or:
         python -c "from tests.test_multi_agent import run_demo; run_demo()"
     """
-    from owcopilot.llm.telemetry import TelemetryCollector
     from owcopilot.skills import SkillRegistry
 
-    mock = MockProvider()
-    gateway = LLMGateway({"cheap": mock, "frontier": mock}, telemetry=TelemetryCollector())
     registry = SkillRegistry()  # minimal registry for demo
 
-    session = MultiAgentSession(gateway=gateway, registry=registry)
+    # A non-JSON orchestrator model (decomposition degrades to the static fallback) plus a static
+    # worker model — the chat-model analogue of the retired MockProvider gateway. $0.
+    session = MultiAgentSession(
+        orchestrator_model=_StaticChatModel(),
+        model=_StaticChatModel(),
+        registry=registry,
+    )
     report = session.run("Bring the world to a clean, exportable state")
 
     print("\n=== OWCopilot Multi-Agent Demo ===")
@@ -2555,7 +2590,7 @@ def test_orchestrator_normalises_invented_worker_ids_by_role() -> None:
     from owcopilot.multi_agent.orchestrator import OrchestratorAgent, SubTask
 
     orch = OrchestratorAgent(
-        gateway=None,  # type: ignore[arg-type] — 规范化不触网关
+        model=None,  # type: ignore[arg-type] — 规范化不触模型
         registry=None,  # type: ignore[arg-type]
         registered_workers={"diagnosis": "diag_01", "repair_proposal": "repair_01"},
     )
@@ -2694,17 +2729,20 @@ def test_t20_parallel_wave_exactly_once() -> None:
     reg, _calls = _make_audit_registry(open_errors=0)  # audit bound ⇒ verifier PASS ⇒ no retry
     decompose = _decompose_json(4)
 
-    class _FourDiagProvider:
-        def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-            if "task-decomposition" in system or "Decompose into subtasks" in user:
-                return decompose, 10, 10
-            return "Thought: done.\nFinal Answer: ok", 5, 2
+    class _FourDiagModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "four-diag-fake"
 
-    gw = LLMGateway(
-        {"cheap": _FourDiagProvider(), "frontier": _FourDiagProvider()},
-        telemetry=TelemetryCollector(),
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=decompose))])
+
+    session = MultiAgentSession(
+        orchestrator_model=_FourDiagModel(),
+        model=_StaticChatModel(reply="ok"),
+        registry=reg,
+        max_workers=4,
     )
-    session = MultiAgentSession(gateway=gw, registry=reg, max_workers=4)
     report = session.run("diagnose in parallel")
     flow = session.blackboard.session_flow(report.session_id)
 
@@ -2723,14 +2761,47 @@ def test_t20_parallel_wave_exactly_once() -> None:
     )
 
 
-def test_t20_wave_spawns_fresh_worker_per_claim_off_main_thread(
-    session: MultiAgentSession,
-) -> None:
+def test_t20_wave_spawns_fresh_worker_per_claim_off_main_thread(minimal_registry) -> None:
     """T20: each claimed task is executed by a FRESH worker instance (its own ReActAgent
-    transcript), spawned on a pool thread — so concurrent branches never clobber a shared
-    transcript and no wave work runs on the calling thread.
+    transcript), and a PARALLEL wave (≥2 subtasks) runs the workers concurrently on pool threads —
+    so concurrent branches never clobber a shared transcript and real parallelism is exercised.
+
+    Form-1 note: the spy hook is the SAME production factory (``session._spawn_worker``), now
+    called from inside the ``Send`` worker node. But the off-main-thread property only holds for a
+    wave with real parallelism: LangGraph runs a SINGLE-task superstep INLINE on the caller thread
+    (its single-task fast path — correct, no parallelism to gain from one task). So this test
+    deliberately drives a two-diagnosis + two-repair decomposition; both waves then fan out ≥2
+    ``Send`` packets and every fresh worker is spawned off the caller thread. (The default 1+1
+    topology would legitimately inline on the caller — no longer an off-thread guarantee.)
     """
     import threading
+
+    class _TwoWaveDecomposeModel(BaseChatModel):
+        """Two diagnosis + two repair subtasks, so BOTH waves are genuinely parallel (≥2 Sends)."""
+
+        @property
+        def _llm_type(self) -> str:
+            return "two-wave-decompose-fake"
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            payload = (
+                '[{"role": "diagnosis", "description": "Diag A", '
+                '"allowed_skills": ["audit_project"], "worker_id": "diag_01"}, '
+                '{"role": "diagnosis", "description": "Diag B", '
+                '"allowed_skills": ["audit_project"], "worker_id": "diag_01"}, '
+                '{"role": "repair_proposal", "description": "Repair A", '
+                '"allowed_skills": ["propose_fix"], "worker_id": "repair_01"}, '
+                '{"role": "repair_proposal", "description": "Repair B", '
+                '"allowed_skills": ["propose_fix"], "worker_id": "repair_01"}]'
+            )
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=payload))])
+
+    session = MultiAgentSession(
+        orchestrator_model=_TwoWaveDecomposeModel(),
+        model=_StaticChatModel(reply="ok"),
+        registry=minimal_registry,
+        max_workers=4,
+    )
 
     main_ident = threading.get_ident()
     spawned: list[WorkerAgent] = []
@@ -2743,12 +2814,14 @@ def test_t20_wave_spawns_fresh_worker_per_claim_off_main_thread(
         spawn_threads.add(threading.get_ident())
         return worker
 
-    # Instance-attribute shadow of the bound method — spy on the production factory.
+    # Instance-attribute shadow of the bound method — spy on the production factory (now called
+    # from inside the Send worker node, not the retired ThreadPoolExecutor consumer).
     session._spawn_worker = spy
     session.run("fresh workers goal")
 
-    # Default topology spawns one diagnosis + one repair worker (one per claimed wave task).
-    assert len(spawned) >= 2, f"expected ≥2 spawned workers, got {len(spawned)}"
+    # Two parallel waves ⇒ four fresh workers (one per claimed subtask); the reflexion retry re-runs
+    # a SINGLETON worker, so it never adds a spawn.
+    assert len(spawned) == 4, f"expected 4 spawned workers (2 diag + 2 repair), got {len(spawned)}"
     assert len({id(w) for w in spawned}) == len(spawned), (
         "each claim must spawn a DISTINCT worker instance"
     )
@@ -2756,7 +2829,8 @@ def test_t20_wave_spawns_fresh_worker_per_claim_off_main_thread(
         "each spawned worker must own its ReActAgent transcript (no shared object)"
     )
     assert main_ident not in spawn_threads, (
-        "wave work must run on pool threads, not the caller — else there is no parallelism"
+        "a parallel wave must run its workers on pool threads, not the caller — else there is no "
+        "parallelism"
     )
 
 
@@ -2771,21 +2845,29 @@ def test_t20_two_wave_barrier_repair_sees_all_diagnoses() -> None:
     tags = ("ALPHA", "BETA", "GAMMA")
     decompose = _decompose_json(len(tags))
 
-    class _TaggedProvider:
-        def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
-            if "task-decomposition" in system or "Decompose into subtasks" in user:
-                return decompose, 10, 10
-            if "[Your specific subtask as diagnosis]" in user:
-                for i, tag in enumerate(tags):
-                    if f"Diag {i}" in user:
-                        return f"Thought: done.\nFinal Answer: FINDING_{tag}", 5, 2
-                return "Thought: done.\nFinal Answer: ok", 5, 2
-            return "Thought: done.\nFinal Answer: repair-ok", 5, 2
+    class _TaggedDecomposeModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "tagged-decompose-fake"
 
-    gw = LLMGateway(
-        {"cheap": _TaggedProvider(), "frontier": _TaggedProvider()}, telemetry=TelemetryCollector()
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=decompose))])
+
+    def _tagged(messages: list[BaseMessage]) -> AIMessage:
+        human = _human_text(messages)
+        if "[Your specific subtask as diagnosis]" in human:
+            for i, tag in enumerate(tags):
+                if f"Diag {i}" in human:
+                    return AIMessage(content=f"FINDING_{tag}")
+            return AIMessage(content="ok")
+        return AIMessage(content="repair-ok")
+
+    session = MultiAgentSession(
+        orchestrator_model=_TaggedDecomposeModel(),
+        model=_RoutedChatModel(route=_tagged),
+        registry=reg,
+        max_workers=3,
     )
-    session = MultiAgentSession(gateway=gw, registry=reg, max_workers=3)
     report = session.run("find and fix in parallel")
     flow = session.blackboard.session_flow(report.session_id)
 

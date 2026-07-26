@@ -1,8 +1,8 @@
 # Unreal Engine 集成运行手册（OWCopilotBridge）
 
 > 把 OWCopilot 导出的 DataTable JSON 真正落进 UE 工程的 DataTable 资产。零 C++、编辑器内、版本无关。
-> **现状：真机联调待办（live run pending）。** 离线可验证的部分已由 CI 测试锁死（见文末清单）；
-> 只有真实 UE 机器才能证实的环节在末尾单列，不谎称已绿。
+> **现状：数据层已在真机验证通过（UE 5.7.2，2026-07-24）** —— 三张表灌入 + 读回零差异，见文末
+> 「真机验证结果」。**运行时/演出/菜单交互等环节仍为 live run pending**，单列在后，不谎称已绿。
 
 ## 组成
 
@@ -120,12 +120,32 @@ push_datatable_via_remote_control("http://<host>:30010", "/Game/QuestTable", row
   （由 `test_unreal_plugin.py` 回归证明）。
 - 传入表的 Row Struct 作 `import_row_struct` 强制自动导入（无对话框），适配无头/CI。
 
-## 仅真机可验证清单（live run pending，未声称已绿）
+## 真机验证结果（2026-07-24，UE 5.7.2 实跑）
 
-以下环节离线无法证实，须在真实 UE 机器上核对，纪律同既有 P3 "live run pending" 备注：
+**已验证通过**（`scripts/run_ue_verify.py` + `scripts/ue_verify_import.py`，无头 `UnrealEditor-Cmd.exe`，
+工程 `F:\UE5\project\OWCopilotDemo`，报告 `all_ok: true`）：
 
-1. `fill_data_table_from_json_string` 是否真的接受本 JSON 对具体工程 Row Struct 完成类型强制
-   （枚举 / soft-object ref / 嵌套结构）。
+- **第 1 条（部分）**：`fill_data_table_from_json_string` **真的接受本 JSON 并完成类型强制** ——
+  `DialogueTreeNodes`(2 行) / `DialogueTreeChoices`(2 行) / `QuestLogicVars`(3 行) 三张表全部灌入成功，
+  **零缺列、零标量值不符**，覆盖 String / Text(FText) / Int32 / Bool / 结构体数组 / 字符串数组。
+  仍未覆盖：枚举与 soft-object ref（当前导出不产出这两类）。
+- **第 4 条**：`save_loaded_asset` **确实写出 `.uasset`**（结构体与 DataTable 资产均落盘）。
+
+**过程中发现的真实缺陷与事实**（新增，供后续避坑）：
+
+- ⚠️ **`export_data_table_to_json_string` 会让引擎崩溃**：在用户自定义 Row Struct 上触发
+  `Assertion failed: Stack.Top() == EJson::Object [JsonWriter.h:272]`，整个进程死。验证脚本因此改用
+  `get_column_as_string` 逐列读回，绕开该路径。
+- **UserDefinedStruct 的字段内部名带 GUID 后缀**（`Var_2_5A3266B8...`）；与我们 JSON 列名对得上的是
+  `get_column_export_names()`，比对必须用导出名。
+- **FText 列读回是 `NSLOCTEXT("<表>", "<行名_列名>", "<原文>")` 包裹形态**（UE 自动按行列生成本地化键），
+  是正确行为不是数据错；比对前须拆包。
+- **UE 5.7 的 Python 没有 `UserDefinedStructFactory`，但有 `StructureFactory`**：结构体**资产**可脚本创建，
+  **字段无法**脚本添加（`StructVariableDescription` 未暴露），必须在编辑器 GUI 里加。
+
+## 仍仅真机可验证清单（live run pending，未声称已绿）
+
+以下环节仍未证实，不得声称已绿：
 2. `text_mode="stringtable"` 下「裸 key 绑定 FText->StringTable」的精确 JSON 字面量随引擎版本而异。
 3. ToolMenus 菜单是否渲染、文件/目录选择交互（stock UE 无一等 Python 文件夹对话框，菜单当前读
    环境变量路径；如需真正的选择器可加一个 Editor Utility Widget）。

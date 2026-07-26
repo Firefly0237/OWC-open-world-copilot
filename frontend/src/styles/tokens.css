@@ -40,6 +40,43 @@
   --ow-serif: "Noto Serif SC", Georgia, "Songti SC", serif;
   --ow-display: "Noto Sans SC", system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
   --ow-num: "Saira", "Noto Sans SC", system-ui, sans-serif;
+  /* ================= 如我所书 · 书卷层（P0 冻结，规范 §2） =================
+     星空层（上方 gold/violet/night）保留为"天"；以下三组承载"书"的面、字、光。
+     烫金是 gold 的语义化别名（单一色源），扫光渐变只走 transform/opacity。 */
+
+  /* 纸张组 —— 书卷层的面：暖调深纸，区别冷蓝 --ow-panel；只用于承载内容的页 */
+  --ow-paper: #211a28;
+  --ow-paper-raised: #2c2333;
+  --ow-paper-edge: rgba(227, 192, 127, 0.3);
+  --ow-paper-shadow: rgba(9, 6, 15, 0.55);
+
+  /* 墨色组 —— 书卷层的字：朱砂是唯一功能红，专给"需要人来看"的校勘/违例/错误 */
+  --ow-ink-soft: #cfc6b4;
+  --ow-ink-mute: #9d9384;
+  --ow-cinnabar: #c8553d;
+  --ow-cinnabar-soft: rgba(200, 85, 61, 0.3);
+
+  /* 烫金组 —— 书卷层的光：饰线/角饰/章节牌用 foil，hover 扫金用 sheen */
+  --ow-foil: var(--ow-gold);
+  --ow-foil-bright: var(--ow-gold-bright);
+  --ow-foil-dim: var(--ow-gold-deep);
+  --ow-foil-line: rgba(227, 192, 127, 0.55);
+  --ow-foil-sheen: linear-gradient(
+    105deg,
+    transparent 20%,
+    rgba(240, 210, 138, 0.65) 50%,
+    transparent 80%
+  );
+
+  /* 动效组 —— P0 冻结（规范 §5）：区间取中值；超 8 项 stagger 见 motion.ts */
+  --ow-dur-micro: 140ms;
+  --ow-dur-standard: 280ms;
+  --ow-dur-enter: 480ms;
+  --ow-dur-turn: 600ms;
+  --ow-dur-shimmer: 1200ms;
+  --ow-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ow-ease-enter: cubic-bezier(0.22, 1, 0.36, 1);
+  --ow-stagger: 50ms;
 }
 
 * {

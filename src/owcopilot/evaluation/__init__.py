@@ -1,5 +1,13 @@
 # 生成内容的评测助手。
-"""Evaluation helpers for generated game-content artifacts."""
+"""Evaluation helpers for generated game-content artifacts.
+
+覆盖缺口诚实说明（W1-2 标注,评估逻辑未改动）：本包对 ``multi_agent``
+（orchestrator-worker-verifier 编排）**零覆盖**——没有任何模块评测其协作质量、任务成功率或错误
+级联率；grep 本目录对 ``multi_agent`` 零命中。``multi_agent`` 相关测试只在
+``tests/test_multi_agent.py`` 里验证架构约束（SUPERVISOR_rubric P3-1~P3-7），不是质量指标。详见
+``multi_agent/__init__.py`` 模块头的对应说明，真评测排期见 Wave 5 W5-2
+（``docs/研究/一轮修改优化_总实施方案.md``）。
+"""
 
 from .ab_compare import (
     ABComparison,
@@ -33,6 +41,33 @@ from .agent_eval import (
     JdDimension,
     JdDimensionScorecard,
     run_jd_dimension_scorecard,
+)
+from .agent_task_bench import (
+    AGENT_TASK_GOAL,
+    DEFAULT_RUNG,
+    FINDINGS_MARKER,
+    L2_PROMPT_VARIANT,
+    PROMPT_VARIANTS,
+    RECALL_SUCCESS_THRESHOLD,
+    RETRIEVAL_ONLY_SKILLS,
+    RUNGS,
+    AgentTask,
+    AgentTaskBenchReport,
+    GoldFinding,
+    RungSpec,
+    TaskReport,
+    TrialRecord,
+    TrialScore,
+    answer_follows_output_contract,
+    answer_segments,
+    build_agent_task_goal,
+    build_task_base_world,
+    build_task_worlds,
+    extract_claims,
+    gold_findings,
+    run_agent_task_bench,
+    rung_spec,
+    score_answer,
 )
 from .blind_spots import (
     BlindSpotError,
@@ -72,18 +107,29 @@ from .retrieval_dataset import (
 
 __all__ = [
     "AGENT_EVAL_FLOOR",
+    "AGENT_TASK_GOAL",
+    "DEFAULT_RUNG",
+    "FINDINGS_MARKER",
+    "L2_PROMPT_VARIANT",
+    "PROMPT_VARIANTS",
+    "RECALL_SUCCESS_THRESHOLD",
+    "RETRIEVAL_ONLY_SKILLS",
+    "RUNGS",
     "TOOL_ACCURACY_GATE",
     "ABComparison",
     "AcceptanceCheck",
     "AcceptanceReport",
     "AdmissionRejection",
     "AdmissionReport",
+    "AgentTask",
+    "AgentTaskBenchReport",
     "BlindSpotError",
     "BlindSpotReport",
     "CategoryRecall",
     "ContingencyTable",
     "McNemarResult",
     "RetrievalABReport",
+    "GoldFinding",
     "GoldReActScenario",
     "GoldenCheck",
     "GoldenEvaluationReport",
@@ -98,21 +144,34 @@ __all__ = [
     "SeededError",
     "StagedRetrievalDiagnostic",
     "StagedRetrievalReport",
+    "TaskReport",
+    "TrialRecord",
+    "RungSpec",
+    "TrialScore",
     "admit_multihop_queries",
     "aggregate_reliability",
     "audit_open_issues",
     "build_acceptance_world",
     "build_blind_spot_report",
     "build_retrieval_eval_dataset",
+    "answer_follows_output_contract",
+    "answer_segments",
+    "build_agent_task_goal",
+    "build_task_base_world",
+    "build_task_worlds",
     "compare_at_k",
     "compute_tool_selection_accuracy",
     "contingency_at_k",
     "evaluate_blind_spots",
     "evaluate_retrieval_recall",
     "evaluate_staged_retrieval",
+    "extract_claims",
+    "gold_findings",
     "golden_content_bundle",
     "mcnemar_exact",
     "pass_hat_k",
+    "rung_spec",
+    "run_agent_task_bench",
     "run_jd_dimension_scorecard",
     "retrieval_benchmark_queries",
     "retrieval_eval_queries",
@@ -122,6 +181,7 @@ __all__ = [
     "run_retrieval_recall_eval",
     "run_semantic_retrieval_benchmark",
     "run_staged_retrieval_diagnostic",
+    "score_answer",
     "seed_blind_spots",
     "seed_errors",
     "write_golden_world",

@@ -19,8 +19,10 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ..errors import OWCopilotError
 
-class LogicSyntaxError(ValueError):
+
+class LogicSyntaxError(OWCopilotError, ValueError):
     """Raised when an expression cannot be parsed. Never raised from evaluation of a parsed tree."""
 
 

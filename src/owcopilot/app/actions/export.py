@@ -24,13 +24,21 @@ def run_project_export_action(
     *,
     output_dir: str | Path,
     target_engine: EngineTarget | str = EngineTarget.GENERIC,
+    row_struct_map: dict[str, dict[str, str]] | None = None,
     sqlite_path: str | None = None,
 ) -> dict[str, Any]:
+    # ``row_struct_map`` (UNREAL only) renames DataTable columns to the target project's own USTRUCT
+    # fields; None keeps the default names so the export stays byte-for-byte identical.
     engine = EngineTarget(target_engine)
     actual_output = Path(output_dir) / engine.value
     with _project(content_root, sqlite_path) as project:
         assert_export_ready(project)
-        manifest = export_content_bundle(project.bundle, actual_output, target_engine=engine)
+        manifest = export_content_bundle(
+            project.bundle,
+            actual_output,
+            target_engine=engine,
+            row_struct_map=row_struct_map,
+        )
         return {
             "output_dir": str(actual_output),
             "manifest": manifest.model_dump(mode="json"),

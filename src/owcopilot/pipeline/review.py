@@ -56,6 +56,11 @@ def decide_review_item(
             f"review item '{item_id}' was already decided ({item.status}); "
             "decisions are final — generate a new draft instead"
         )
+    # Canon writes go through the project's (world, version) scope, not the bare baseline: on a
+    # migrated world the project runs on a working line, and a bare ``store.save`` would write the
+    # working line's effective content straight into the baseline root tree (cross-version
+    # back-contamination). For the default scope (``v1``) ``load_scoped`` / ``save_scoped`` are
+    # byte-identical to ``load`` / ``save``, so single-world behaviour is unchanged.
 
     if decision == "rejected":
         decided = queue.mark(item_id, "rejected", decided_by=operator)
@@ -75,10 +80,12 @@ def decide_review_item(
                 "reject it and generate a draft with a unique id"
             )
         quest = quest.model_copy(update={"review_status": ReviewStatus.APPROVED})
-        bundle = project.content_store.load()
+        bundle = project.content_store.load_scoped(
+            world_id=project.world_id, version=project.version
+        )
         bundle.quests[quest.id] = quest
         _assert_no_new_accept_errors(project, bundle)
-        project.content_store.save(bundle)
+        project.content_store.save_scoped(bundle, version=project.version)
         project.reload()
         written_ref = f"quest:{quest.id}"
     elif item.item_type is ReviewItemType.QUEST_LOGIC_DRAFT:
@@ -87,7 +94,9 @@ def decide_review_item(
         from ..logic import audit_quest_logic
 
         quest_id = str(item.payload.get("quest_id") or "")
-        bundle = project.content_store.load()
+        bundle = project.content_store.load_scoped(
+            world_id=project.world_id, version=project.version
+        )
         if quest_id not in bundle.quests:
             raise ValueError(f"任务「{quest_id}」已不存在，无法应用逻辑草稿；请驳回此项。")
         logic = QuestLogic.model_validate(item.payload.get("logic") or {})
@@ -100,7 +109,7 @@ def decide_review_item(
             )
         bundle.quests[quest_id] = candidate_quest
         _assert_no_new_accept_errors(project, bundle)
-        project.content_store.save(bundle)
+        project.content_store.save_scoped(bundle, version=project.version)
         project.reload()
         written_ref = f"quest:{quest_id}"
     elif item.item_type in {ReviewItemType.WORLD_SEED, ReviewItemType.IMPORT_DRAFT}:
@@ -112,11 +121,13 @@ def decide_review_item(
                 f"draft bundle would overwrite existing project content; "
                 f"conflicting refs: {preview}"
             )
-        bundle = project.content_store.load()
+        bundle = project.content_store.load_scoped(
+            world_id=project.world_id, version=project.version
+        )
         approved = _approve_bundle(seed_bundle)
         _merge_bundle(bundle, approved)
         _assert_no_new_accept_errors(project, bundle)
-        project.content_store.save(bundle)
+        project.content_store.save_scoped(bundle, version=project.version)
         project.reload()
         written_ref = item.object_ref
     elif item.item_type is ReviewItemType.DIALOGUE_TREE:
@@ -127,10 +138,12 @@ def decide_review_item(
                 "reject it and regenerate with a unique id"
             )
         tree = tree.model_copy(update={"review_status": ReviewStatus.APPROVED})
-        bundle = project.content_store.load()
+        bundle = project.content_store.load_scoped(
+            world_id=project.world_id, version=project.version
+        )
         bundle.dialogue_trees[tree.id] = tree
         _assert_no_new_accept_errors(project, bundle)
-        project.content_store.save(bundle)
+        project.content_store.save_scoped(bundle, version=project.version)
         project.reload()
         written_ref = f"dialogue_tree:{tree.id}"
     elif item.item_type is ReviewItemType.CHARACTER_PROFILE:
@@ -141,7 +154,9 @@ def decide_review_item(
                 "reject it and regenerate with a unique id"
             )
         relations = [Relation.model_validate(raw) for raw in (item.payload.get("relations") or [])]
-        bundle = project.content_store.load()
+        bundle = project.content_store.load_scoped(
+            world_id=project.world_id, version=project.version
+        )
         bundle.entities[entity.id] = entity.model_copy(
             update={"review_status": ReviewStatus.APPROVED}
         )
@@ -150,7 +165,7 @@ def decide_review_item(
             if (relation.source, relation.target, relation.kind) not in existing_keys:
                 bundle.relations.append(relation)
         _assert_no_new_accept_errors(project, bundle)
-        project.content_store.save(bundle)
+        project.content_store.save_scoped(bundle, version=project.version)
         project.reload()
         written_ref = f"entity:{entity.id}"
     elif item.item_type is ReviewItemType.FLAVOR_BATCH:
@@ -160,13 +175,15 @@ def decide_review_item(
             raise ValueError(
                 "flavor batch would overwrite existing entities: " + ", ".join(existing[:8])
             )
-        bundle = project.content_store.load()
+        bundle = project.content_store.load_scoped(
+            world_id=project.world_id, version=project.version
+        )
         for entity in entities:
             bundle.entities[entity.id] = entity.model_copy(
                 update={"review_status": ReviewStatus.APPROVED}
             )
         _assert_no_new_accept_errors(project, bundle)
-        project.content_store.save(bundle)
+        project.content_store.save_scoped(bundle, version=project.version)
         project.reload()
         written_ref = item.object_ref
     decided = queue.mark(item_id, "accepted", decided_by=operator)

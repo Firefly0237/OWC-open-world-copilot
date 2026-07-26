@@ -7,7 +7,8 @@ import logging
 import pytest
 
 from owcopilot.llm.cache import ExactCache
-from owcopilot.llm.gateway import LLMGateway, OpenAICompatProvider, ToolCallResponse
+from owcopilot.llm.chat_model import ChatModelProvider
+from owcopilot.llm.gateway import LLMGateway, ToolCallResponse
 from owcopilot.llm.resilience import (
     PROVIDER_CAPABILITY_MEMBERS,
     CircuitBreakerProvider,
@@ -55,7 +56,7 @@ class _Scripted:
 
 
 class _Model:
-    """Provider exposing a real ``.model`` (like ``OpenAICompatProvider``) and returning that id
+    """Provider exposing a real ``.model`` (like ``ChatModelProvider``) and returning that id
     as its completion text, so a gateway test can see which provider actually answered."""
 
     def __init__(self, model: str) -> None:
@@ -165,7 +166,7 @@ def test_build_real_provider_is_plain_without_env(monkeypatch) -> None:
     for key in ("OWCOPILOT_FALLBACK_MODEL", "OWCOPILOT_CIRCUIT_BREAKER"):
         monkeypatch.delenv(key, raising=False)
     provider = build_real_provider("deepseek-chat")
-    assert isinstance(provider, OpenAICompatProvider)
+    assert isinstance(provider, ChatModelProvider)
 
 
 def test_build_real_provider_wraps_failover_then_breaker(monkeypatch) -> None:
@@ -174,8 +175,8 @@ def test_build_real_provider_wraps_failover_then_breaker(monkeypatch) -> None:
     provider = build_real_provider("deepseek-chat")
     assert isinstance(provider, CircuitBreakerProvider)
     assert isinstance(provider.inner, FailoverProvider)
-    assert isinstance(provider.inner.primary, OpenAICompatProvider)
-    assert isinstance(provider.inner.secondary, OpenAICompatProvider)
+    assert isinstance(provider.inner.primary, ChatModelProvider)
+    assert isinstance(provider.inner.secondary, ChatModelProvider)
 
 
 # ----------------------------------------------------------- .model passthrough (gen_ai/cache key)
@@ -356,44 +357,13 @@ def test_circuit_breaker_supports_tools_ignores_circuit_state() -> None:
     assert cb.supports_tools is True
 
 
-# ------------------------------------------------ gateway takes the native path through a wrapper
-def _tools_gateway(provider) -> LLMGateway:
-    return LLMGateway(
-        providers={"cheap": provider},
-        router=StaticRouter(mapping={"agent_react": "cheap"}),
-        telemetry=TelemetryCollector(),
-    )
-
-
+# ------------------------------------------------- complete_with_tools failover + degradation
+# The wrappers' native-tools surface is now probed directly (the gateway's complete_with_tools
+# façade retired in T3); these constants feed the wrapper-level tools calls below.
 _TOOLS_SCHEMA = [{"type": "function", "function": {"name": "noop", "parameters": {}}}]
 _TOOLS_MESSAGES = [{"role": "user", "content": "hi"}]
 
 
-def test_gateway_takes_native_tool_path_through_circuit_breaker_wrapper() -> None:
-    inner = _ToolOk()
-    gateway = _tools_gateway(CircuitBreakerProvider(inner))
-
-    resp = gateway.complete_with_tools(
-        task="agent_react", messages=_TOOLS_MESSAGES, tools=_TOOLS_SCHEMA
-    )
-
-    assert resp.text == "tool-ok"
-    assert inner.tool_calls == 1  # the REAL provider's complete_with_tools actually ran
-
-
-def test_gateway_takes_native_tool_path_through_failover_wrapper() -> None:
-    inner = _ToolOk()
-    gateway = _tools_gateway(FailoverProvider(inner, _NoTools()))
-
-    resp = gateway.complete_with_tools(
-        task="agent_react", messages=_TOOLS_MESSAGES, tools=_TOOLS_SCHEMA
-    )
-
-    assert resp.text == "tool-ok"
-    assert inner.tool_calls == 1
-
-
-# ------------------------------------------------- complete_with_tools failover + degradation
 def test_failover_complete_with_tools_hands_off_when_secondary_also_supports_tools() -> None:
     primary = _ToolFail(RuntimeError("connection refused"))
     secondary = _ToolOk()

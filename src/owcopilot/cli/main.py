@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -22,10 +23,33 @@ from ..audit.default_rules import build_default_rule_registry
 from ..audit.models import IssueStatus
 from ..audit.report import render_audit_markdown
 from ..audit.runner import AuditRunner
+from ..config import DEFAULT_CHEAP_MODEL, DEFAULT_LLM_MODE
 from ..content.hash import content_hash
 from ..content.ingest import ingest_raw_objects, parse_paths
 from ..content.mapping import FieldMapping, apply_field_mapping
 from ..evaluation import run_acceptance_evaluation, run_golden_evaluation
+from ..evaluation.agent_task_bench import (
+    DEFAULT_BUDGET_USD as DEFAULT_AGENT_TASK_BUDGET_USD,
+)
+from ..evaluation.agent_task_bench import (
+    DEFAULT_MAX_STEPS as DEFAULT_AGENT_TASK_MAX_STEPS,
+)
+from ..evaluation.agent_task_bench import (
+    DEFAULT_RUNG as AGENT_TASK_DEFAULT_RUNG,
+)
+from ..evaluation.agent_task_bench import (
+    DEFAULT_TRIALS as DEFAULT_AGENT_TASK_TRIALS,
+)
+from ..evaluation.agent_task_bench import (
+    PROMPT_VARIANTS as AGENT_TASK_PROMPT_VARIANTS,
+)
+from ..evaluation.agent_task_bench import (
+    RUNGS as AGENT_TASK_RUNGS,
+)
+from ..evaluation.report_actionability import (
+    DEFAULT_ACTIONABILITY_BUDGET_USD,
+    DEFAULT_FIXER_MAX_STEPS,
+)
 from ..exporters import EngineTarget, export_content_bundle
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
 from ..llm.cache import NoOpCache
@@ -310,7 +334,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_project_args(agent)
-    agent.add_argument("--goal", required=True, help="What the agent should achieve / investigate.")
+    agent.add_argument(
+        "--goal",
+        required=False,
+        default=None,
+        help=(
+            "What the agent should achieve / investigate. Required for a fresh run; ignored with "
+            "--resume (the goal is recovered from the checkpoint being continued)."
+        ),
+    )
     agent.add_argument("--max-steps", type=int, default=6, help="Tool-call budget for the loop.")
     agent.add_argument(
         "--skills",
@@ -343,6 +375,59 @@ def build_parser() -> argparse.ArgumentParser:
             "'generate'), instead of discarding it; stop_reason becomes 'max_steps_generate'."
         ),
     )
+    agent.add_argument(
+        "--thread-id",
+        default=None,
+        help=(
+            "Pin this run to a known checkpoint thread id so it can be resumed later. A "
+            "checkpointer is ALWAYS attached (each run auto-mints a unique thread id, surfaced as "
+            "`thread_id` in the output); pass this to choose the id yourself. Reusing an existing "
+            "id without --resume is refused (add --resume to continue it, or use a fresh id)."
+        ),
+    )
+    agent.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Continue the unfinished run stored under --thread-id (invoke(None)) from its last "
+            "completed step — already-run tools do NOT re-run. Requires --thread-id. Honest limit: "
+            "middleware instance state (truncated-observation tails, compression counters) is NOT "
+            "checkpointed, so it restarts empty after a resume."
+        ),
+    )
+    agent.add_argument(
+        "--checkpoint-path",
+        default=None,
+        help=(
+            "Where the resume checkpoints live. Defaults to "
+            "<content-root>/.owcopilot/checkpoints.sqlite (independent from runtime.sqlite)."
+        ),
+    )
+    agent.add_argument(
+        "--hitl",
+        action="store_true",
+        help=(
+            "T6 HITL form a (inline interrupt): PAUSE before every sensitive tool call (the "
+            "PROPOSES_PATCH skills — the agent's only write-adjacent action) and wait for a human "
+            "decision. On a pause the run stops with status=interrupted and prints the pending "
+            "gate + the thread id; resume with --thread-id <ID> --resume --decision approve|reject."
+        ),
+    )
+    agent.add_argument(
+        "--decision",
+        choices=["approve", "reject"],
+        default=None,
+        help=(
+            "The human decision for a --resume of a run paused at a HITL gate (form a): 'approve' "
+            "runs the proposed tool call, 'reject' skips it and tells the model not to retry. "
+            "The one decision applies to every action in the pending gate."
+        ),
+    )
+    agent.add_argument(
+        "--decision-message",
+        default=None,
+        help="Optional reason attached to a --decision reject (fed back to the model).",
+    )
     _add_llm_args(agent)
     agent.set_defaults(handler=_cmd_agent)
 
@@ -359,8 +444,40 @@ def build_parser() -> argparse.ArgumentParser:
     multi_agent.add_argument(
         "--goal", required=True, help="High-level goal for the orchestrator to decompose."
     )
+    multi_agent.add_argument(
+        "--checkpoint-path",
+        default=None,
+        help=(
+            "Where the supervisor-graph checkpoints live (scheme Y — in-process resume / T6 "
+            "substrate; cross-process resume is not supported for multi-agent). Defaults to "
+            "<content-root>/.owcopilot/checkpoints.sqlite."
+        ),
+    )
     _add_llm_args(multi_agent)
     multi_agent.set_defaults(handler=_cmd_multi_agent)
+
+    mcp_serve = subparsers.add_parser(
+        "mcp-serve",
+        help=(
+            "Serve the owcopilot tools over the MCP protocol (FastMCP). Opens ONE shared "
+            "project for the server's lifetime (C-5 lifespan) and exposes the tool subset plus "
+            "canon/issues resources and a consistency-review prompt. Blocks until the client "
+            "exits. Requires the optional MCP SDK: `pip install -e .[mcp]`."
+        ),
+    )
+    mcp_serve.add_argument("--content-root", required=True, help="Project content root to serve.")
+    mcp_serve.add_argument(
+        "--sqlite-path",
+        help="Runtime SQLite path. Defaults to <content-root>/.owcopilot/runtime.sqlite.",
+    )
+    mcp_serve.add_argument(
+        "--transport",
+        choices=["stdio", "sse", "streamable-http"],
+        default="stdio",
+        help="MCP transport (default: stdio — what an MCP host launches as a subprocess).",
+    )
+    mcp_serve.add_argument("--name", default="owcopilot", help="Server name advertised to clients.")
+    mcp_serve.set_defaults(handler=_cmd_mcp_serve)
 
     agent_history = subparsers.add_parser(
         "agent-history",
@@ -626,6 +743,17 @@ def build_parser() -> argparse.ArgumentParser:
             "CSV import. Off by default; the rest of the unity/ projection is unchanged."
         ),
     )
+    export.add_argument(
+        "--row-struct-map",
+        help=(
+            "UNREAL target only: path to a JSON file that renames DataTable columns to the "
+            "target project's own USTRUCT field names, so exported rows land in an existing "
+            "schema instead of the generated OWCopilotRows.h. Shape: "
+            '{"<table>": {"<CanonicalField>": "<ExportName>"}} '
+            '(e.g. {"quests": {"DisplayName": "sDisplayName"}}). Reserved keys Name/Type are '
+            "never remapped. Omit to keep the default field names (export unchanged)."
+        ),
+    )
     export.set_defaults(handler=_cmd_export)
 
     sync_back = subparsers.add_parser(
@@ -740,6 +868,132 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_agent.set_defaults(handler=_cmd_eval_agent)
 
+    eval_agent_tasks = subparsers.add_parser(
+        "eval-agent-tasks",
+        help=(
+            "Task-level agent benchmark: seeded defect worlds, the deterministic audit's open "
+            "findings as ground truth, k real-model trials per task, machine-scored recall / "
+            "precision / pass^k. Costs money with --llm-mode real."
+        ),
+    )
+    eval_agent_tasks.add_argument("--workspace", required=True)
+    eval_agent_tasks.add_argument(
+        "--trials",
+        type=int,
+        default=DEFAULT_AGENT_TASK_TRIALS,
+        help="Trials per task (k in pass^k). Must be >= 1.",
+    )
+    eval_agent_tasks.add_argument(
+        "--max-steps", type=int, default=DEFAULT_AGENT_TASK_MAX_STEPS, help="Agent step budget."
+    )
+    eval_agent_tasks.add_argument(
+        "--max-replans",
+        type=int,
+        default=1,
+        help="Bounded plan-and-execute replans per trial (0 disables; hard cap 2).",
+    )
+    eval_agent_tasks.add_argument(
+        "--budget-usd",
+        type=_nonneg_float,
+        default=DEFAULT_AGENT_TASK_BUDGET_USD,
+        help="Hard spend stop: the run aborts and reports budget_stopped when exceeded.",
+    )
+    eval_agent_tasks.add_argument(
+        "--task",
+        action="append",
+        dest="task_ids",
+        help="Run only these task ids (repeatable, e.g. --task T01 --task T02).",
+    )
+    eval_agent_tasks.add_argument(
+        "--rung",
+        choices=list(AGENT_TASK_RUNGS),
+        default=AGENT_TASK_DEFAULT_RUNG,
+        help=(
+            "Ablation rung; each adds ONE capability to the one below it. L0 = no tools at all. "
+            "L1 = + retrieval/graph tools (unaided discovery through the product's read surface). "
+            "L2 = + the winning prompt variant. L3 = + dialogue trees in the read surface. "
+            "L4 = + the deterministic checker (full production surface). Corpus, gold set, scorer "
+            "and thresholds are identical on every rung, so a rung-to-rung gap is that one "
+            "variable's measured contribution."
+        ),
+    )
+    eval_agent_tasks.add_argument(
+        "--prompt-variant",
+        choices=list(AGENT_TASK_PROMPT_VARIANTS),
+        default=None,
+        help=(
+            "Override the rung's prompt variant. Used for the prompt A/B (which sweeps variants at "
+            "a fixed rung) and for protocol-isolation runs; recorded in the report, so an "
+            "overridden run is never mistaken for the ladder's own rung."
+        ),
+    )
+    eval_agent_tasks.add_argument(
+        "--output", help="Write the JSON result to this file as well as stdout."
+    )
+    _add_llm_args(eval_agent_tasks)
+    eval_agent_tasks.set_defaults(handler=_cmd_eval_agent_tasks)
+
+    eval_report = subparsers.add_parser(
+        "eval-report-actionability",
+        help=(
+            "Measure whether the audit report is actionable: every open finding is handed, one at "
+            "a time, to a fresh fixer that gets ONLY that finding's report text plus read/write "
+            "access to the content files (no audit tool, no source). Judged by re-running the "
+            "audit. Costs money with --llm-mode real."
+        ),
+    )
+    eval_report.add_argument(
+        "--workspace", required=True, help="Scratch directory for the per-finding world copies."
+    )
+    eval_report.add_argument(
+        "--label",
+        default="未标注",
+        help="Which report generation this run measures, e.g. 改造前基线 / 改造后.",
+    )
+    eval_report.add_argument(
+        "--max-steps",
+        type=int,
+        default=DEFAULT_FIXER_MAX_STEPS,
+        help="Model-call budget for one fixer.",
+    )
+    eval_report.add_argument(
+        "--budget-usd",
+        type=_nonneg_float,
+        default=DEFAULT_ACTIONABILITY_BUDGET_USD,
+        help="Hard spend stop: the run aborts and reports budget_stopped when exceeded.",
+    )
+    eval_report.add_argument(
+        "--world",
+        action="append",
+        dest="world_ids",
+        help="Measure only these seeded worlds (repeatable, e.g. --world T01 --world T03).",
+    )
+    eval_report.add_argument(
+        "--no-file-listing",
+        action="store_true",
+        help=(
+            "Stricter variant: take the file-tree listing away, so finding the right file depends "
+            "on the report alone. Use when the headline rate has saturated."
+        ),
+    )
+    eval_report.add_argument(
+        "--replay-report-text",
+        help=(
+            "Re-measure an OLDER report generation: read each finding's report text from a stored "
+            "run's JSON instead of rendering today's. Use to re-judge a past run under a changed "
+            "judging rule (e.g. the content-preservation clause) without restoring old code."
+        ),
+    )
+    eval_report.add_argument(
+        "--report-out",
+        help="Write the per-finding table + JSON record to this path stem (.md / .json).",
+    )
+    eval_report.add_argument(
+        "--output", help="Write the JSON result to this file as well as stdout."
+    )
+    _add_llm_args(eval_report)
+    eval_report.set_defaults(handler=_cmd_eval_report_actionability)
+
     return parser
 
 
@@ -778,7 +1032,7 @@ def _add_llm_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--llm-mode",
         choices=["offline", "real"],
-        default=os.getenv("OWCOPILOT_LLM_MODE", "offline"),
+        default=os.getenv("OWCOPILOT_LLM_MODE", DEFAULT_LLM_MODE),
         help=(
             "real: a configured OpenAI-compatible provider (the product path). offline: the "
             "deterministic doubles — a test/CI dry-run only, gated behind "
@@ -787,7 +1041,7 @@ def _add_llm_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--llm-model",
-        default=os.getenv("OWCOPILOT_CHEAP_MODEL", "deepseek-v4-flash"),
+        default=os.getenv("OWCOPILOT_CHEAP_MODEL", DEFAULT_CHEAP_MODEL),
         help="Model id for --llm-mode real.",
     )
     parser.add_argument(
@@ -827,6 +1081,37 @@ def _llm_gateway(
         retry_backoff_seconds=1.0 if real else 0.0,
     )
     return gateway, telemetry
+
+
+def _agent_chat_model(args: argparse.Namespace) -> Any:
+    """The agent's LangChain chat model per ``--llm-mode`` (the ``create_agent`` assembly point).
+
+    real: taken from :class:`~owcopilot.llm.chat_model.ChatModelProvider` — the ONE place that
+    knows how the real model is configured (env, key resolution, output cap) — then optionally
+    wrapped in ``build_chat_model_with_resilience`` (a no-op unless ``OWCOPILOT_FALLBACK_MODEL`` /
+    ``OWCOPILOT_CIRCUIT_BREAKER`` are set). offline: the deterministic ``tool_calls`` double, a
+    test/CI dry-run gated behind ``OWCOPILOT_ALLOW_OFFLINE_LLM`` — never a shipped product mode.
+    The retired text-path json_mode knob does not apply here: the agent's planning calls never
+    pass the provider's JSON gate.
+    """
+    if getattr(args, "llm_mode", "offline") == "real":
+        load_dotenv()  # pick up OPENAI_BASE_URL / OPENAI_API_KEY from .env; shell env wins
+        from ..llm.chat_model import (  # noqa: PLC0415 — live path only
+            ChatModelProvider,
+            build_chat_model_with_resilience,
+        )
+
+        # Opt-in failover + circuit breaker (OWCOPILOT_FALLBACK_MODEL / OWCOPILOT_CIRCUIT_BREAKER):
+        # a no-op unless the env is set, so the default agent path is unchanged. Covers both the
+        # create_agent host and the orchestrator's bare `invoke` (resilience parity with the text
+        # path — failover AND circuit breaker).
+        return build_chat_model_with_resilience(
+            ChatModelProvider(model=args.llm_model).chat_model()
+        )
+    require_offline_llm_allowed()  # `--llm-mode offline` is a test/CI dry-run, not a product
+    from ..agent.offline import OfflineReactChatModel  # noqa: PLC0415
+
+    return OfflineReactChatModel()
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
@@ -1087,36 +1372,132 @@ def _recall_agent_memory(
     return blocks or None
 
 
+def _cmd_mcp_serve(args: argparse.Namespace) -> int:
+    """Run the MCP server (blocks). The shared-project lifespan and concurrency reasoning live in
+    ``mcp_server/serve.py``; this handler only validates the root and hands off to it."""
+    from ..mcp_server import MCPTransportUnavailable, run_server
+
+    content_root = Path(args.content_root)
+    if not content_root.exists():
+        raise FileNotFoundError(f"content root does not exist: {content_root}")
+    try:
+        run_server(
+            content_root,
+            sqlite_path=args.sqlite_path,
+            transport=args.transport,
+            name=args.name,
+        )
+    except MCPTransportUnavailable as exc:
+        # Guided error (not a raw ImportError): the transport is an optional extra.
+        raise RuntimeError(str(exc)) from exc
+    return 0
+
+
+def _hitl_resume_decisions(args: argparse.Namespace) -> list[dict[str, Any]] | None:
+    """The HITL decision list for a --resume, or None for a plain (T4 crash) resume.
+
+    Maps the single ``--decision approve|reject`` to one HITLRequest decision; the agent replicates
+    it across every action in the pending gate. A bare --resume (no --decision) returns None so the
+    resume stays the T4 crash-continue path. Guards the misuse of --decision without --resume at the
+    call site (only invoked when resume is True)."""
+    decision = getattr(args, "decision", None)
+    if not decision:
+        return None
+    entry: dict[str, Any] = {"type": decision}
+    if decision == "reject" and getattr(args, "decision_message", None):
+        entry["message"] = args.decision_message
+    return [entry]
+
+
+def _resolve_agent_thread_id(store: Any, *, thread_id: str | None, resume: bool) -> str:
+    """Resolve the checkpoint thread id for a single-agent CLI run (guided errors, §5.2 matrix).
+
+    Always returns a concrete id (checkpointer is always-on): resume requires an existing thread,
+    an explicit id that already has a completed checkpoint is refused without --resume (never a
+    silent overwrite / chat-memory accumulation), and the default fresh run mints a unique id.
+    """
+    if resume:
+        if not thread_id:
+            raise ValueError(
+                "续跑需要 --thread-id <ID> 指出要继续的那次 run；"
+                "单独的 --resume 无法定位 checkpoint。"
+            )
+        if not store.thread_exists(thread_id):
+            raise ValueError(
+                f"找不到 thread '{thread_id}' 的可续 checkpoint；"
+                f"请先用 --thread-id {thread_id} 跑一次，或核对 id 是否正确。"
+            )
+        return thread_id
+    if thread_id:
+        if store.thread_exists(thread_id):
+            raise ValueError(
+                f"thread '{thread_id}' 已存在 checkpoint；续跑请加 --resume，或换一个 --thread-id。"
+            )
+        return thread_id
+    return str(uuid.uuid4())
+
+
 def _cmd_agent(args: argparse.Namespace) -> int:
     from ..agent import ReActAgent, episodic, persist_agent_run
-    from ..agent.offline import OfflineReactProvider
     from ..mcp_server import tools as tools_mod
     from ..retrieval.embedding import resolve_embedder
-    from ..skills import default_skill_registry
+    from ..skills import SideEffect, default_skill_registry, scoped_registry
+    from ..storage.checkpointer import CheckpointStore
 
-    if not args.goal.strip():
+    content_root = Path(args.content_root)
+    if not content_root.exists():
+        raise FileNotFoundError(f"content root does not exist: {content_root}")
+    # A fresh run needs a goal; a resume recovers it from the checkpoint, so --goal is optional.
+    resume = bool(args.resume)
+    if not resume and not (args.goal or "").strip():
         raise ValueError(
             "--goal 不能为空字符串，请描述 agent 需要完成的目标。"
             "例如: --goal 'check quest consistency'"
         )
-    content_root = Path(args.content_root)
-    if not content_root.exists():
-        raise FileNotFoundError(f"content root does not exist: {content_root}")
+    # --decision is the human answer for a paused HITL gate (T6 form a) — only meaningful when
+    # continuing that gate, so require --resume alongside it (guided error, not a silent no-op).
+    if getattr(args, "decision", None) and not resume:
+        raise ValueError(
+            "--decision 只用于恢复一次暂停在 HITL 审批门的 run（形态 a）；"
+            "请配合 --thread-id <ID> --resume 使用，或去掉 --decision。"
+        )
     sqlite_path = str(args.sqlite_path or _default_sqlite_path(content_root))
     if sqlite_path != ":memory:":
         Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
-    # The agent reasons in free-form ReAct text, so disable JSON mode on the real provider.
-    gateway, telemetry = _llm_gateway(
-        args, task="agent_react", offline_provider=OfflineReactProvider(), real_json_mode=False
-    )
+
+    # B always-on: a checkpointer is attached to EVERY run (single-agent), on an independent file,
+    # with an auto-minted unique thread id — so any run is resumable and a fresh thread keeps the
+    # produced AgentResult byte-identical to a no-checkpointer run. A per-run lifecycle sweep bounds
+    # the file. Resolve/validate the thread id here (guided errors, never a raw traceback).
+    checkpoint_path = str(args.checkpoint_path or _default_checkpoint_path(content_root))
+    checkpoint_store = CheckpointStore(checkpoint_path)
+    try:
+        checkpoint_store.sweep()  # opportunistic TTL/cap cleanup
+        thread_id = _resolve_agent_thread_id(
+            checkpoint_store, thread_id=args.thread_id, resume=resume
+        )
+        checkpoint_store.record_thread(thread_id, source="agent")
+    except Exception:
+        # A guided validation error (dup/missing thread) must not leak the connection.
+        checkpoint_store.close()
+        raise
+
+    chat_model = _agent_chat_model(args)
+    # One collector for the whole run: the agent attaches it via the standard callback surface,
+    # so planning, compaction and generate-finish calls all land in the same summary().
+    telemetry = TelemetryCollector()
     # Open one shared ProjectContext for the whole ReAct run so tool calls reuse the same
     # parsed project state and see writes from earlier steps.
     project = ProjectContext.open(content_root, sqlite_path=sqlite_path)
     token = tools_mod._shared_project.set(project)
     try:
         registry = default_skill_registry(content_root=str(content_root), sqlite_path=sqlite_path)
-        # Wire --skills allowlist into ReActAgent so users can restrict tool access.
-        # None means "all skills"; an empty list would restrict to none.
+        # Wire --skills into a SCOPED registry so the allowlist gates EXECUTION, not only what the
+        # model sees. None means "all skills"; an empty list restricts to none. Handing the agent
+        # this one scoped registry converges the permission to a single place: both the tool schema
+        # (as_structured_tools iterates it) and the execution-layer fallback (registry.run) share
+        # the same scope, so a model call for an out-of-scope skill raises SkillError at run() and
+        # its handler never executes (fed back as a recoverable is_error observation).
         allowed_skills: set[str] | None = set(args.skills) if args.skills is not None else None
         # Cross-validate --skills against the registry; warn (not fail) on unknown names
         # so the user knows the typo/stale skill name is silently excluded from the manifest.
@@ -1135,28 +1516,59 @@ def _cmd_agent(args: argparse.Namespace) -> int:
                     ),
                     file=sys.stderr,
                 )
+        agent_registry = scoped_registry(registry, allowed_skills)
         # Episodic-memory READ side: recall semantically-similar past runs (MemGPT recall storage)
         # and reflections (Reflexion buffer) and hand them to the actor's reflection slot — the one
         # existing episodic-memory injection channel (no new injection surface). Default on;
         # --no-recall disables it. Empty recall ⇒ reflections=None ⇒ byte-identical prompt.
+        # Recall is keyed on the goal, so it applies only to a fresh run — a resume continues a run
+        # whose reflections were already injected in the original attempt.
         embedder = resolve_embedder()
-        reflections = _recall_agent_memory(
-            episodic, project.sqlite_store, embedder, args.goal, enabled=not args.no_recall
+        reflections = (
+            None
+            if resume
+            else _recall_agent_memory(
+                episodic, project.sqlite_store, embedder, args.goal, enabled=not args.no_recall
+            )
+        )
+        # T6 HITL form a: --hitl gates the sensitive PROPOSES_PATCH skills (the agent's only
+        # write-adjacent action; it never writes canon) behind an inline human-approval interrupt.
+        # Derived from the scoped registry so the gate honours --skills, not a hardcoded name.
+        # Arm the HITL gate (T6 form a) for a FRESH --hitl run; when RESUMING, arm it iff a
+        # --decision is present (the middleware must be in the resumed graph to receive it). A bare
+        # --resume without --decision stays the T4 crash-continue path (no HITL middleware).
+        resume_decisions = _hitl_resume_decisions(args) if resume else None
+        enable_hitl = (bool(args.hitl) and not resume) or resume_decisions is not None
+        interrupt_before = (
+            {s.name for s in agent_registry if s.side_effect is SideEffect.PROPOSES_PATCH}
+            if enable_hitl
+            else None
         )
         result = ReActAgent(
-            gateway=gateway,
-            registry=registry,
+            model=chat_model,
+            registry=agent_registry,
             max_steps=args.max_steps,
-            allowed_skills=allowed_skills,
+            telemetry=telemetry,
+            # The scoped registry is the single source of scope; allowed_skills stays None so there
+            # is exactly one permission truth (no separate schema-layer filter to drift from it).
             early_stopping=args.early_stopping,
-        ).run(args.goal, reflections=reflections)
+            checkpointer=checkpoint_store.saver,
+            interrupt_before=interrupt_before,
+        ).run(
+            args.goal or "",
+            reflections=reflections,
+            thread_id=thread_id,
+            resume=resume,
+            resume_decisions=resume_decisions,
+        )
         # T19: persist the run's full trajectory (episodic/recall memory WRITE side) while the
         # project store is still open. Best-effort — a failure logs a WARNING and yields None,
         # so the agent's already-completed result is emitted unchanged either way.
         agent_run_id = persist_agent_run(project.sqlite_store, result)
         # Recall WRITE side: embed (goal + outcome) so a FUTURE run can recall this one. Runs only
-        # once the transcript is stored (needs the run_id) and is fail-open on the embed.
-        if agent_run_id is not None:
+        # once the transcript is stored (needs the run_id) and is fail-open on the embed. Skipped on
+        # a HITL pause: there is no outcome yet (blank final_answer), so nothing worth embedding.
+        if agent_run_id is not None and not result.interrupted:
             episodic.persist_run_embedding(
                 project.sqlite_store,
                 embedder,
@@ -1167,29 +1579,43 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     finally:
         tools_mod._shared_project.reset(token)
         project.close()
+        checkpoint_store.close()
     telemetry_summary = telemetry.summary()
     cost_budget = summarize_workflow(
         [llm_step("agent_react", telemetry_summary)], budget_usd=args.max_cost_usd
     ).budget
-    return _emit(
-        {
-            **result.model_dump(mode="json"),
-            "agent_run_id": agent_run_id,
-            "skills": registry.names(),
-            "llm_mode": args.llm_mode,
-            "telemetry": telemetry_summary,
-            "cost_budget": cost_budget.model_dump(mode="json"),
-        },
-        args,
-    )
+    payload: dict[str, Any] = {
+        **result.model_dump(mode="json"),
+        "agent_run_id": agent_run_id,
+        # The ACTUAL executable surface for this run (the --skills allow-set), not the full
+        # registry: the scoped registry's names() is the one permission truth the agent uses.
+        "skills": agent_registry.names(),
+        "llm_mode": args.llm_mode,
+        # The checkpoint thread this run wrote to — pass it to `--thread-id X --resume` to
+        # continue an interrupted run. Always present (checkpointer is always-on).
+        "thread_id": thread_id,
+        "telemetry": telemetry_summary,
+        "cost_budget": cost_budget.model_dump(mode="json"),
+    }
+    # T6 HITL form a: when the run paused at a human gate, make the state explicit and tell the
+    # operator exactly how to continue (the run already carries interrupt_request via model_dump).
+    if result.interrupted:
+        payload["status"] = "interrupted"
+        payload["next_step"] = (
+            f"resume with: owcopilot agent --content-root {args.content_root} "
+            f"--thread-id {thread_id} --resume --decision approve|reject"
+        )
+    else:
+        payload["status"] = "completed"
+    return _emit(payload, args)
 
 
 def _cmd_multi_agent(args: argparse.Namespace) -> int:
-    from ..agent.offline import OfflineReactProvider
     from ..mcp_server import tools as tools_mod
     from ..multi_agent import MultiAgentSession
     from ..retrieval.embedding import resolve_embedder
     from ..skills import default_skill_registry
+    from ..storage.checkpointer import CheckpointStore
 
     if not args.goal.strip():
         raise ValueError(
@@ -1202,12 +1628,25 @@ def _cmd_multi_agent(args: argparse.Namespace) -> int:
     sqlite_path = str(args.sqlite_path or _default_sqlite_path(content_root))
     if sqlite_path != ":memory:":
         Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
-    # Agents reason in free-form ReAct text, so disable JSON mode on the real provider.
-    # The orchestrator's decompose task expects JSON but degrades gracefully to the
-    # built-in subtasks when the response is not parseable (e.g. the offline double).
-    gateway, telemetry = _llm_gateway(
-        args, task="agent_react", offline_provider=OfflineReactProvider(), real_json_mode=False
-    )
+    # B always-on: the supervisor graph is compiled WITH a checkpointer (scheme Y) — report stays
+    # byte-identical, the infra is uniform with the single-agent path, and it is the substrate T6
+    # in-process HITL reuses. A unique thread id is minted per run and surfaced. NOTE (honest
+    # boundary): the CLI does NOT expose a cross-process `--resume` for multi-agent — the blackboard
+    # is in-memory and the two stores are not atomic, so a killed multi-agent run is not resumable
+    # from a fresh process (design §3). Only in-process suspend/continue is supported.
+    checkpoint_path = str(args.checkpoint_path or _default_checkpoint_path(content_root))
+    checkpoint_store = CheckpointStore(checkpoint_path)
+    checkpoint_store.sweep()
+    thread_id = str(uuid.uuid4())
+    checkpoint_store.record_thread(thread_id, source="multi-agent")
+    # One chat model, one collector: the orchestrator decompose calls and the worker/verifier
+    # ReAct loops all run on the SAME LangChain chat model instance and bill into one shared
+    # TelemetryCollector via the session's telemetry wiring. Decomposition asks for a raw JSON
+    # ARRAY (no response_format — json_object mode would reject it) and degrades gracefully to
+    # the built-in subtasks when the response is unparseable (e.g. the offline double, whose
+    # non-JSON reply degrades exactly as the retired MockProvider gateway did).
+    telemetry = TelemetryCollector()
+    chat_model = _agent_chat_model(args)
     # Open one shared ProjectContext for the whole multi-agent session so every worker sees the
     # same parsed project state and any issues persisted by earlier workers.
     project = ProjectContext.open(content_root, sqlite_path=sqlite_path)
@@ -1219,13 +1658,16 @@ def _cmd_multi_agent(args: argparse.Namespace) -> int:
         # a similar subtask recalls it into its reflection slot. Absent these, the session behaves
         # exactly as before (no persistence, no recall).
         session = MultiAgentSession(
-            gateway=gateway,
+            orchestrator_model=chat_model,
+            model=chat_model,
             registry=registry,
             store=project.sqlite_store,
             embedder=resolve_embedder(),
+            telemetry=telemetry,
+            checkpointer=checkpoint_store.saver,
         )
         try:
-            report = session.run(args.goal)
+            report = session.run(args.goal, thread_id=thread_id)
             # The blackboard message flow is the product-facing proof of true multi-agent
             # collaboration: each row is attributed (from→to) and ordered.
             flow = [
@@ -1242,6 +1684,7 @@ def _cmd_multi_agent(args: argparse.Namespace) -> int:
     finally:
         tools_mod._shared_project.reset(token)
         project.close()
+        checkpoint_store.close()
     telemetry_summary = telemetry.summary()
     cost_budget = summarize_workflow(
         [llm_step("multi_agent", telemetry_summary)], budget_usd=args.max_cost_usd
@@ -1258,6 +1701,9 @@ def _cmd_multi_agent(args: argparse.Namespace) -> int:
             # ② Surface decomposition degradation to CLI consumers — no silent downgrade
             "decomposition_degraded": report.decomposition_degraded,
             "llm_mode": args.llm_mode,
+            # The checkpoint thread compiled onto this run's supervisor graph (scheme Y — in-process
+            # resume / T6 substrate; NOT a cross-process resume handle for multi-agent).
+            "thread_id": thread_id,
             "telemetry": telemetry_summary,
             "cost_budget": cost_budget.model_dump(mode="json"),
         },
@@ -1390,6 +1836,9 @@ def _cmd_build_overview(args: argparse.Namespace) -> int:
 
 
 def _cmd_export(args: argparse.Namespace) -> int:
+    row_struct_map = (
+        _load_row_struct_map(Path(args.row_struct_map)) if args.row_struct_map else None
+    )
     with _project(args) as project:
         target_engine = EngineTarget(args.target_engine)
         output_dir = Path(args.output_dir) / target_engine.value
@@ -1399,6 +1848,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
             output_dir,
             target_engine=target_engine,
             unity_localization=args.unity_localization,
+            row_struct_map=row_struct_map,
         )
         return _emit(
             {
@@ -1581,6 +2031,98 @@ def _cmd_eval_agent(args: argparse.Namespace) -> int:
     scorecard = run_jd_dimension_scorecard()
     _emit(scorecard.model_dump(mode="json"), args)
     return 0 if scorecard.overall >= AGENT_EVAL_FLOOR else 1
+
+
+def _cmd_eval_agent_tasks(args: argparse.Namespace) -> int:
+    """Run the task-level agent benchmark (``evaluation/agent_task_bench.py``).
+
+    Unlike ``eval-agent`` (a deterministic $0 scorecard) this SPENDS MONEY in ``--llm-mode real``:
+    it drives the real agent over every seeded world ``--trials`` times. ``--budget-usd`` is a hard
+    stop checked before each trial. Progress is written to stderr so a long run is observable
+    without polluting the JSON on stdout.
+    """
+    from ..evaluation.agent_task_bench import TrialRecord, run_agent_task_bench
+
+    if args.trials < 1:
+        raise ValueError("--trials 必须 >= 1（pass^k 的 k 至少为 1）。")
+
+    def progress(record: TrialRecord) -> None:
+        print(
+            f"[{args.rung} {record.task_id} trial {record.trial}] "
+            f"recall={record.score.recall_pair:.2f} "
+            f"precision={record.score.precision_pair} "
+            f"contract={'Y' if record.score.contract_followed else 'N'} "
+            f"steps={record.step_count} cost=${record.cost_usd:.5f}"
+            + (f" ERROR={record.error}" if record.error else ""),
+            file=sys.stderr,
+            flush=True,
+        )
+
+    report = run_agent_task_bench(
+        args.workspace,
+        chat_model_factory=lambda: _agent_chat_model(args),
+        llm_mode=args.llm_mode,
+        model=args.llm_model if args.llm_mode == "real" else "offline-double",
+        trials=args.trials,
+        max_steps=args.max_steps,
+        max_replans=args.max_replans,
+        budget_usd=args.budget_usd,
+        task_ids=args.task_ids,
+        rung=args.rung,
+        prompt_variant=args.prompt_variant,
+        on_trial=progress,
+    )
+    _emit(report.model_dump(mode="json"), args)
+    # A budget abort is a real outcome, not a crash: report it and exit non-zero so a script
+    # notices the run was cut short rather than reading a partial table as complete.
+    return 1 if report.budget_stopped else 0
+
+
+def _cmd_eval_report_actionability(args: argparse.Namespace) -> int:
+    """Measure the audit report's actionability (``evaluation/report_actionability.py``).
+
+    SPENDS MONEY in ``--llm-mode real``: one fresh fixer per open finding. ``--budget-usd`` is a
+    hard stop checked before each finding. Progress goes to stderr so a long run is observable
+    without polluting the JSON on stdout.
+    """
+    from ..evaluation.report_actionability import (
+        ActionabilityTrial,
+        load_report_texts,
+        run_report_actionability,
+        write_actionability_artifacts,
+    )
+
+    def progress(trial: ActionabilityTrial) -> None:
+        # DAMAGED = 指纹判据算通过、内容保全没过 —— 也就是"删出来的通过",单独标出来。
+        outcome = "FIXED  " if trial.fixed else ("DAMAGED" if trial.fingerprint_ok else "MISS   ")
+        print(
+            f"[{trial.world_id} {trial.rule_code}] "
+            f"{outcome} "
+            f"files={len(trial.files_written)} calls={trial.llm_calls} "
+            f"cost=${trial.cost_usd:.5f} — {trial.verdict}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    report = run_report_actionability(
+        args.workspace,
+        chat_model_factory=lambda: _agent_chat_model(args),
+        llm_mode=args.llm_mode,
+        model=args.llm_model if args.llm_mode == "real" else "offline-double",
+        label=args.label,
+        max_steps=args.max_steps,
+        budget_usd=args.budget_usd,
+        world_ids=set(args.world_ids) if args.world_ids else None,
+        file_listing=not args.no_file_listing,
+        report_texts=(
+            load_report_texts(args.replay_report_text) if args.replay_report_text else None
+        ),
+        on_trial=progress,
+    )
+    if args.report_out:
+        write_actionability_artifacts(report, args.report_out)
+    _emit(report.model_dump(mode="json"), args)
+    return 1 if report.budget_stopped else 0
 
 
 def _cmd_impact(args: argparse.Namespace) -> int:
@@ -2004,6 +2546,12 @@ def _default_sqlite_path(content_root: Path) -> Path:
     return content_root / ".owcopilot" / "runtime.sqlite"
 
 
+def _default_checkpoint_path(content_root: Path) -> Path:
+    # Independent from runtime.sqlite (design §4): execution-state blobs never pollute the
+    # business/audit DB and the two write paths never contend on one file's WAL write lock.
+    return content_root / ".owcopilot" / "checkpoints.sqlite"
+
+
 def _load_baseline(path: Path) -> AuditBaseline:
     return AuditBaseline.model_validate_json(path.read_text(encoding="utf-8"))
 
@@ -2019,6 +2567,39 @@ def _load_mapping_doc(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("field mapping 文件必须是 JSON 对象（{...}）")
     return data
+
+
+def _load_row_struct_map(path: Path) -> dict[str, dict[str, str]]:
+    """Read the export-side row-struct rename map ({table: {canonical: export_name}}).
+
+    Guided errors instead of raw tracebacks: the file must be a JSON object whose values are
+    themselves string->string objects. Validation stops here so the exporter only ever sees a
+    well-typed map."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"row-struct-map 文件不存在：{path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"row-struct-map 文件不是合法 JSON（{path.name}）："
+            f"{exc.msg} 在第 {exc.lineno} 行第 {exc.colno} 列"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            "row-struct-map 文件必须是 JSON 对象，形如 "
+            '{"<table>": {"<CanonicalField>": "<ExportName>"}}'
+        )
+    result: dict[str, dict[str, str]] = {}
+    for table, fields in data.items():
+        if not isinstance(fields, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in fields.items()
+        ):
+            raise ValueError(
+                f"row-struct-map 表 {table!r} 的值必须是字段名到导出名的对象"
+                '（{"<CanonicalField>": "<ExportName>"}）'
+            )
+        result[table] = dict(fields)
+    return result
 
 
 def _mapping_for_path(mapping_doc: dict[str, Any], path: Path) -> FieldMapping | None:

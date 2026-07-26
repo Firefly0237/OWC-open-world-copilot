@@ -53,6 +53,8 @@ from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
+from ..errors import OWCopilotError
+
 logger = logging.getLogger(__name__)
 
 
@@ -178,7 +180,7 @@ class NumpyMatrixBackend:
         self._matrix = np.empty((0, 0), dtype=np.float32)
 
 
-class SqliteVecError(RuntimeError):
+class SqliteVecError(OWCopilotError, RuntimeError):
     """Raised when the sqlite-vec extension is unavailable or fails to load."""
 
 
@@ -602,7 +604,7 @@ _USEARCH_COARSE_FLOOR = 30
 _USEARCH_COARSE_MULTIPLIER = 3
 
 
-class UsearchError(RuntimeError):
+class UsearchError(OWCopilotError, RuntimeError):
     """Raised when the usearch package is unavailable or its index cannot be built/opened."""
 
 

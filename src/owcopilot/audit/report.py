@@ -62,13 +62,47 @@ def render_audit_markdown(
         lines.append(f"## {_SEVERITY_LABEL[severity]} ({len(block)})")
         lines.append("")
         for issue in sorted(block, key=lambda item: (item.rule_code, item.target_ref)):
-            lines.append(f"- `{issue.rule_code}` **{issue.target_ref}** — {issue.message}")
-            evidence_line = _evidence_summary(issue)
-            if evidence_line:
-                lines.append(f"  - evidence: {evidence_line}")
+            lines.extend(render_issue_markdown(issue))
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def render_issue_markdown(issue: Issue) -> list[str]:
+    """One issue as the report's own bullet block — the exact text a reader gets for that issue.
+
+    Factored out of :func:`render_audit_markdown` so anything that has to reason about "what does
+    the report actually tell someone about THIS issue" (the report-actionability measurement)
+    reads the shipping renderer instead of re-implementing it, and therefore tracks any future
+    change to the issue presentation automatically.
+    """
+    lines = [f"- `{issue.rule_code}` **{issue.target_ref}** — {issue.message}"]
+    # 行业报告 §15.9 的六要素：文件、行号、任务 id、节点 id、原因、建议动作。任务 id 与原因已经在
+    # 上面那行里（``target_ref`` 与 ``message``），其余四项按"读的人照着就能改"的顺序排：先说去哪
+    # 儿改（文件第几行、哪个节点），再说改成什么（建议动作）。定位不出来的条目不写空行，报告只声称
+    # 真定位到的那部分。
+    location = _location_line(issue)
+    if location:
+        lines.append(f"  - 位置:{location}")
+    if issue.suggested_action:
+        lines.append(f"  - 建议动作:{issue.suggested_action}")
+    evidence_line = _evidence_summary(issue)
+    if evidence_line:
+        lines.append(f"  - evidence: {evidence_line}")
+    return lines
+
+
+def _location_line(issue: Issue) -> str:
+    """文件 / 行号 / 节点 id 拼成的一行，三项都没有时返回空串。"""
+    parts: list[str] = []
+    if issue.source_path:
+        where = f"`{issue.source_path}`"
+        if issue.source_line is not None:
+            where += f" 第 {issue.source_line} 行"
+        parts.append(where)
+    if issue.node_ref:
+        parts.append(f"对话节点 `{issue.node_ref}`")
+    return ",".join(parts)
 
 
 def _evidence_summary(issue: Issue) -> str:

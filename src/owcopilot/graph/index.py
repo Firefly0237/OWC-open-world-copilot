@@ -120,6 +120,12 @@ class ContentGraph:
                 object_type="localized_text",
                 object_id=text.id,
             )
+        for tree in self.bundle.dialogue_trees.values():
+            self.g.add_node(
+                ref("dialogue_tree", tree.id),
+                object_type="dialogue_tree",
+                object_id=tree.id,
+            )
         for event_ref in self.bundle.quest_event_refs.values():
             self.g.add_node(
                 ref("quest_event_ref", event_ref.id),
@@ -181,6 +187,23 @@ class ContentGraph:
         for text in self.bundle.localized_texts.values():
             text_ref = ref("localized_text", text.id)
             self._add_ref(text_ref, ref("localization", text.text_key), "localized_text_key")
+
+        # A dialogue tree is wired to the quest it belongs to and to every entity that speaks in
+        # it, so an impact/neighbour query from a quest or an NPC reaches its conversations. A
+        # speaker id that names nothing still becomes a node (``object_ref`` falls back to
+        # ``entity:``) — exactly as an unknown ``giver_npc`` already does, which is what makes the
+        # dangling reference visible in the graph instead of silently dropped.
+        for tree in self.bundle.dialogue_trees.values():
+            tree_ref = ref("dialogue_tree", tree.id)
+            self._add_ref(tree_ref, ref("quest", tree.quest_id), "dialogue_tree_quest")
+            for participant in tree.participants:
+                self._add_ref(
+                    tree_ref, object_ref(self.bundle, participant), "dialogue_tree_participant"
+                )
+            for node in tree.nodes.values():
+                self._add_ref(
+                    tree_ref, object_ref(self.bundle, node.speaker_id), "dialogue_tree_speaker"
+                )
 
     def _add_relation_edge(self, relation: Relation, *, relation_ref: str) -> None:
         source = object_ref(self.bundle, relation.source)
@@ -289,6 +312,8 @@ def object_ref(bundle: ContentBundle, object_id: str | None) -> str | None:
         return ref("quest", object_id)
     if object_id in bundle.dialogues:
         return ref("dialogue", object_id)
+    if object_id in bundle.dialogue_trees:
+        return ref("dialogue_tree", object_id)
     if object_id in bundle.localized_texts:
         return ref("localized_text", object_id)
     return ref("entity", object_id)

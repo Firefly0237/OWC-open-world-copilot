@@ -441,6 +441,88 @@ def test_cli_export_unity_localization_optin(tmp_path, capsys) -> None:
     assert {"unity_localization_csv", "unity_localization_readme"} <= kinds
 
 
+def _write_clean_unreal_project(content_root) -> None:
+    ContentStore(content_root).save(
+        ContentBundle(
+            entities={"npc_aldric": Entity(id="npc_aldric", name="Aldric", type=EntityType.NPC)},
+            quests={
+                "q1": Quest(
+                    id="q1",
+                    title="Q1",
+                    giver_npc="npc_aldric",
+                    objective="Help Aldric.",
+                    localization_keys=["quest.q1.objective"],
+                )
+            },
+        )
+    )
+
+
+def test_cli_export_row_struct_map_renames_columns(tmp_path, capsys) -> None:
+    """A1 (CLI entry): --row-struct-map threads a rename file to the UE projection — the renamed
+    column reaches Quests.json and the row header, proving the flag is wired end to end."""
+    content_root = tmp_path / "content"
+    output_root = tmp_path / "exports"
+    _write_clean_unreal_project(content_root)
+    mapping = tmp_path / "row_struct_map.json"
+    mapping.write_text(
+        json.dumps({"quests": {"DisplayName": "sDisplayName"}}), encoding="utf-8"
+    )
+
+    assert (
+        main(
+            [
+                "export",
+                "--content-root",
+                str(content_root),
+                "--output-dir",
+                str(output_root),
+                "--target-engine",
+                "unreal",
+                "--row-struct-map",
+                str(mapping),
+            ]
+        )
+        == 0
+    )
+    unreal_dir = output_root / "unreal" / "unreal"
+    quests = json.loads((unreal_dir / "Quests.json").read_text(encoding="utf-8"))
+    row = next(r for r in quests if r["Name"] == "q1")
+    assert "sDisplayName" in row and "DisplayName" not in row
+    header = (unreal_dir / "OWCopilotRows.h").read_text(encoding="utf-8")
+    assert "FText sDisplayName;" in header
+
+
+def test_cli_export_row_struct_map_rejects_malformed_file(tmp_path, capsys) -> None:
+    """A5 boundary: a row-struct-map file whose value is not a field->name object is refused with a
+    guided error (exit 2 + JSON on stderr), not a raw traceback or a silent default-name export."""
+    content_root = tmp_path / "content"
+    output_root = tmp_path / "exports"
+    _write_clean_unreal_project(content_root)
+    mapping = tmp_path / "bad_map.json"
+    mapping.write_text(json.dumps({"quests": "not-an-object"}), encoding="utf-8")
+
+    exit_code = main(
+        [
+            "export",
+            "--content-root",
+            str(content_root),
+            "--output-dir",
+            str(output_root),
+            "--target-engine",
+            "unreal",
+            "--row-struct-map",
+            str(mapping),
+        ]
+    )
+    assert exit_code == 2
+    err = _read_stderr_json(capsys)
+    assert err["type"] == "ValueError"
+    assert "row-struct-map" in err["error"]
+    # The malformed map must abort before any UE file is written (no silent default-name export).
+    assert not (output_root / "unreal" / "unreal" / "Quests.json").exists()
+
+
 def test_cli_ask_refuses_without_context(tmp_path, capsys) -> None:
     content_root = tmp_path / "content"
     ContentStore(content_root).save(ContentBundle())

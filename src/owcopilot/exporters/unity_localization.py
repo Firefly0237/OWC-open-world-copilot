@@ -29,6 +29,7 @@ import io
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..content.lang import detect_language
 from ..content.models import ContentBundle
 from .models import ExportedFile
 
@@ -104,10 +105,15 @@ def locale_column_header(code: str) -> str:
 
 
 def _string_table(bundle: ContentBundle) -> tuple[list[str], list[str], dict[tuple[str, str], str]]:
-    """Pivot ``LocalizedText`` into (sorted keys, sorted locale codes, {(key, locale): text}).
+    """Pivot ``LocalizedText`` (plus opted-in dialogue-tree text) into (sorted keys, sorted locale
+    codes, {(key, locale): text}).
 
-    The Key set is exactly the set of ``LocalizedText.text_key`` values; a missing (key, locale)
-    pair is simply absent from the map, so its cell is written empty."""
+    The Key set is the ``LocalizedText.text_key`` set, extended with the ``text_key`` of every
+    dialogue-tree node/choice that has one set (A1 remediation — the same key space, so a
+    translated dialogue-tree line lands as an ordinary row here). A missing (key, locale) pair is
+    simply absent from the map, so its cell is written empty. A node/choice carries no explicit
+    ``locale`` field, so it is bucketed under its detected script/language
+    (:func:`~owcopilot.content.lang.detect_language`), matching the XLIFF/CSV exporter's choice."""
     keys: set[str] = set()
     locales: set[str] = set()
     cells: dict[tuple[str, str], str] = {}
@@ -115,7 +121,31 @@ def _string_table(bundle: ContentBundle) -> tuple[list[str], list[str], dict[tup
         keys.add(text.text_key)
         locales.add(text.locale)
         cells[(text.text_key, text.locale)] = text.text
+    for tree in bundle.dialogue_trees.values():
+        for node in tree.nodes.values():
+            _add_dialogue_tree_cell(keys, locales, cells, node.text_key, node.text)
+            for choice in node.choices:
+                _add_dialogue_tree_cell(keys, locales, cells, choice.text_key, choice.text)
     return sorted(keys), sorted(locales), cells
+
+
+def _add_dialogue_tree_cell(
+    keys: set[str],
+    locales: set[str],
+    cells: dict[tuple[str, str], str],
+    text_key: str,
+    text: str,
+) -> None:
+    """Add one dialogue-tree node/choice's text to the string table, keyed by its detected locale.
+
+    A no-op when ``text_key`` or ``text`` is empty, so a keyless (pre-existing) node/choice never
+    contributes a row."""
+    if not text_key or not text:
+        return
+    locale = detect_language(text).dominant
+    keys.add(text_key)
+    locales.add(locale)
+    cells[(text_key, locale)] = text
 
 
 def render_string_table_csv(bundle: ContentBundle) -> str:
@@ -140,7 +170,7 @@ def write_unity_localization(
     Returns the file entries (paths relative to ``unity_dir``, so the caller prefixes ``unity/``,
     mirroring how ``write_unity_manifest`` records its file) plus the summary the sidecar manifest
     records for cross-checking."""
-    _, locales, _ = _string_table(bundle)
+    keys, locales, _ = _string_table(bundle)
     output = Path(unity_dir) / UNITY_LOCALIZATION_SUBDIR
     output.mkdir(parents=True, exist_ok=True)
 
@@ -159,7 +189,7 @@ def write_unity_localization(
         collection_name=STRING_TABLE_COLLECTION_NAME,
         csv_path=f"{UNITY_LOCALIZATION_SUBDIR}/{UNITY_STRING_TABLE_FILENAME}",
         locales=locales,
-        string_count=len({text.text_key for text in bundle.localized_texts.values()}),
+        string_count=len(keys),
     )
     return files, summary
 

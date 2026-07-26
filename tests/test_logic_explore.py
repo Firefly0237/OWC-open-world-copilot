@@ -400,9 +400,16 @@ def test_quest_without_stages_is_single_completed_outcome() -> None:
 # --------------------------------------------------------------------------------------------------
 
 
-def test_default_audit_registry_is_unchanged_and_has_no_explore_rule() -> None:
+def test_default_audit_registry_has_no_explore_rule() -> None:
     codes = build_default_rule_registry().codes()
-    # 30: bumped from 29 for POI_UNKNOWN_REGION_REF (MissingRegionReferenceRule, scale-p0 batch 2)
-    # closing the POI->region audit gap — unrelated to the exploration-report claim below.
-    assert len(codes) == 30  # the exploration report is a diagnostic tool, never an audit rule
-    assert not any("EXPLORE" in code for code in codes)
+    # 33: 30 (scale-p0 batch 2) + FLAG_TEMPORAL_INVARIANT (Phase D sliced-CTL temporal-invariant
+    # rule) + DIALOGUE_TREE_MISSING_TEXT_KEY (A1 localization remediation: flags a dialogue-tree
+    # line with text but no text_key, since that line cannot reach localization export) +
+    # DIALOGUE_SELF_REPORT_INCONSISTENCY (a choice sets a bool self-report var; a later reachable,
+    # ungated choice flips it back) + DIALOGUE_UNGATED_SIBLING_CHOICE (one choice on a node is
+    # gated on a bool var, a sibling on the SAME node is not -- the shape where the contradicting
+    # line writes no variable back; see audit/rules/dialogue_rules.py for both rules' criteria).
+    # All four are separate, deliberate additions; the exploration REPORT below remains a
+    # diagnostic only, never an audit rule.
+    assert len(codes) == 34
+    assert not any("EXPLORE" in code for code in codes)  # the coverage report is never a rule

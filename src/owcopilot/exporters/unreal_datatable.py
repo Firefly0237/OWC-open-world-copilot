@@ -48,6 +48,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from ..content.models import ContentBundle, Effect
+from ..errors import OWCopilotError
+from ..logic.dnf import Atom, compile_condition
 from .models import ExportedFile
 
 HandleStyle = Literal["rowhandle", "string"]
@@ -180,6 +182,81 @@ def _encode_logic_value(value: bool | int | str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+# --- B1/B2 (blueprint_friendly demo variant only) -----------------------------------------------
+#
+# A UE Blueprint has neither an expression parser nor a JSON-string decoder, so the *demo* export
+# variant additionally compiles conditions (B1, ``logic/dnf.py``) and structures effects (B2) into
+# a flat ``{Var, Op, Value}`` clause shape a Blueprint can read as a plain DataTable array column —
+# no new parser, no C++, matching the "complexity stays in the pipeline, not the runtime" decision
+# in 求职导向整改计划.md §2. These three tables/columns are strictly ADDITIVE (never touch the
+# existing "Condition"/"Effects" string columns) and only ever populate when ``blueprint_friendly``
+# is explicitly passed, so the default export stays byte-for-byte unchanged — see
+# ``export_unreal_datatables``'s docstring.
+
+# The 3 demo tables B2 scopes this to (求职导向整改计划.md §3 "demo 只用 3 张表"). Reference fields
+# on these tables serialize as bare row-name strings under ``blueprint_friendly`` regardless of the
+# caller's ``handle_style`` — the demo's hand-built structs are simple String/Int/Bool fields, and
+# there is no C++ FDataTableRowHandle to bind to without a compiler.
+_BP_STRING_HANDLE_TABLES = frozenset(
+    {"dialogue_tree_nodes", "dialogue_tree_choices", "quest_logic_vars"}
+)
+
+# Same demo-only carve-out for the dialogue tree's own ``Text`` column (A1 之后的薄壳修正): the
+# 纯蓝图 demo has no StringTable asset hand-built and bound in the editor, so a bare
+# ``text_key`` value is undisplayable dead weight. Under ``blueprint_friendly`` these two tables'
+# ``Text`` field inlines the source line instead — see ``_field_value``'s ``_Role.LOCALIZED``
+# branch — while the companion StringTable CSV keeps shipping unchanged (real localization still
+# needs it; only the DataTable *column* changes for the demo).
+_BP_INLINE_TEXT_TABLES = frozenset({"dialogue_tree_nodes", "dialogue_tree_choices"})
+
+
+def _bp_value_str(value: bool | int | str) -> str:
+    """Stringify one clause/effect atom's value for Blueprint consumption. ``Value`` is always a
+    plain FString (never a polymorphic/typed field, per the B2 decision) — the Blueprint side
+    converts it using the paired ``QuestLogicVars.VarType`` row. ``true``/``false`` (lowercase)
+    matches the logic DSL's own literal spelling (``expr.py``'s ``BoolLit``), not Python's
+    ``True``/``False``."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _atom_to_bp_clause(atom: Atom) -> dict[str, str]:
+    return {"Var": atom.var, "Op": atom.op, "Value": _bp_value_str(atom.value)}
+
+
+def _condition_bp_columns(condition: str) -> dict[str, Any]:
+    """``ConditionClauses`` (flat array, populated only for a pure-AND/no-OR compile) +
+    ``ConditionCompilable`` (always present) — B1's demo export contract. When the condition needs
+    OR or fails to compile at all, ``ConditionCompilable=False`` and ``ConditionClauses`` stays
+    empty; the Blueprint side falls back to treating the gate as unavailable (demo content is
+    authored to stay within the flat-AND subset, per 求职导向整改计划.md §B1)."""
+    flat = compile_condition(condition).single_and_group
+    return {
+        "ConditionClauses": [_atom_to_bp_clause(a) for a in flat] if flat is not None else [],
+        "ConditionCompilable": flat is not None,
+    }
+
+
+def _effects_bp_column(effects: list[Effect]) -> list[dict[str, str]]:
+    """``EffectsStructured`` — the same ``{Var, Op, Value}`` clause shape as conditions (one shared
+    Blueprint helper struct for both, per the B2 decision), added alongside the existing
+    JSON-string ``Effects`` column rather than replacing it."""
+    return [{"Var": e.var, "Op": e.op, "Value": _bp_value_str(e.value)} for e in effects]
+
+
+def _speaker_display_name(bundle: ContentBundle, speaker_id: str | None) -> str:
+    """``SpeakerName`` (demo-only column on ``DialogueTreeNodes``): the speaking entity's display
+    name, so the Blueprint dialogue UI can show "贾母" instead of the raw id ``jiamu`` without a
+    second table lookup. Empty when ``speaker_id`` is unset or does not resolve to an exported
+    entity — ``DialogueTreeUnknownSpeakerRule`` already flags that case during audit, so the export
+    layer does not re-judge it here."""
+    if not speaker_id:
+        return ""
+    entity = bundle.entities.get(speaker_id)
+    return entity.name if entity else ""
+
+
 @dataclass(frozen=True)
 class _StageRow:
     """A quest stage joined with its StageLogic (both keyed by stage_id). Driven by the UNION of
@@ -238,6 +315,7 @@ class _NodeRow:
     node_id: str
     speaker_id: str | None
     text: str
+    text_key: str
     next_node: str | None
 
 
@@ -247,6 +325,7 @@ class _ChoiceRow:
     node_id: str
     ordinal: int
     text: str
+    text_key: str
     next_node: str | None
     condition: str
     effects: list[Effect]
@@ -356,6 +435,7 @@ def _iter_tree_node_rows(bundle: ContentBundle) -> Iterable[_NodeRow]:
                 node_id=node.id,
                 speaker_id=node.speaker_id,
                 text=node.text,
+                text_key=node.text_key,
                 next_node=node.next_node,
             )
 
@@ -369,6 +449,7 @@ def _iter_tree_choice_rows(bundle: ContentBundle) -> Iterable[_ChoiceRow]:
                     node_id=node.id,
                     ordinal=ordinal,
                     text=choice.text,
+                    text_key=choice.text_key,
                     next_node=choice.next_node,
                     condition=choice.condition,
                     effects=list(choice.effects),
@@ -480,7 +561,10 @@ _DIALOGUE_TREE_NODE_FIELDS: tuple[_FieldSpec, ...] = (
     _FieldSpec("Tree", UEType.ROW_HANDLE, _Role.REFERENCE, lambda n: n.tree_id),
     _FieldSpec("NodeId", UEType.FSTRING, _Role.SCALAR, lambda n: n.node_id),
     _FieldSpec("Speaker", UEType.ROW_HANDLE, _Role.REFERENCE, lambda n: n.speaker_id),
-    _FieldSpec("Text", UEType.FTEXT, _Role.SCALAR, lambda n: n.text),
+    # A1 remediation: LOCALIZED like _DIALOGUE_FIELDS' "Text" above. A node with no text_key (every
+    # pre-existing tree) falls back to the old SCALAR behaviour inside _field_value, so this is a
+    # pure opt-in — nothing changes for a tree that never sets text_key.
+    _FieldSpec("Text", UEType.FTEXT, _Role.LOCALIZED, lambda n: (n.text_key, n.text, True)),
     _FieldSpec(
         "NextNode", UEType.ROW_HANDLE, _Role.REFERENCE, lambda n: _node_ref(n.tree_id, n.next_node)
     ),
@@ -492,7 +576,8 @@ _DIALOGUE_TREE_CHOICE_FIELDS: tuple[_FieldSpec, ...] = (
         "Node", UEType.ROW_HANDLE, _Role.REFERENCE, lambda c: _composite(c.tree_id, c.node_id)
     ),
     _FieldSpec("Ordinal", UEType.INT32, _Role.SCALAR, lambda c: c.ordinal),
-    _FieldSpec("Text", UEType.FTEXT, _Role.SCALAR, lambda c: c.text),
+    # A1 remediation: same opt-in LOCALIZED switch as the node's "Text" field above.
+    _FieldSpec("Text", UEType.FTEXT, _Role.LOCALIZED, lambda c: (c.text_key, c.text, True)),
     _FieldSpec(
         "NextNode", UEType.ROW_HANDLE, _Role.REFERENCE, lambda c: _node_ref(c.tree_id, c.next_node)
     ),
@@ -595,6 +680,104 @@ _TABLE_SPECS: tuple[_TableSpec, ...] = (
     ),
 )
 
+
+# --- audit findings (blueprint_friendly demo variant only, call-scoped) -------------------------
+#
+# The demo's headline feature is "the audit is visible in the running game": a Blueprint listens
+# for a WARNING like DIALOGUE_UNGATED_SIBLING_CHOICE on the node the player just entered and shows a
+# hint. The exporter has no business importing the audit package to get there (that would make a
+# report-time module depend on the whole audit/rule surface, and risks a future accidental import
+# cycle) -- so it accepts findings in its OWN small vocabulary (``AuditFindingInput``), and the
+# caller (``pipeline/export_gate.py``, which already imports both layers to run the release gate)
+# does the one translation from ``audit.models.Issue``.
+#
+# Unlike every other table, this one's rows are NOT derived from the ``ContentBundle`` -- they are
+# call-scoped input -- so it is built as a fresh ``_TableSpec`` per call (closing over the caller's
+# findings) instead of living in the module-level ``_TABLE_SPECS`` tuple, and is appended to the
+# effective table list only when both ``blueprint_friendly=True`` AND a caller actually passes
+# ``audit_findings`` -- so every existing call site (none of which pass it) is untouched byte-for-
+# byte, including ``OWCopilotRows.h`` (no ``FAuditFindingRow`` struct appears unless requested).
+
+
+@dataclass(frozen=True)
+class AuditFindingInput:
+    """One audit finding, translated into the exporter's own vocabulary so this module never has to
+    import ``owcopilot.audit`` (see the section banner above). ``evidence_paths`` are exactly the
+    ``Evidence.path`` strings the audit rule recorded (already plain strings, e.g.
+    ``"nodes/n030/choices/0"``) -- the exporter extracts a dialogue node id out of them itself, so a
+    Blueprint can filter findings by ``NodePath`` without knowing the audit's evidence-path grammar.
+    """
+
+    rule_code: str
+    severity: str
+    target_ref: str
+    message: str
+    evidence_paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _NamedFinding:
+    """An ``AuditFindingInput`` with its export row ``Name`` already assigned — see
+    ``_name_findings``. The row-builder machinery below only ever sees this wrapper."""
+
+    name: str
+    finding: AuditFindingInput
+
+
+_NODE_PATH_RE = re.compile(r"^nodes/([^/]+)/")
+
+
+def _finding_node_path(finding: AuditFindingInput) -> str:
+    """The dialogue node id embedded in a finding's evidence path (``nodes/<id>/...`` — the shape
+    ``audit/rules/dialogue_rules.py`` writes into ``Evidence.path``), or '' when no evidence path
+    matches -- a finding that is not about a dialogue node simply leaves the column empty rather
+    than guessing."""
+    for path in finding.evidence_paths:
+        match = _NODE_PATH_RE.match(path)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _name_findings(findings: Iterable[AuditFindingInput]) -> list[_NamedFinding]:
+    """Assign each finding a stable, reproducible row ``Name``: ``<rule_code>::<ordinal>``, the
+    ordinal counted per rule code (not globally) and zero-padded to 4 digits so the generic
+    ``Name``-string sort in ``_build_rows`` never misorders a rule code with 10+ findings. Purely a
+    function of the input list's own (already-deterministic) order -- never a random id or a
+    timestamp, so the same findings re-exported twice produce byte-identical rows."""
+    counters: dict[str, int] = {}
+    named: list[_NamedFinding] = []
+    for finding in findings:
+        ordinal = counters.get(finding.rule_code, 0)
+        counters[finding.rule_code] = ordinal + 1
+        named.append(_NamedFinding(name=f"{finding.rule_code}::{ordinal:04d}", finding=finding))
+    return named
+
+
+_AUDIT_FINDING_FIELDS: tuple[_FieldSpec, ...] = (
+    _FieldSpec("RuleCode", UEType.FSTRING, _Role.SCALAR, lambda w: w.finding.rule_code),
+    _FieldSpec("Severity", UEType.FSTRING, _Role.SCALAR, lambda w: w.finding.severity),
+    _FieldSpec("TargetRef", UEType.FSTRING, _Role.SCALAR, lambda w: w.finding.target_ref),
+    _FieldSpec("Message", UEType.FSTRING, _Role.SCALAR, lambda w: w.finding.message),
+    _FieldSpec("NodePath", UEType.FSTRING, _Role.SCALAR, lambda w: _finding_node_path(w.finding)),
+)
+
+
+def _audit_findings_table_spec(named: list[_NamedFinding]) -> _TableSpec:
+    """Build the ``AuditFindings`` table spec for ONE export call, closing over the caller-supplied,
+    already-named findings. Not a ``_TABLE_SPECS`` entry (its rows are call-scoped input, not
+    derived from the ``ContentBundle``); ``export_unreal_datatables`` appends it to the per-call
+    table list only when the caller opts in (see the section banner above)."""
+    return _TableSpec(
+        key="audit_findings",
+        struct_name="AuditFindingRow",
+        filename="AuditFindings.json",
+        select=lambda _bundle: named,
+        id_of=lambda w: w.name,
+        fields=_AUDIT_FINDING_FIELDS,
+    )
+
+
 _HEADER_FILENAME = "OWCopilotRows.h"
 _PREFLIGHT_FILENAME = "unreal_preflight.json"
 
@@ -639,7 +822,7 @@ class UnrealExportResult(BaseModel):
     string_tables: list[str] = Field(default_factory=list)  # <table>_strings.csv filenames written
 
 
-class UnrealExportError(Exception):
+class UnrealExportError(OWCopilotError):
     """Raised when preflight finds blocking (ERROR) contract violations and ``force`` is not set.
 
     Carries a guided message (what is wrong + how to fix) plus the full report, so callers surface a
@@ -724,6 +907,7 @@ def _build_rows(
     row_struct_map: dict[str, dict[str, str]],
     handle_style: HandleStyle,
     text_mode: TextMode,
+    blueprint_friendly: bool = False,
 ) -> tuple[list[dict[str, Any]], list[tuple[str, str]], list[_Ref], set[str]]:
     """Build one table's row-array. Returns (rows, string_table_rows, refs, relation_kinds)."""
     rows: list[dict[str, Any]] = []
@@ -743,7 +927,12 @@ def _build_rows(
         for field in spec.fields:
             value = field.extract(obj)
             emitted, sub_refs, sub_strings = _field_value(
-                spec, field, value, handle_style=handle_style, text_mode=text_mode
+                spec,
+                field,
+                value,
+                handle_style=handle_style,
+                text_mode=text_mode,
+                blueprint_friendly=blueprint_friendly,
             )
             if emitted is _OMIT:
                 continue
@@ -761,6 +950,17 @@ def _build_rows(
                     targets, handle_style
                 )
                 refs.extend(_Ref(spec.key, kind, t) for t in targets)
+
+        if blueprint_friendly and spec.key == "dialogue_tree_nodes":
+            # obj is a _NodeRow here (this table's `select`) — additive-only, never touches the
+            # "Speaker" id column just written above by the generic field loop.
+            row["SpeakerName"] = _speaker_display_name(bundle, obj.speaker_id)
+
+        if blueprint_friendly and spec.key == "dialogue_tree_choices":
+            # obj is a _ChoiceRow here (this table's `select`) — additive-only, never touches the
+            # "Condition"/"Effects" string columns just written above by the generic field loop.
+            row.update(_condition_bp_columns(obj.condition))
+            row["EffectsStructured"] = _effects_bp_column(obj.effects)
 
         rows.append(row)
 
@@ -782,6 +982,7 @@ def _field_value(
     *,
     handle_style: HandleStyle,
     text_mode: TextMode,
+    blueprint_friendly: bool = False,
 ) -> tuple[Any, list[_Ref], list[tuple[str, str]]]:
     """Resolve one field to (json_value | _OMIT, refs, string_table_rows)."""
     if field.role is _Role.CONSTANT:
@@ -815,14 +1016,30 @@ def _field_value(
 
     # _Role.LOCALIZED — an FText carrying a text_key.
     text_key, text, locale = value
+    if blueprint_friendly and spec.key in _BP_INLINE_TEXT_TABLES:
+        # 薄壳 demo:蓝图侧没有手建的 StringTable 资产可绑定，DataTable 列直接写台词原文而不是
+        # text_key，与 text_mode 旋钮无关（复用 A1 的"无 text_key 退化为 SCALAR"兜底）；伴生
+        # StringTable CSV 仍按下面 stringtable 分支同样的口径产出，本地化管线不因 demo 退化。
+        if not text_key:
+            if not text:
+                return _OMIT, [], []
+            return text, [], []
+        strings = [(text_key, text)] if (text is not None and locale) else []
+        return text, [], strings
     if text_mode == "inline":
         if not text:
             return _OMIT, [], []
         return text, [], []
-    # stringtable: the field value is the StringTable key; the source string travels in the
-    # companion CSV, gated exactly like xliff._units (text present + locale non-empty).
     if not text_key:
-        return _OMIT, [], []
+        # No key declared for this field (e.g. a dialogue-tree node/choice with text but no
+        # opted-in text_key -- every pre-existing tree). Fall back to the plain SCALAR behaviour
+        # this field had before A1, so key-less content keeps exporting byte-identically; the
+        # StringTable path below only activates once a field actually carries a text_key.
+        if not text:
+            return _OMIT, [], []
+        return text, [], []
+    # stringtable: the field value is the StringTable key; the source string travels in the
+    # companion CSV, gated exactly like xliff._units (text present + locale truthy).
     strings = [(text_key, text)] if (text is not None and locale) else []
     return text_key, [], strings
 
@@ -833,6 +1050,7 @@ def _field_value(
 def _run_preflight(
     bundle: ContentBundle,
     *,
+    table_specs: tuple[_TableSpec, ...],
     row_struct_map: dict[str, dict[str, str]],
     text_mode: TextMode,
     universe: set[str],
@@ -879,7 +1097,7 @@ def _run_preflight(
                 )
             )
 
-    for spec in _TABLE_SPECS:
+    for spec in table_specs:
         for field in spec.fields:
             validate_name(spec.key, field.name, field.ue_type)
         for kind in sorted(relation_kinds_by_table.get(spec.key, set())):
@@ -929,6 +1147,7 @@ def _run_preflight(
 
 
 def _render_cpp_header(
+    table_specs: tuple[_TableSpec, ...],
     row_struct_map: dict[str, dict[str, str]],
     relation_kinds_by_table: dict[str, set[str]],
 ) -> str:
@@ -948,7 +1167,7 @@ def _render_cpp_header(
         '#include "OWCopilotRows.generated.h"',
         "",
     ]
-    for spec in _TABLE_SPECS:
+    for spec in table_specs:
         lines.append("USTRUCT(BlueprintType)")
         lines.append(f"struct F{spec.struct_name} : public FTableRowBase")
         lines.append("{")
@@ -983,6 +1202,8 @@ def export_unreal_datatables(
     handle_style: HandleStyle = "rowhandle",
     text_mode: TextMode = "stringtable",
     force: bool = False,
+    blueprint_friendly: bool = False,
+    audit_findings: Iterable[AuditFindingInput] | None = None,
 ) -> UnrealExportResult:
     """Export a ContentBundle as UE DataTable row-array JSON + StringTable CSVs + a row header.
 
@@ -994,14 +1215,46 @@ def export_unreal_datatables(
     and collects ``(text_key, text)`` into ``<table>_strings.csv`` (reusing the xliff text_key
     source — no duplicated strings); ``"inline"`` writes the source string directly.
 
+    ``blueprint_friendly=False`` (default) changes NOTHING — every table, column and byte is exactly
+    as before. When ``True`` (the 求职导向整改计划.md B1/B2 "demo variant", for a pure-Blueprint UE
+    project with no C++ and no expression parser), three tables get additive treatment: on
+    ``DialogueTreeChoices``, ``Condition`` is compiled to DNF (``logic/dnf.py``) and the flat
+    (no-OR) case lands in a new ``ConditionClauses``/``ConditionCompilable`` column pair, and
+    ``Effects`` gets a new structured-array sibling column ``EffectsStructured`` — both alongside
+    the original string columns, never replacing them. On ``DialogueTreeNodes``,
+    ``DialogueTreeChoices`` and ``QuestLogicVars``, reference fields serialize as bare row-name
+    strings (as if ``handle_style="string"``) regardless of the ``handle_style`` argument, which
+    still governs every other table normally — the demo's hand-built Blueprint structs are simple
+    String/Int/Bool fields with no ``FDataTableRowHandle`` to bind to. ``DialogueTreeNodes`` also
+    gets an additive ``SpeakerName`` column (the ``Speaker`` entity id's display name, e.g.
+    ``jiamu`` -> "贾母"), empty when the speaker is unset or unresolved, so the demo dialogue UI
+    shows a name without a second table lookup.
+
+    ``DialogueTreeNodes.Text``/``DialogueTreeChoices.Text`` also inline the source line directly
+    (as ``text_mode="inline"`` would), regardless of the ``text_mode`` argument — a hand-built
+    Blueprint DataTable has no StringTable asset bound in the editor, so a bare ``text_key`` value
+    would be undisplayable. The companion ``<table>_strings.csv`` still ships unchanged (real
+    localization does not degrade for the demo).
+
+    ``audit_findings`` (default ``None``, effective only when ``blueprint_friendly=True``): a list
+    of :class:`AuditFindingInput` to project into an additive ``AuditFindings.json`` table (fields
+    ``RuleCode``/``Severity``/``TargetRef``/``Message``/``NodePath``, row ``Name``
+    ``<rule_code>::<ordinal>``), so a Blueprint can look up what the deterministic audit flagged for
+    the node the player is currently on. Omitted or empty -> no such table, no ``FAuditFindingRow``
+    struct in the header — every pre-existing call site is unaffected.
+
     Preflight validates the contract; blocking (ERROR) issues raise ``UnrealExportError`` (nothing
     is written) unless ``force=True``. Warnings never block.
     """
     row_struct_map = row_struct_map or {}
     output = Path(output_dir)
 
+    table_specs = _TABLE_SPECS
+    if blueprint_friendly and audit_findings is not None:
+        table_specs = table_specs + (_audit_findings_table_spec(_name_findings(audit_findings)),)
+
     universe: set[str] = set()
-    for spec in _TABLE_SPECS:
+    for spec in table_specs:
         universe.update(spec.id_of(o) for o in spec.select(bundle))
 
     built: dict[str, list[dict[str, Any]]] = {}
@@ -1009,13 +1262,19 @@ def export_unreal_datatables(
     all_refs: list[_Ref] = []
     relation_kinds_by_table: dict[str, set[str]] = {}
 
-    for spec in _TABLE_SPECS:
+    for spec in table_specs:
+        effective_handle_style: HandleStyle = (
+            "string"
+            if blueprint_friendly and spec.key in _BP_STRING_HANDLE_TABLES
+            else handle_style
+        )
         rows, string_rows, refs, relation_kinds = _build_rows(
             spec,
             bundle,
             row_struct_map=row_struct_map,
-            handle_style=handle_style,
+            handle_style=effective_handle_style,
             text_mode=text_mode,
+            blueprint_friendly=blueprint_friendly,
         )
         built[spec.key] = rows
         string_rows_by_table[spec.key] = string_rows
@@ -1025,6 +1284,7 @@ def export_unreal_datatables(
     any_strings = any(string_rows_by_table.values())
     report = _run_preflight(
         bundle,
+        table_specs=table_specs,
         row_struct_map=row_struct_map,
         text_mode=text_mode,
         universe=universe,
@@ -1040,7 +1300,7 @@ def export_unreal_datatables(
     tables: list[str] = []
     string_tables: list[str] = []
 
-    for spec in _TABLE_SPECS:
+    for spec in table_specs:
         rows = built[spec.key]
         if not rows:
             continue
@@ -1056,7 +1316,7 @@ def export_unreal_datatables(
             files.append(_file_entry(output, csv_name, "string_table"))
             string_tables.append(csv_name)
 
-    header = _render_cpp_header(row_struct_map, relation_kinds_by_table)
+    header = _render_cpp_header(table_specs, row_struct_map, relation_kinds_by_table)
     (output / _HEADER_FILENAME).write_text(header, encoding="utf-8")
     files.append(_file_entry(output, _HEADER_FILENAME, "row_struct_header"))
 

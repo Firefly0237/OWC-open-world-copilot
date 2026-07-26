@@ -11,6 +11,15 @@ from pydantic import BaseModel
 
 
 def _canonical_payload(value: Any) -> Any:
+    """Canonicalize for hashing: dicts sort by key, lists keep their order.
+
+    Lists are deliberately NOT sorted. Most lists in the content models are order-significant
+    (``Quest.stages``, ``DialogueNode.choices``, story beats …) and reordering them would make two
+    genuinely different worlds hash the same. The one list whose semantics are a *set* —
+    ``ContentBundle.relations`` — is canonicalized by its own model's serializer
+    (:func:`~owcopilot.content.models.relation_sort_key`), so it arrives here already ordered and
+    this function stays free of any per-field special-casing.
+    """
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json", exclude_none=True)
     if isinstance(value, dict):

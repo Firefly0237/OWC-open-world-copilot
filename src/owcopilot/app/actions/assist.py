@@ -9,6 +9,7 @@ re-exports every action so existing imports keep working."""
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -493,8 +494,17 @@ def run_theme_sweep_action(
     progress: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Theme sweep over the whole world (term layer + semantic paraphrase layer + optional LLM
-    judge + graph expansion). Read-only: produces a work order for a human, writes nothing."""
-    from ...assist.sweep import OfflineSweepJudgeProvider, ThemeSweepService, render_sweep_markdown
+    judge + graph expansion). Read-only over canon: produces a work order for a human, writes no
+    canon. Dismissals a reviewer made for THIS theme (逐一排除) are auto-loaded from the per-world
+    ``SweepExclusionStore`` and suppressed, so a dismiss made via the product path bites on re-run;
+    ``dismissed_count`` reports how many were suppressed. Passing no dismissals is the default and
+    keeps the sweep behaviour and response identical to before (backward compatible)."""
+    from ...assist.sweep import (
+        OfflineSweepJudgeProvider,
+        SweepExclusionStore,
+        ThemeSweepService,
+        render_sweep_markdown,
+    )
 
     with _project(content_root, sqlite_path) as project:
         gateway = None
@@ -506,6 +516,9 @@ def run_theme_sweep_action(
                 llm_model=llm_model,
                 offline_provider=OfflineSweepJudgeProvider(),
             )
+        # Auto-load this theme's previously-dismissed findings from the per-world ledger and feed
+        # them to the sweep. Empty (the common case, and any first run) → identical to before.
+        exclusions = SweepExclusionStore(project.content_store.root).dismissed_ids(theme)
         report = ThemeSweepService(
             bundle=project.bundle,
             gateway=gateway,
@@ -518,6 +531,7 @@ def run_theme_sweep_action(
             use_llm=use_llm,
             max_judge=max_judge,
             semantic_threshold=semantic_threshold,
+            exclusions=exclusions,
             progress=progress,
         )
         if use_llm:
@@ -532,8 +546,11 @@ def run_theme_sweep_action(
             "semantic_flagged": report.semantic_flagged,
             "judged_count": report.judged_count,
             "judge_skipped": report.judge_skipped,
+            # per-finding dismissal handle (finding_id) and sentence-level location (locator) ride
+            # through on finding.__dict__ so "逐一排除" and句级定位 are visible to any client.
             "hits": [finding.__dict__ for finding in report.hits],
             "review_suggested": [finding.__dict__ for finding in report.review_suggested],
+            "dismissed_count": report.dismissed_count,
             "markdown": render_sweep_markdown(report),
             "cost_budget": (
                 summarize_workflow([llm_step("theme_sweep", telemetry_summary)]).budget.model_dump(
@@ -542,6 +559,51 @@ def run_theme_sweep_action(
                 if telemetry_summary is not None
                 else _deterministic_cost_budget("theme_sweep")
             ),
+        }
+
+
+def dismiss_sweep_finding_action(
+    content_root: str | Path,
+    *,
+    theme: str,
+    finding_id: str,
+    ref: str,
+    operator: str,
+    locator: str = "",
+    layer: str = "",
+    reason: str = "",
+    sqlite_path: str | None = None,
+) -> dict[str, Any]:
+    """逐一排除: mark ONE sweep finding a false positive so re-running the SAME theme no longer
+    surfaces it. The dismissal is signed (operator) and persisted in the per-world
+    ``SweepExclusionStore`` beside the world (no canon write). The caller passes back the finding's
+    identity from a prior sweep response — ``finding_id`` is the stable dismissal key, ``ref`` /
+    ``locator`` / ``layer`` are the audit trail persisted with it."""
+    from ...assist.sweep import SweepExclusionStore, SweepFinding
+
+    if not str(finding_id).strip():
+        raise ValueError("缺少排除码（finding_id），无法逐一排除")
+    with _project(content_root, sqlite_path) as project:
+        store = SweepExclusionStore(project.content_store.root)
+        # A transient finding carrying only what the store persists (finding_id/ref/locator/layer);
+        # the display fields (name/evidence/verdict) are not stored, so they stay empty here.
+        finding = SweepFinding(
+            ref=ref,
+            name="",
+            object_kind="",
+            layer=layer,
+            evidence="",
+            verdict="",
+            locator=locator,
+            finding_id=finding_id,
+        )
+        exclusion = store.dismiss(finding, theme, operator=operator, reason=reason)
+        return {
+            "dismissed": True,
+            "finding_id": exclusion.finding_id,
+            "theme": exclusion.theme,
+            "exclusion": asdict(exclusion),
+            "cost_budget": _deterministic_cost_budget("sweep_dismiss"),
         }
 
 
@@ -579,6 +641,9 @@ def detect_contradictions_action(
         return {
             "candidate_count": report.candidate_count,
             "judged_count": report.judged_count,
+            # honesty counter: candidates past ``max_judge`` the judge never read (kept as review,
+            # never silently dropped) — surfaced so the product can say "N pairs still unjudged".
+            "judge_skipped": report.judge_skipped,
             "semantic_used": report.semantic_used,
             "llm_used": report.llm_used,
             "contradictions": [f.__dict__ for f in report.contradictions],

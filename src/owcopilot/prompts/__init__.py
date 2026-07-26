@@ -29,7 +29,7 @@ from typing import Any
 class PromptSpec:
     """One registered prompt: identity + review metadata + a live reference to the object."""
 
-    name: str  # unique dotted id, e.g. "agent.react.system.text"
+    name: str  # unique dotted id, e.g. "agent.react.system.native"
     purpose: str  # one line: what this prompt makes the model do
     task: str  # router/telemetry task label the call runs under ("" = composed into another)
     kind: str  # "static" | "template" | "fragment" | "builder"
@@ -106,15 +106,6 @@ def _spec(
 PROMPT_SPECS: tuple[PromptSpec, ...] = (
     # -- agent loop ---------------------------------------------------------------------------
     _spec(
-        "agent.react.system.text",
-        "Drive the text ReAct loop: one Thought + one Action (or Final Answer) per turn, never "
-        "self-authored Observations, tools only from the manifest.",
-        "agent_react",
-        "template",
-        "Thought/Action/Action Input lines, or Thought/Final Answer",
-        "owcopilot.agent.react:_SYSTEM_PROMPT",
-    ),
-    _spec(
         "agent.react.system.native",
         "Drive the native function-calling loop: same role/safety rules as the text prompt; "
         "actions are structured tool_calls and the tool list travels in the tools schema, not "
@@ -132,7 +123,7 @@ PROMPT_SPECS: tuple[PromptSpec, ...] = (
         "agent_react",
         "static",
         "Thought/Final Answer lines (no Action)",
-        "owcopilot.agent.react:_GENERATE_FINISH_SYSTEM",
+        "owcopilot.agent.middleware:_GENERATE_FINISH_SYSTEM",
     ),
     _spec(
         "agent.compressor.system",
@@ -269,6 +260,18 @@ PROMPT_SPECS: tuple[PromptSpec, ...] = (
         # _parse_logic() (logic/draft.py) validates the parsed JSON directly via
         # QuestLogic.model_validate(data).
         schema="owcopilot.content.models:QuestLogic",
+    ),
+    _spec(
+        "spec_authoring.translate.system",
+        "The one LLM node of the temporal-spec authoring pipeline: classify a plain-language "
+        "planner intent into a restricted SpecDraft (pattern + surface names). It never emits a "
+        "real flag id or a full formula — grounding, assembly, the temporal check are all code.",
+        "spec_translate",
+        "static",
+        'JSON {"pattern": str, "operands": [str], "description": str}',
+        "owcopilot.spec_authoring.pipeline:_SYSTEM_PROMPT",
+        # GatewaySpecTranslator validates the reply in code via extract_validated(reply, SpecDraft).
+        schema="owcopilot.spec_authoring.models:SpecDraft",
     ),
     # -- QA / retrieval -----------------------------------------------------------------------
     _spec(

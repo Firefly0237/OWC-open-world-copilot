@@ -23,14 +23,6 @@ dist/
 # experiment data packs stay local (rebuildable from F:/wuyin)
 /*.zip
 # personal project notes/docs stay local only
-/CHANGELOG.md
-/project_docs/
-/benchmarks/
-/docs/interview_prep/
-/docs/research/
-/docs/live_agent_showcase.md
-/docs/product_thesis.md
-/docs/演示动线.md
 /frontend/scripts/
 /scripts/collect_preference_pairs.py
 /scripts/gen_runner_traces.py
@@ -63,3 +55,23 @@ unity/**/[Oo]bj/
 unity/**/[Ll]ogs/
 unity/**/*.csproj
 unity/**/*.sln
+
+# --- 文档与证据的入库范围(2026-07-25 定稿)---------------------------------
+# 原则:**面向使用者的手册与可复核的证据入库;内部设计稿、研究过程稿、个人备考稿不入库。**
+# (此前整个 docs/ 与 benchmarks/ 都被排除,克隆者连集成手册和验证证据都看不到,过犹不及。)
+#
+# 不入库 —— 内部过程产物:
+/docs/研究/
+/docs/research/
+/docs/求职材料/
+/docs/interview_prep/
+/docs/演示动线.md
+/docs/product_thesis.md
+/docs/live_agent_showcase.md
+/docs/零调用能力扫描报告.md
+/docs/数据形态_输入与产物.md
+#
+# 入库 —— 面向使用者与可复核的:
+#   README / ARCHITECTURE / docs/UE_INTEGRATION.md / docs/UNITY_INTEGRATION.md
+#   docs/agent_memory.md / docs/中国大陆商业游戏剧情策划工作调查报告_2026.md
+#   benchmarks/(评测报告与真机运行留档 —— 项目声称的数字要能被别人复核)

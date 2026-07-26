@@ -19,43 +19,45 @@ interface NavGroup {
   items: NavItem[];
 }
 
-// grouped the way the legacy workbench was — clear sections, not a flat strip
+// Six sections along the "world lifecycle": overview → project → material → knowledge base →
+// verification → delivery. One accordion group per section so the rail reads at a glance.
 const NAV: NavGroup[] = [
-  { title: "概览", items: [
+  { title: "总览", items: [
     { to: "/overview", label: "世界总览" },
+  ] },
+  { title: "项目", items: [
+    { to: "/worlds", label: "工作区" },
     { to: "/archive", label: "设定档案" },
+    { to: "/history", label: "变更史" },
+    { to: "/settings", label: "设置" },
   ] },
-  { title: "创世 · 创作", items: [
-    { to: "/genesis", label: "创世工坊" },
-    { to: "/expand", label: "扩写工坊" },
-    { to: "/characters", label: "人物工坊" },
-    { to: "/creation", label: "创作工坊" },
-    { to: "/templates", label: "模板库" },
-    { to: "/dialogues", label: "对话流" },
-  ] },
-  { title: "汇编 · 入库", items: [
+  { title: "素材 · 生成", items: [
     { to: "/extraction", label: "文稿提炼" },
     { to: "/import", label: "表格导入" },
-    { to: "/references", label: "灵感库" },
+    { to: "/genesis", label: "创世工坊" },
+    { to: "/expand", label: "扩写工坊" },
+    { to: "/creation", label: "创作工坊" },
+    { to: "/templates", label: "模板库" },
   ] },
-  { title: "校勘 · 分析", items: [
+  { title: "知识库", items: [
+    { to: "/characters", label: "人物工坊" },
+    { to: "/dialogues", label: "对话流" },
+    { to: "/references", label: "灵感库" },
+    { to: "/graph", label: "关系图谱" },
+    { to: "/timeline", label: "时间线" },
+    { to: "/localization", label: "本地化" },
+  ] },
+  { title: "验证", items: [
     { to: "/audit", label: "校勘修复" },
     { to: "/impact", label: "影响分析" },
     { to: "/analytics", label: "世界分析" },
-    { to: "/timeline", label: "时间线" },
-    { to: "/graph", label: "关系图谱" },
     { to: "/sweep", label: "专项清查" },
     { to: "/compliance", label: "版号合规" },
   ] },
-  { title: "问答 · 交付", items: [
+  { title: "交付", items: [
     { to: "/ask", label: "世界问答" },
     { to: "/review", label: "审阅台" },
-    { to: "/localization", label: "本地化" },
     { to: "/export", label: "导出交付" },
-  ] },
-  { title: "管理", items: [
-    { to: "/worlds", label: "工作区" },
-    { to: "/history", label: "变更史" },
   ] },
 ];
 

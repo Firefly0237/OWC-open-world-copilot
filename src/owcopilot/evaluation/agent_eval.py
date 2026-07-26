@@ -8,11 +8,25 @@ evaluator and stays deterministic.
 
 Honesty notes carried per dimension:
 - 工具调用效果 offline F1 is 1.0 *by design* (a deterministic provider returns the gold sequence);
-  it measures action *selection* wiring, not live-LLM tool skill.
+  it measures action *selection* wiring, not live-LLM tool skill. **FIXTURE, not real-model — must
+  not be cited as a live tool-selection accuracy number in external/portfolio material** (real
+  live-model tool-selection eval is Wave 5 W5-1, see
+  docs/研究/一轮修改优化_总实施方案.md).
 - 叙事合理性 / 角色一致性 are the rule-engine detection rate over a fixed seeded world (a subset of
   the 29 rules), not a statistical benchmark.
 - 安全性 is a single-probe injection-detection check (fires on the injected surface, silent on the
   clean one), not a red-team sweep.
+- 可靠性(reliability/pass^k below): all underlying scenarios are single-trial (n_trials=1), so the
+  reported pass_hat_k **is pass@1 relabeled**, not a genuine k>1 reliability estimate — see
+  evaluation/reliability.py's module docstring. Real k>1 sampling is Wave 5 W5-3.
+
+对外材料口径（W1-2 诚实标注,评估逻辑不变）:
+- 工具调用效果 F1=1.0 是 OfflineGoalAwareChatModel 离线替身按 gold 序列构造出来的，不是任何真实
+  LLM 的工具选择表现，**不得作为对外声称的工具选择准确率数字**。
+- 下面 reliability 字段的 pass_hat_k 在本评分卡里恒等于 pass@1（因为全部场景 n_trials=1），**不得
+  对外声称为"k 次试验可靠性"**。
+- 本模块不包含、也不聚合任何 multi_agent（orchestrator-worker-verifier）编排质量指标——那套编排
+  **未评测**（`evaluation/` 全目录对 multi_agent 零引用），不要把这五维评分卡误读成覆盖了它。
 """
 
 from __future__ import annotations
@@ -125,7 +139,9 @@ def run_jd_dimension_scorecard() -> JdDimensionScorecard:
             source="evaluation/acceptance.py::evaluate_tool_selection",
             sample_size=tool_n,
             measures="action-selection F1 over gold ReAct scenarios; offline F1==1.0 is by design "
-            "(deterministic provider returns the gold sequence), i.e. wiring not live-LLM skill",
+            "(deterministic provider returns the gold sequence), i.e. wiring not live-LLM skill. "
+            "FIXTURE, not real-model -- must not be cited as a live tool-selection accuracy "
+            "number in external material (real live-model eval is Wave 5 W5-1)",
         ),
         JdDimension(
             dimension="安全性",
@@ -144,6 +160,9 @@ def run_jd_dimension_scorecard() -> JdDimensionScorecard:
     # 39 scenarios, each n_trials=1 (deterministic $0 evaluators cannot honestly produce n>1), so
     # pass^k collapses to pass@1 here (aggregate_reliability's note says so). Matching for the
     # seeded errors reuses the same (expected_rule, target_ref)-in-open_pairs test the dims use.
+    # 命名口径（W1-2 诚实标注）：below "pass_hat_k" IS pass@1 under the hood (k only goes up to 1) —
+    # see evaluation/reliability.py module docstring for the collapse condition. Not renamed here
+    # (a rename would ripple through ReliabilityReport/tests); real k>1 sampling is Wave 5 W5-3.
     reliability_trials: list[tuple[int, int]] = [
         (1, 1 if (err.expected_rule, err.target_ref) in open_pairs else 0) for err in seeded
     ]
@@ -156,7 +175,7 @@ def run_jd_dimension_scorecard() -> JdDimensionScorecard:
         reliability_trials,
         context=(
             "39 个确定性二元场景（25 植入错误检出 + 10 gold ReAct + 3 修复基准世界 + 1 注入探针），"
-            "每场景 n_trials=1。"
+            "每场景 n_trials=1。数字实为 pass@1，不得对外声称为 k>1 可靠性。"
         ),
     )
 

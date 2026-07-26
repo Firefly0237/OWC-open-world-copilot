@@ -181,6 +181,61 @@ def truncate_to_token_budget(text: str, max_tokens: int) -> tuple[str, int]:
         return head, max(1, len(head) // 4)
 
 
+def split_by_token_budget(text: str, max_tokens: int, *, overlap_tokens: int = 0) -> list[str]:
+    """Split *text* into consecutive pieces of at most *max_tokens* tokens each.
+
+    The multi-chunk sibling of :func:`truncate_to_token_budget`'s single-head recipe: encode
+    *text* ONCE, slice the token id stream into ``max_tokens``-sized, ``overlap_tokens``-wide-
+    overlapping windows, and decode each window back to text. Encoding once and slicing is
+    deliberate — calling ``truncate_to_token_budget`` in a loop over the shrinking remainder would
+    re-encode the same (increasingly large) text on every iteration, which is quadratic for a long
+    single block with no natural break (e.g. one huge paragraph); this is linear in ``len(text)``.
+
+    *overlap_tokens* (clamped below *max_tokens*, so the window always advances) repeats that many
+    trailing tokens of one piece at the head of the next, so a forced cut mid-thought still gives
+    the following piece a little leading context — the same purpose as ``chunk_text``'s
+    ``overlap_chars``, at the token granularity this function operates at.
+
+    - ``max_tokens <= 0`` or empty text → ``[]``.
+    - Never returns an empty list for non-empty text and a positive budget.
+
+    Same boundary caveat as :func:`truncate_to_token_budget`: cl100k_base is a *byte*-level BPE, so
+    a token can hold a partial (non-UTF-8-boundary-aligned) multi-byte CJK character; decoding a
+    slice that happens to cut through one such token yields a single ``\\ufffd`` replacement
+    character at that slice's edge — cosmetic noise possible at EVERY internal cut here (not just
+    the tail, unlike a one-shot truncation), acceptable for the same reason: it is never silent
+    (this docstring says so) and it costs at most one character per boundary, not real data loss.
+
+    Fallback (tiktoken unavailable, or any encode/decode failure): the same char-proportional
+    (``×4``) window stepped over *text* directly — consistent with
+    :func:`truncate_to_token_budget`'s fallback. Never crashes.
+    """
+    if max_tokens <= 0 or not text:
+        return []
+
+    overlap_tokens = max(0, min(overlap_tokens, max_tokens - 1))
+    step = max_tokens - overlap_tokens
+
+    enc = _load_encoder()
+
+    if enc is _FALLBACK_SENTINEL:
+        char_window, char_step = max_tokens * 4, step * 4
+        return [text[i : i + char_window] for i in range(0, len(text), char_step)]
+
+    try:
+        import tiktoken as _tiktoken  # noqa: PLC0415 — intentional lazy import
+
+        assert isinstance(enc, _tiktoken.Encoding)
+        ids: list[int] = enc.encode(text)
+        return [enc.decode(ids[i : i + max_tokens]) for i in range(0, len(ids), step)]
+    except Exception as exc:
+        _log.warning(
+            "tiktoken split failed (%r); using char-proportional fallback for this call.", exc
+        )
+        char_window, char_step = max_tokens * 4, step * 4
+        return [text[i : i + char_window] for i in range(0, len(text), char_step)]
+
+
 def reset_encoder_cache() -> None:
     """Reset the module-level encoder cache (test helper).
 

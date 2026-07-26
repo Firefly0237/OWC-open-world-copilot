@@ -5,8 +5,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..errors import OWCopilotError
 
-class PathSecurityError(ValueError):
+
+class PathSecurityError(OWCopilotError, ValueError):
     """Raised when a requested path escapes an allowed root."""
 
 

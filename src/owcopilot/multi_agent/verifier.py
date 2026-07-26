@@ -13,12 +13,12 @@ Key design decisions:
    from the blackboard's task_result payload.
 4. It re-runs ``audit_project`` independently (a deterministic tool = true ground truth).
 5. It compares its independently measured ``open_errors`` vs the worker's claim.
-6. The gateway passed to VerifierAgent is intentionally the same LLMGateway class as
-   workers use, but it is a different *instance* (or may be the same instance in tests
-   where $0 offline mode means no real model calls anyway).  What matters is that the
-   Verifier's reasoning is seeded from its own independent audit call, not from the
-   worker's transcript.  Using a cross-model evaluator would also satisfy P3-5, but
-   deterministic tools are stronger — the SUPERVISOR_rubric confirms this is acceptable.
+6. The chat model passed to VerifierAgent may be the SAME instance the workers use (a
+   ``BaseChatModel`` is stateless per call, and in $0 offline tests no real model call
+   happens anyway).  What matters is that the Verifier's reasoning is seeded from its OWN
+   independent audit call, not from the worker's transcript.  Using a cross-model evaluator
+   would also satisfy P3-5, but deterministic tools are stronger — the SUPERVISOR_rubric
+   confirms this is acceptable.
 
 Two-path verification (the deterministic path is the authority):
     The verifier first tries the DETERMINISTIC path — it calls ``audit_project`` directly
@@ -35,8 +35,10 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
+from langchain_core.language_models.chat_models import BaseChatModel
+
 from ..agent.react import AgentResult, ReActAgent
-from ..llm.gateway import LLMGateway
+from ..llm.telemetry import TelemetryCollector
 from ..skills import SkillError, SkillRegistry
 from .blackboard import AgentBlackboard
 from .messages import AgentMessage, TaskResultPayload, VerifyResultPayload
@@ -57,28 +59,31 @@ class VerifierAgent:
         self,
         *,
         agent_id: str = "verifier_01",
-        gateway: LLMGateway,
+        model: BaseChatModel,
         registry: SkillRegistry,
         # ≥4 so the offline ReAct script (audit→context→harness→Final Answer) can finish;
         # the deterministic path below is the real authority regardless of this budget.
         max_steps: int = 5,
+        telemetry: TelemetryCollector | None = None,
     ) -> None:
         self.agent_id = agent_id
-        self._gateway = gateway
+        self._model = model
         # Execution-time tool scoping: the verifier can ONLY run audit_project / list_issues.
         # An attempt to invoke any other registered skill is denied at dispatch (not just
-        # hidden from the prompt manifest).  See skill_scope.scoped_registry.
+        # hidden from the exposed tool schema).  See skill_scope.scoped_registry.
         self._registry = scoped_registry(registry, _VERIFIER_SKILLS)
         self._max_steps = max_steps
+        self._telemetry = telemetry
         # Fresh independent ReActAgent — its transcript is not shared with any worker.
         self.agent: ReActAgent = self._make_agent()
 
     def _make_agent(self) -> ReActAgent:
         return ReActAgent(
-            gateway=self._gateway,
+            model=self._model,
             registry=self._registry,
             max_steps=self._max_steps,
             task=f"verifier_{self.agent_id}",
+            telemetry=self._telemetry,
             allowed_skills=set(_VERIFIER_SKILLS),  # minimal deterministic tools
         )
 

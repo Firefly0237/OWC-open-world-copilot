@@ -41,10 +41,11 @@ def test_every_spec_resolves_to_a_live_object() -> None:
 
 
 def test_template_slots_present() -> None:
-    """Template prompts must actually contain their documented slot; the native prompt is
-    static by design (the tool list travels in the tools schema, not in the prompt)."""
+    """The native agent prompt is static by design (the tool list travels in the tools schema,
+    not in the prompt — the text-format prompt and its {manifest} slot retired with the text
+    ReAct path)."""
     reg = prompt_registry()
-    assert "{manifest}" in (reg["agent.react.system.text"].text() or "")
+    assert "agent.react.system.text" not in reg  # retired with the text path
     assert "{manifest}" not in (reg["agent.react.system.native"].text() or "")
     assert reg["agent.react.system.native"].kind == "static"
 

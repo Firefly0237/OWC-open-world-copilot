@@ -10,7 +10,10 @@ Covers hard acceptance criteria:
 
 from __future__ import annotations
 
+import re
+
 from owcopilot.audit.context import AuditContext
+from owcopilot.audit.models import Issue
 from owcopilot.audit.rules.quest_reachability import QuestGlobalReachabilityRule
 from owcopilot.content.models import (
     ContentBundle,
@@ -21,6 +24,34 @@ from owcopilot.content.models import (
     QuestLogic,
     StageLogic,
 )
+
+# ---------------------------------------------------------------------------
+# 可执行报告改造：消息中文化 + 建议动作实例化的验收（§15.9 六要素里的"原因"与"建议动作"）。
+# ---------------------------------------------------------------------------
+
+_CJK = re.compile(r"[一-鿿]")
+# 规则实现里真实用到的英文技术描述片段，策划面对的文本里不该出现这些代码/表达式黑话。
+_BANNED_IDENTIFIERS = [
+    "target_ref",
+    "quest_id",
+    "blocking_atom",
+    "is not globally reachable",
+    "permanently false",
+    "can never be true",
+    "reachable states",
+]
+
+
+def _assert_actionable(issue: Issue, *expected_values: str) -> None:
+    """消息是中文、建议含具体字段名或值、两处都不含代码标识符 —— 三条机械检查。"""
+    assert _CJK.search(issue.message), issue.message
+    assert issue.suggested_action, "建议动作不能为空"
+    assert _CJK.search(issue.suggested_action), issue.suggested_action
+    for banned in _BANNED_IDENTIFIERS:
+        assert banned not in issue.message, f"消息里混进了代码标识符 {banned!r}"
+        assert banned not in issue.suggested_action, f"建议动作里混进了代码标识符 {banned!r}"
+    for value in expected_values:
+        assert value in issue.suggested_action, f"建议动作里没有具体值 {value!r}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -384,3 +415,91 @@ def test_unreachable_but_not_cyclic() -> None:
     assert "quest:q_orphan" in targets
     # q1 should NOT be flagged
     assert "quest:q1" not in targets
+
+
+# ---------------------------------------------------------------------------
+# 消息中文化 + 建议动作实例化
+# ---------------------------------------------------------------------------
+
+
+def test_missing_prerequisite_message_and_suggestion_are_actionable() -> None:
+    """[硬] 前置任务本身达不成：消息与建议都要点名具体的任务 id。"""
+    ctx = _make_ctx(
+        [
+            _make_quest("q1"),
+            _make_quest("q2", prerequisites=["q_nonexistent"]),
+        ]
+    )
+    issue = next(i for i in _rule_issues(ctx) if i.target_ref == "quest:q2")
+    _assert_actionable(issue, "q_nonexistent", "q2")
+
+
+def test_permanently_false_bool_precondition_message_and_suggestion_are_actionable() -> None:
+    """[硬] 布尔变量永远达不到 true：消息与建议要点名具体的变量名和任务 id。"""
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_bool_var("flag_x")],
+                precondition="flag_x == true",
+            ),
+        ]
+    )
+    issues = _rule_issues(ctx)
+    assert len(issues) == 1
+    issue = issues[0]
+    _assert_actionable(issue, "flag_x", "q1")
+    assert "flag_x == true" in issue.message  # 原样引用触发条件，方便策划对照文件核实
+
+
+def test_permanently_false_int_compare_precondition_message_and_suggestion() -> None:
+    """[硬] 数值变量永远取不到目标值：消息与建议要点名具体的目标值。"""
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_int_var("score")],  # default 0，从未被任何效果改动
+                precondition="score == 5",
+            ),
+        ]
+    )
+    issues = _rule_issues(ctx)
+    assert len(issues) == 1
+    issue = issues[0]
+    _assert_actionable(issue, "score", "5")
+
+
+def test_permanently_true_not_precondition_message_and_suggestion() -> None:
+    """[硬] not(恒真变量) 永远为假：消息要说清是内层恒真导致取反恒假。"""
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_bool_var("always_true", default=True)],
+                precondition="not (always_true)",
+            ),
+        ]
+    )
+    issues = _rule_issues(ctx)
+    assert len(issues) == 1
+    issue = issues[0]
+    _assert_actionable(issue, "always_true")
+    assert "恒为真" in issue.message
+
+
+def test_or_both_branches_false_precondition_message_and_suggestion() -> None:
+    """[硬] or 的两个分支都永远不成立才报告；消息与建议要覆盖两个分支各自的原因。"""
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_bool_var("bad1"), _bool_var("bad2")],
+                precondition="(bad1 == true) or (bad2 == true)",
+            ),
+        ]
+    )
+    issues = _rule_issues(ctx)
+    assert len(issues) == 1
+    issue = issues[0]
+    _assert_actionable(issue, "bad1", "bad2")
+    assert "两个分支都恒为假" in issue.message

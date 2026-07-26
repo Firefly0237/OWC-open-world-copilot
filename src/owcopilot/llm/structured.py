@@ -24,6 +24,7 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
+from ..errors import OWCopilotError
 from .gateway import LLMGateway
 from .jsonio import extract_validated
 
@@ -44,7 +45,7 @@ _REPAIR_INSTRUCTION = (
 )
 
 
-class StructuredOutputError(ValueError):
+class StructuredOutputError(OWCopilotError, ValueError):
     """Raised when structured output cannot be validated within the repair budget.
 
     Subclasses ``ValueError`` for consistency with :mod:`owcopilot.llm.jsonio`'s error contract. The

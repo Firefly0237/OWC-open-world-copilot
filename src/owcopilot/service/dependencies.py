@@ -31,6 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ..app.workspaces import sanitize_world_name, worlds_home
+from ..config import DEFAULT_LLM_MODE
 from ..content.models import ContentBundle
 from ..graph.index import build_content_graph
 from ..llm.cache import build_cache_backend
@@ -61,7 +62,7 @@ def _llm_mode() -> str:
     themselves only run when `OWCOPILOT_ALLOW_OFFLINE_LLM` is set (a test/CI fixture, never a
     shipped product mode). Read per request so the mode can be flipped by env without restarting.
     """
-    return os.getenv("OWCOPILOT_LLM_MODE", "offline").strip().lower()
+    return os.getenv("OWCOPILOT_LLM_MODE", DEFAULT_LLM_MODE).strip().lower()
 
 
 def _cache_mode() -> str:

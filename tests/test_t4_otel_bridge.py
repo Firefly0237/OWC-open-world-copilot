@@ -510,17 +510,17 @@ def test_execute_tool_span_no_error_status_on_success() -> None:
 
 
 # ---------------------------------------------------------------------------
-# RT4-③: End-to-end: react.py sets ERROR status on SkillError and bare Exception
+# RT4-③: End-to-end: the agent host marks execute_tool spans ERROR on SkillError
+# and bare Exception (span emission now lives in the middleware; the runner still
+# owns the invoke_agent root span with run_id back-fill and stop_reason)
 # ---------------------------------------------------------------------------
 
 
-def _build_react_agent_with_tracer(
-    exporter, failing_skill: bool = False, use_bare_exception: bool = False
-):
-    """Build a ReActAgent wired to an InMemoryExporter for span inspection.
+def _run_react_with_tracer(exporter, model, *, registry=None):
+    """Run a ReActAgent wired to an InMemoryExporter for span inspection.
 
-    Patches ``owcopilot.agent.react.get_tracer_or_noop`` (the name as imported
-    by react.py) so that agent.run() uses our test tracer.
+    Patches ``owcopilot.agent.react.get_tracer_or_noop`` (the name as imported by react.py)
+    so agent.run() hands our test tracer to the middleware stack. Returns (result, spans).
     """
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
@@ -528,53 +528,40 @@ def _build_react_agent_with_tracer(
 
     import owcopilot.agent.react as react_module
     from owcopilot.agent.react import ReActAgent
-    from owcopilot.llm.cache import NoOpCache
-    from owcopilot.llm.gateway import LLMGateway
-    from owcopilot.llm.router import StaticRouter
-    from owcopilot.skills import CostTier, SideEffect, Skill, SkillRegistry
+    from owcopilot.skills import SkillRegistry
 
     resource = Resource.create({"service.name": "test"})
     provider = TracerProvider(resource=resource)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-
-    # Build the test tracer that will collect spans into our exporter
     test_tracer = provider.get_tracer("test")
 
-    class _ScriptedProvider:
-        def __init__(self):
-            self._responses = [
-                "Thought: try tool\nAction: bad_tool\nAction Input: {}",
-                "Thought: done\nFinal Answer: all done",
-            ]
-            self._idx = 0
-
-        def complete(self, *, system: str, user: str, model: str):
-            text = self._responses[min(self._idx, len(self._responses) - 1)]
-            self._idx += 1
-            return text, 10, 5
-
-    gw = LLMGateway(
-        providers={"mock": _ScriptedProvider()},
-        router=StaticRouter(mapping={"agent_react": "mock", "default": "mock"}),
-        cache=NoOpCache(),
+    agent = ReActAgent(
+        model=model, registry=registry if registry is not None else SkillRegistry(), max_steps=3
     )
 
-    registry = SkillRegistry()
+    original_fn = react_module.get_tracer_or_noop
+    react_module.get_tracer_or_noop = lambda: test_tracer
+    try:
+        result = agent.run("test goal")
+    finally:
+        react_module.get_tracer_or_noop = original_fn
+    provider.force_flush(timeout_millis=1000)
+    return result, exporter.get_finished_spans()
+
+
+def _bad_tool_registry(*, use_bare_exception: bool):
+    from owcopilot.skills import CostTier, SideEffect, Skill, SkillError, SkillRegistry
 
     if use_bare_exception:
 
         def _bad_handler(**kwargs):
             raise RuntimeError("unexpected crash")
-    elif failing_skill:
-        from owcopilot.skills import SkillError
-
-        def _bad_handler(**kwargs):
-            raise SkillError("skill kaboom")
     else:
 
         def _bad_handler(**kwargs):
-            return {"ok": True}
+            raise SkillError("tool refused")
 
+    registry = SkillRegistry()
     registry.register(
         Skill(
             name="bad_tool",
@@ -584,43 +571,48 @@ def _build_react_agent_with_tracer(
             handler=_bad_handler,
         )
     )
+    return registry
 
-    agent = ReActAgent(gateway=gw, registry=registry, max_steps=3)
 
-    # react.py does: from ..llm.otel_bridge import get_tracer_or_noop
-    # so the name lives in the react module's namespace — patch it there.
-    original_fn = react_module.get_tracer_or_noop
+def _scripted_tool_model(turns):
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 
-    def _patched_get_tracer_or_noop():
-        return test_tracer
+    class _Bindable(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
 
-    react_module.get_tracer_or_noop = _patched_get_tracer_or_noop
-    try:
-        result = agent.run("test goal")
-    finally:
-        react_module.get_tracer_or_noop = original_fn
+    return _Bindable(messages=iter(turns))
 
-    # Force all spans to be flushed from the BatchSpanProcessor (SimpleSpanProcessor is sync)
-    provider.force_flush(timeout_millis=1000)
 
-    return result
+def _bad_tool_script():
+    from langchain_core.messages import AIMessage
+
+    return [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "bad_tool", "args": {}, "id": "c1", "type": "tool_call"}],
+        ),
+        AIMessage(content="all done"),
+    ]
 
 
 def test_react_execute_tool_span_error_on_skill_error() -> None:
-    """RT4-③ integration: react.py marks execute_tool span ERROR when SkillError is raised."""
+    """RT4-③ integration: the agent marks the execute_tool span ERROR when SkillError is raised."""
     from opentelemetry.trace import StatusCode
 
     from owcopilot.llm.otel_bridge import InMemoryExporter
 
-    exporter = InMemoryExporter()
-    result = _build_react_agent_with_tracer(exporter, failing_skill=True)
+    result, spans = _run_react_with_tracer(
+        InMemoryExporter(),
+        _scripted_tool_model(_bad_tool_script()),
+        registry=_bad_tool_registry(use_bare_exception=False),
+    )
 
     # The step should be recorded as an error in AgentStep
     assert result.steps, "No steps recorded"
     assert result.steps[0].is_error is True
 
     # The execute_tool span must have ERROR status
-    spans = exporter.get_finished_spans()
     tool_spans = _get_spans_by_name(spans, "execute_tool")
     assert tool_spans, f"No execute_tool span found. All spans: {[s.name for s in spans]}"
 
@@ -635,181 +627,21 @@ def test_react_execute_tool_span_error_on_skill_error() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# R3-Team-C ①: gen_ai.request.model carries the REAL model id, not the task label
-# (regression for the OTEL GenAI semantic-convention bug — previously react.py passed
-#  self.task="agent_react" as the model, which the old unit tests missed by testing the
-#  context manager directly instead of going through react.py → span.)
-# ---------------------------------------------------------------------------
-
-
-def _run_react_with_tracer_and_provider(exporter, provider, *, mapping=None):
-    """Run a one-shot ReActAgent (Final Answer immediately) through react.py into *exporter*.
-
-    *provider* is a full provider object — its ``.model`` attribute (if any) is what the gateway
-    resolves and what gen_ai.request.model should end up carrying.  Returns (result, spans).
-    """
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-
-    import owcopilot.agent.react as react_module
-    from owcopilot.agent.react import ReActAgent
-    from owcopilot.llm.cache import NoOpCache
-    from owcopilot.llm.gateway import LLMGateway
-    from owcopilot.llm.router import StaticRouter
-    from owcopilot.skills import SkillRegistry
-
-    resource = Resource.create({"service.name": "test"})
-    tprovider = TracerProvider(resource=resource)
-    tprovider.add_span_processor(SimpleSpanProcessor(exporter))
-    test_tracer = tprovider.get_tracer("test")
-
-    gw = LLMGateway(
-        providers={"cheap": provider},
-        router=StaticRouter(mapping=mapping or {"agent_react": "cheap", "default": "cheap"}),
-        cache=NoOpCache(),
-    )
-    agent = ReActAgent(gateway=gw, registry=SkillRegistry(), max_steps=2)
-
-    original_fn = react_module.get_tracer_or_noop
-    react_module.get_tracer_or_noop = lambda: test_tracer
-    try:
-        result = agent.run("test goal")
-    finally:
-        react_module.get_tracer_or_noop = original_fn
-    tprovider.force_flush(timeout_millis=1000)
-    return result, exporter.get_finished_spans()
-
-
-def test_react_chat_span_model_is_real_model_not_task_label() -> None:
-    """R3-C①: gen_ai.request.model must be the resolved model id, never the agent task label."""
-    from owcopilot.llm.otel_bridge import InMemoryExporter
-
-    class _ModelProvider:
-        # mimics OpenAICompatProvider: exposes a real model id behind the "cheap" tier
-        model = "deepseek-v4-flash"
-
-        def complete(self, *, system: str, user: str, model: str):
-            return "Thought: done\nFinal Answer: all good", 11, 7
-
-    result, spans = _run_react_with_tracer_and_provider(InMemoryExporter(), _ModelProvider())
-
-    assert result.final_answer == "all good"
-    chat_spans = _get_spans_by_name(spans, "gen_ai.chat")
-    assert chat_spans, f"No gen_ai.chat span found. All spans: {[s.name for s in spans]}"
-    attrs = dict(chat_spans[0].attributes or {})
-    model_attr = attrs.get("gen_ai.request.model")
-    assert model_attr == "deepseek-v4-flash", (
-        f"gen_ai.request.model must be the real model id, got {model_attr!r}"
-    )
-    # And specifically NOT the internal task label — the original bug.
-    assert model_attr != "agent_react"
-    # token counts still back-filled honestly from telemetry
-    assert attrs.get("gen_ai.usage.input_tokens") == 11
-    assert attrs.get("gen_ai.usage.output_tokens") == 7
-
-
-# ---------------------------------------------------------------------------
-# T2-P1: gen_ai.response.model carries the model the API RESPONSE BODY reported
-# (the model that actually answered), distinct from gen_ai.request.model. Set only
-# when known — an offline fake (no response model) leaves the attribute unset.
-# ---------------------------------------------------------------------------
-
-
-def test_react_chat_span_sets_response_model_when_provider_reports_it() -> None:
-    """T2-P1: a provider returning a response-body model id → gen_ai.response.model on the span."""
-    from owcopilot.llm.otel_bridge import InMemoryExporter
-
-    class _RespModelProvider:
-        model = "deepseek-v4-flash"  # request side
-
-        def complete(self, *, system: str, user: str, model: str):
-            # 5-tuple: response-body model differs from the configured request model.
-            return "Thought: done\nFinal Answer: ok", 5, 3, 0, "deepseek-v4-flash-0613"
-
-    _result, spans = _run_react_with_tracer_and_provider(InMemoryExporter(), _RespModelProvider())
-    attrs = dict(_get_spans_by_name(spans, "gen_ai.chat")[0].attributes or {})
-    assert attrs.get("gen_ai.request.model") == "deepseek-v4-flash"
-    assert attrs.get("gen_ai.response.model") == "deepseek-v4-flash-0613"
-
-
-def test_react_chat_span_omits_response_model_for_offline_fake() -> None:
-    """T2-P1: an offline fake (3-tuple, no response model) must NOT set gen_ai.response.model —
-    never back-filled with a guessed/request-side value."""
-    from owcopilot.llm.otel_bridge import InMemoryExporter
-
-    class _NoRespModelProvider:  # offline-fake shape: 3-tuple, no response model
-        def complete(self, *, system: str, user: str, model: str):
-            return "Thought: done\nFinal Answer: ok", 3, 2
-
-    _result, spans = _run_react_with_tracer_and_provider(InMemoryExporter(), _NoRespModelProvider())
-    attrs = dict(_get_spans_by_name(spans, "gen_ai.chat")[0].attributes or {})
-    got = attrs.get("gen_ai.response.model")
-    assert "gen_ai.response.model" not in attrs, (
-        f"response.model must be unset for an offline fake, got {got!r}"
-    )
-
-
-def test_react_chat_span_model_falls_back_to_tier_when_provider_has_no_model() -> None:
-    """R3-C①: a provider without a .model attribute → model falls back to the tier label
-    (still NOT the task label)."""
-    from owcopilot.llm.otel_bridge import InMemoryExporter
-
-    class _NoModelProvider:  # offline-fake shape: no .model attribute
-        def complete(self, *, system: str, user: str, model: str):
-            return "Thought: done\nFinal Answer: ok", 3, 2
-
-    _result, spans = _run_react_with_tracer_and_provider(InMemoryExporter(), _NoModelProvider())
-    attrs = dict(_get_spans_by_name(spans, "gen_ai.chat")[0].attributes or {})
-    # tier label is "cheap" here; never the "agent_react" task label.
-    assert attrs.get("gen_ai.request.model") == "cheap"
-    assert attrs.get("gen_ai.request.model") != "agent_react"
-
-
-# ---------------------------------------------------------------------------
-# R3-Team-C ③: agent.run_id is now present on the production root span
-# (previously dangling — invoke_agent_span only set it when a run_id was passed in,
-#  and react.py's single call site never passed one).
-# ---------------------------------------------------------------------------
-
-
-def test_react_root_span_has_run_id_equal_to_trace_id() -> None:
-    """R3-C③: the invoke_agent root span carries agent.run_id == its trace_id (hex-32)."""
-    from owcopilot.llm.otel_bridge import InMemoryExporter
-
-    class _P:
-        model = "deepseek-v4-flash"
-
-        def complete(self, *, system: str, user: str, model: str):
-            return "Thought: done\nFinal Answer: ok", 1, 1
-
-    _result, spans = _run_react_with_tracer_and_provider(InMemoryExporter(), _P())
-    roots = _get_spans_by_name(spans, "invoke_agent")
-    assert roots, "No invoke_agent root span"
-    root = roots[0]
-    attrs = dict(root.attributes or {})
-    run_id = attrs.get("agent.run_id")
-    assert run_id, "agent.run_id attribute is missing/empty on the production root span"
-    ctx = root.get_span_context()
-    assert run_id == format(ctx.trace_id, "032x"), (
-        "agent.run_id must equal the span's trace_id (run_id == trace_id contract)"
-    )
-
-
 def test_react_execute_tool_span_error_on_bare_exception() -> None:
-    """RT4-③ integration: react.py marks execute_tool span ERROR on unexpected Exception."""
+    """RT4-③ integration: execute_tool span marked ERROR on unexpected Exception."""
     from opentelemetry.trace import StatusCode
 
     from owcopilot.llm.otel_bridge import InMemoryExporter
 
-    exporter = InMemoryExporter()
-    result = _build_react_agent_with_tracer(exporter, use_bare_exception=True)
+    result, spans = _run_react_with_tracer(
+        InMemoryExporter(),
+        _scripted_tool_model(_bad_tool_script()),
+        registry=_bad_tool_registry(use_bare_exception=True),
+    )
 
     assert result.steps, "No steps recorded"
     assert result.steps[0].is_error is True
 
-    spans = exporter.get_finished_spans()
     tool_spans = _get_spans_by_name(spans, "execute_tool")
     assert tool_spans, f"No execute_tool span found. All spans: {[s.name for s in spans]}"
 
@@ -822,3 +654,111 @@ def test_react_execute_tool_span_error_on_bare_exception() -> None:
     assert "exception" in event_names, (
         f"Expected 'exception' event on execute_tool span, got: {event_names}"
     )
+
+
+# ---------------------------------------------------------------------------
+# R3-Team-C ①: gen_ai.request.model carries the REAL model id, not the task label
+# (regression for the OTEL GenAI semantic-convention bug — the span attribute must
+#  come from the chat model's own id, never the internal task label.)
+# ---------------------------------------------------------------------------
+
+
+def _final_turn(**message_kwargs):
+    from langchain_core.messages import AIMessage
+
+    return [AIMessage(content="Thought: done. all good", **message_kwargs)]
+
+
+def test_react_chat_span_model_is_real_model_not_task_label() -> None:
+    """R3-C①: gen_ai.request.model must be the chat model's real id, never the task label."""
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+
+    from owcopilot.llm.otel_bridge import InMemoryExporter
+
+    class _NamedModel(GenericFakeChatModel):
+        # mimics ChatOpenAI/ChatDeepSeek: exposes the real model id as `model_name`
+        model_name: str = "deepseek-v4-flash"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    turns = _final_turn(
+        usage_metadata={
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "total_tokens": 18,
+            "input_token_details": {},
+        }
+    )
+    _result, spans = _run_react_with_tracer(InMemoryExporter(), _NamedModel(messages=iter(turns)))
+
+    chat_spans = _get_spans_by_name(spans, "gen_ai.chat")
+    assert chat_spans, f"No gen_ai.chat span found. All spans: {[s.name for s in spans]}"
+    attrs = dict(chat_spans[0].attributes or {})
+    model_attr = attrs.get("gen_ai.request.model")
+    assert model_attr == "deepseek-v4-flash", (
+        f"gen_ai.request.model must be the real model id, got {model_attr!r}"
+    )
+    # And specifically NOT the internal task label — the original bug.
+    assert model_attr != "agent_react"
+    # token counts back-filled honestly from the response usage_metadata
+    assert attrs.get("gen_ai.usage.input_tokens") == 11
+    assert attrs.get("gen_ai.usage.output_tokens") == 7
+
+
+def test_react_chat_span_sets_response_model_when_provider_reports_it() -> None:
+    """T2-P1: a reply carrying a response-body model id → gen_ai.response.model on the span."""
+    from owcopilot.llm.otel_bridge import InMemoryExporter
+
+    turns = _final_turn(response_metadata={"model_name": "deepseek-v4-flash-0613"})
+    _result, spans = _run_react_with_tracer(InMemoryExporter(), _scripted_tool_model(turns))
+    attrs = dict(_get_spans_by_name(spans, "gen_ai.chat")[0].attributes or {})
+    assert attrs.get("gen_ai.response.model") == "deepseek-v4-flash-0613"
+
+
+def test_react_chat_span_omits_response_model_for_offline_fake() -> None:
+    """T2-P1: an offline fake (no response-body model id) must NOT set gen_ai.response.model —
+    never back-filled with a guessed/request-side value."""
+    from owcopilot.llm.otel_bridge import InMemoryExporter
+
+    _result, spans = _run_react_with_tracer(InMemoryExporter(), _scripted_tool_model(_final_turn()))
+    attrs = dict(_get_spans_by_name(spans, "gen_ai.chat")[0].attributes or {})
+    got = attrs.get("gen_ai.response.model")
+    assert "gen_ai.response.model" not in attrs, (
+        f"response.model must be unset for an offline fake, got {got!r}"
+    )
+
+
+def test_react_chat_span_model_is_honest_placeholder_when_model_has_no_id() -> None:
+    """R3-C①: a chat model without an id → an honest '(unknown)' placeholder
+    (still NOT the task label, and never a fabricated id)."""
+    from owcopilot.llm.otel_bridge import InMemoryExporter
+
+    _result, spans = _run_react_with_tracer(InMemoryExporter(), _scripted_tool_model(_final_turn()))
+    attrs = dict(_get_spans_by_name(spans, "gen_ai.chat")[0].attributes or {})
+    assert attrs.get("gen_ai.request.model") == "(unknown)"
+    assert attrs.get("gen_ai.request.model") != "agent_react"
+
+
+# ---------------------------------------------------------------------------
+# R3-Team-C ③: agent.run_id is present on the production root span
+# ---------------------------------------------------------------------------
+
+
+def test_react_root_span_has_run_id_equal_to_trace_id() -> None:
+    """R3-C③: the invoke_agent root span carries agent.run_id == its trace_id (hex-32)."""
+    from owcopilot.llm.otel_bridge import InMemoryExporter
+
+    _result, spans = _run_react_with_tracer(InMemoryExporter(), _scripted_tool_model(_final_turn()))
+    roots = _get_spans_by_name(spans, "invoke_agent")
+    assert roots, "No invoke_agent root span"
+    root = roots[0]
+    attrs = dict(root.attributes or {})
+    run_id = attrs.get("agent.run_id")
+    assert run_id, "agent.run_id attribute is missing/empty on the production root span"
+    ctx = root.get_span_context()
+    assert run_id == format(ctx.trace_id, "032x"), (
+        "agent.run_id must equal the span's trace_id (run_id == trace_id contract)"
+    )
+    # The runner also stamps the honest stop reason on the root span.
+    assert attrs.get("agent.stop_reason") == "finished"

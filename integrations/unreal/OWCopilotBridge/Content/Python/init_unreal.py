@@ -57,9 +57,7 @@ def _register_menu() -> None:
     main_menu = menus.find_menu(_MAIN_MENU)
     if main_menu is None:
         return
-    main_menu.add_sub_menu(
-        owner="OWCopilot", section_name="", name="OWCopilot", label="OWCopilot"
-    )
+    main_menu.add_sub_menu(owner="OWCopilot", section_name="", name="OWCopilot", label="OWCopilot")
 
     @unreal.uclass()
     class _OWImportEntry(unreal.ToolMenuEntryScript):

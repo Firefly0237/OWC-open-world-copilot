@@ -1,0 +1,13 @@
+{
+  "id": "xingfuren",
+  "name": "邢夫人",
+  "type": "npc",
+  "description": "贾赦之妻，荣国府大太太，黛玉进府后先拜见的长辈之一，曾邀黛玉留饭——本描述为改编创作，非原著引文。",
+  "aliases": ["大太太"],
+  "tags": ["贾家", "长辈"],
+  "status": "active",
+  "version": null,
+  "metadata": {},
+  "origin": "human",
+  "review_status": "approved"
+}

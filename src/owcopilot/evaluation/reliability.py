@@ -20,6 +20,14 @@ Honesty note: the deterministic ``$0`` scorecard scenarios are single-trial (``n
 reliability needs repeated live sampling — the natural home for that is
 ``scripts/run_real_staged_world_seed.py`` (``--samples``), intentionally out of scope here. The
 estimators themselves are exercised at ``n>1`` by the unit tests.
+
+命名口径（W1-2 诚实标注，评估逻辑不变）：`evaluation/agent_eval.py::run_jd_dimension_scorecard`
+里报出来的 ``pass_hat_k`` 数字，在当前唯一的调用点上就是 ``pass@1`` 换了个名字——因为所有场景
+``n_trials=1``，``k`` 只在 ``k=1`` 处有定义。这不是命名错误（估计量本身 `pass_hat_k`/`pass_at_k`
+的实现是对的、且在 ``n>1`` 下被单测覆盖过），而是**当前唯一的生产调用点从未喂过 n>1 的数据**。
+在此仅做标注，不重命名函数（重命名会牵动 `ReliabilityReport`/多处测试引用），真正的 k>1 重复采样
+是 Wave 5 W5-3（见 ``docs/研究/一轮修改优化_总实施方案.md``）。**在此之前，任何对外材料都不得把
+这个数字描述为"k 次试验可靠性"，只能称其为 pass@1（=成功率）。**
 """
 
 from __future__ import annotations
@@ -130,6 +138,7 @@ def aggregate_reliability(
         "所有场景 n_trials=1（确定性离线评测），pass^k 仅在 k=1 有定义，"
         "诚实退化为 pass@1（=成功率）；真正的 k>1 可靠性需重复采样，"
         "见 scripts/run_real_staged_world_seed.py 的 --samples 路径。"
+        "不得对外声称为『k 次试验可靠性』，只是 pass@1 的另一种呈现。"
         if max_trials <= 1
         else "pass^k 为 τ-bench 悲观可靠性（k 次试验全部成功的概率），随 k 增大而衰减。"
     )

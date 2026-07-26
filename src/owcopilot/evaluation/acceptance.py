@@ -49,10 +49,15 @@ from ..pipeline.project import ProjectContext
 from ..qa.faithfulness import FaithfulnessJudge, judge_qa_faithfulness
 from ..qa.offline import OfflineQAProvider
 from ..qa.service import LoreQAService
+from ..skills import CostTier, SideEffect, Skill, SkillRegistry
 from .blind_spots import evaluate_blind_spots
 
 # Gate constant — sanity threshold for tool-selection F1.
 # 手工标注 10 个场景，集合 F1，不计顺序。这是 sanity gate 而非统计基准。
+# W1-2 诚实标注：本 gate 跑的是 OfflineGoalAwareChatModel（离线确定性替身，按 gold 序列构造应答），
+# 不是任何真实 LLM。mean_f1==1.0 是"替身按设计返回 gold 序列"的产物，测的是 agent 执行链路接线是否
+# 正确，不是真模型的工具选择能力。此数字**不得作为对外材料里的工具选择准确率声称**；真 live-model
+# 工具选择评测是 Wave 5 W5-1（docs/研究/一轮修改优化_总实施方案.md）。
 TOOL_ACCURACY_GATE: float = 0.80
 
 DETECTION_RATE_GATE = 0.85
@@ -1116,9 +1121,9 @@ def run_acceptance_evaluation(
     )
 
     # 6. tool_selection_accuracy sanity gate
-    # 10 个手工标注场景，OfflineGoalAwareReActProvider 确保 $0 确定性运行。
+    # 10 个手工标注场景，OfflineGoalAwareChatModel 确保 $0 确定性运行。
     # 诚实声明：F1 基于集合语义（不计顺序），样本量 10 个，是 sanity gate 而非统计基准。
-    # OfflineGoalAwareReActProvider 被设计成精确返回 gold 序列，offline F1=1.0 是设计预期，
+    # OfflineGoalAwareChatModel 被设计成精确返回 gold 序列，offline F1=1.0 是设计预期，
     # 不代表 LLM 的工具选择精度。
     checks.append(_run_tool_selection_accuracy_gate(clean_root, root, metrics))
 
@@ -1184,14 +1189,16 @@ def _run_faithfulness_gate(
     )
 
 
-class _NullSkillRegistry:
+class _NullSkillRegistry(SkillRegistry):
     """Minimal skill registry for the tool_selection_accuracy gate.
 
-    Returns a successful stub observation for every action name, so the agent's
-    steps record is_error=False for all gold actions (including those with required
-    parameters like propose_fix/build_context_pack/impact_of).  This keeps the
-    gate purely about *action selection*, not about whether tool arguments happened
-    to be valid for the acceptance world fixture.
+    A REAL :class:`SkillRegistry` (so the agent's tool bridge and execution gate run the
+    production path) whose six stub skills declare no parameters and return a successful stub
+    observation for every action, so the agent's steps record is_error=False for all gold
+    actions (including those that require parameters against the real registry, like
+    propose_fix/build_context_pack/impact_of — the stub drops undeclared args). This keeps the
+    gate purely about *action selection*, not about whether tool arguments happened to be
+    valid for the acceptance world fixture.
 
     诚实说明：这是 eval-only 存根，不执行真实工具逻辑，不代表真实能力。
     """
@@ -1205,17 +1212,22 @@ class _NullSkillRegistry:
         "quality_harness",
     )
 
-    def manifest(self, allowed: set[str] | None = None) -> str:
-        if allowed is None:
-            names: tuple[str, ...] = self._SKILL_NAMES
-        else:
-            names = tuple(n for n in self._SKILL_NAMES if n in allowed)
-        lines = [f"- {n}(): offline eval stub [deterministic; read_only]" for n in names]
-        return "\n".join(lines)
-
-    def run(self, name: str, args: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
-        # Always succeeds with a stub observation — is_error stays False.
-        return {"status": "ok", "tool": name, "note": "offline eval stub"}
+    def __init__(self) -> None:
+        super().__init__()
+        for name in self._SKILL_NAMES:
+            self.register(
+                Skill(
+                    name=name,
+                    description="offline eval stub",
+                    cost_tier=CostTier.DETERMINISTIC,
+                    side_effect=SideEffect.READ_ONLY,
+                    handler=lambda _n=name, **_kwargs: {
+                        "status": "ok",
+                        "tool": _n,
+                        "note": "offline eval stub",
+                    },
+                )
+            )
 
 
 def evaluate_tool_selection() -> dict[str, Any]:
@@ -1224,28 +1236,26 @@ def evaluate_tool_selection() -> dict[str, Any]:
     scorecard (``evaluation/agent_eval.py``). $0/deterministic; offline F1==1.0 is by design (the
     provider returns the gold sequence — it measures action *selection*, not live-provider skill).
 
+    真实性标签：FIXTURE，非 real-model。返回的 ``mean_f1`` 由 ``OfflineGoalAwareChatModel``（离线
+    确定性替身）跑出来，不是任何真实 LLM 的工具选择表现，**不得作为对外材料声称的工具选择准确率
+    数字**。真 live-model 工具选择评测见 Wave 5 W5-1（docs/研究/一轮修改优化_总实施方案.md）。
+
     Returns ``{"mean_f1": float, "scenarios": [per-scenario detail dicts]}``.
     """
-    from ..agent.offline import OfflineGoalAwareReActProvider
+    from ..agent.offline import OfflineGoalAwareChatModel
     from ..agent.react import ReActAgent
 
     gold_scenarios = _build_gold_react_scenarios()
     scenario_pairs = [(s.goal, s.expected_actions) for s in gold_scenarios]
-    provider = OfflineGoalAwareReActProvider.from_scenarios(scenario_pairs)
+    model = OfflineGoalAwareChatModel.from_scenarios(scenario_pairs)
     registry = _NullSkillRegistry()
 
     scenario_f1s: list[float] = []
     scenario_details: list[dict[str, Any]] = []
     for scenario in gold_scenarios:
-        gw = LLMGateway(
-            providers={"react": provider},
-            router=StaticRouter(mapping={"agent_react": "react"}),
-            cache=NoOpCache(),
-            telemetry=TelemetryCollector(),
-        )
         agent = ReActAgent(
-            gateway=gw,
-            registry=registry,  # type: ignore[arg-type]
+            model=model,
+            registry=registry,
             max_steps=len(scenario.expected_actions) + 2,
         )
         result = agent.run(scenario.goal)
@@ -1271,7 +1281,7 @@ def _run_tool_selection_accuracy_gate(
 ) -> AcceptanceCheck:
     """Run the tool-selection-accuracy sanity gate.
 
-    Uses OfflineGoalAwareReActProvider (deterministic, $0, no LLM) and
+    Uses OfflineGoalAwareChatModel (deterministic, $0, no LLM) and
     _NullSkillRegistry (stub tool execution so is_error stays False for all
     gold actions regardless of argument validity).
 
@@ -1296,9 +1306,10 @@ def _run_tool_selection_accuracy_gate(
             "scenarios": scenario_details,
             "note": (
                 "集合F1，不计顺序，10个手工标注场景，sanity gate而非统计基准。"
-                "OfflineGoalAwareReActProvider 被设计成精确返回 gold 序列，offline F1=1.0"
+                "OfflineGoalAwareChatModel 被设计成精确返回 gold 序列，offline F1=1.0"
                 " 是设计预期，不代表 LLM 的实际工具选择精度。"
                 "_NullSkillRegistry 存根确保 is_error=False，测量的是 action 选择，不是执行成功率。"
+                "真实性标签：fixture，非 real-model；不得作为对外材料声称的工具选择准确率。"
             ),
         },
     )

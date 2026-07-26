@@ -162,6 +162,34 @@ class AgentBlackboard:
 
         return self._get_by_id(msg_id)
 
+    def claim_assignment(self, msg_id: str) -> AgentMessage | None:
+        """Claim ONE specific ``task_assign`` by id — the exactly-once idempotent gate for Send.
+
+        Unlike :meth:`claim_task` (which selects the OLDEST pending message for a mailbox and is the
+        genuinely-contended arbiter the concurrency primitive tests pin down), this claims a
+        SPECIFIC assignment id that a LangGraph ``Send`` routed straight to a worker node. The
+        conditional ``UPDATE ... WHERE id=? AND status='pending'`` is atomic on its own, so it needs
+        no split TOCTOU window: it flips the row exactly once. A re-dispatched or recovered ``Send``
+        for the same id finds the row already ``claimed`` / ``done`` and gets ``None`` — the gate
+        that stops one assignment from being executed twice. The ``msg_type='task_assign'`` guard
+        keeps a stray id (a result / verify row) from ever being claimed as work.
+        """
+        with self._lock:
+            changed = self._conn.execute(
+                """
+                UPDATE agent_messages
+                SET status = 'claimed'
+                WHERE id = ? AND status = 'pending' AND msg_type = 'task_assign'
+                """,
+                (msg_id,),
+            ).rowcount
+            self._conn.commit()
+
+        if changed == 0:
+            return None  # already claimed/done, or not a pending task_assign (idempotent gate)
+
+        return self._get_by_id(msg_id)
+
     # ------------------------------------------------------------------
     # Read paths
     # ------------------------------------------------------------------

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..config import DEFAULT_CHEAP_MODEL, DEFAULT_LLM_MODE
 from ..content.hash import content_hash
 from ..exporters import EngineTarget, export_content_bundle
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
@@ -194,11 +195,11 @@ def _qa_gateway() -> tuple[LLMGateway, TelemetryCollector]:
     fail-closed behind ``OWCOPILOT_ALLOW_OFFLINE_LLM`` exactly like every other runtime surface.
     """
     telemetry = TelemetryCollector()
-    real = os.getenv("OWCOPILOT_LLM_MODE", "offline") == "real"
+    real = os.getenv("OWCOPILOT_LLM_MODE", DEFAULT_LLM_MODE) == "real"
     if real:
         load_dotenv()  # pick up provider keys from .env; shell env wins
         provider: Any = build_real_provider(
-            model=os.getenv("OWCOPILOT_CHEAP_MODEL", "deepseek-v4-flash")
+            model=os.getenv("OWCOPILOT_CHEAP_MODEL", DEFAULT_CHEAP_MODEL)
         )
     else:
         require_offline_llm_allowed()  # offline fakes are a test/CI fixture, not a product mode
@@ -340,6 +341,7 @@ def export_project(
     content_root: str,
     output_dir: str,
     target_engine: str = EngineTarget.GENERIC.value,
+    row_struct_map: dict[str, dict[str, str]] | None = None,
     sqlite_path: str | None = None,
 ) -> dict[str, Any]:
     """Export project content to engine-friendly JSON files.
@@ -347,7 +349,11 @@ def export_project(
     ``output_dir`` is confined to an export root — ``$OWCOPILOT_EXPORT_ROOT`` if set, else
     ``<content_root>/.owcopilot/exports`` — via :func:`resolve_under_root`, so a model/client
     supplying a traversal or absolute sibling path cannot write outside the sandbox (the same guard
-    the REST export uses). An escape raises a guided ``ValueError``, never a silent write."""
+    the REST export uses). An escape raises a guided ``ValueError``, never a silent write.
+
+    ``row_struct_map`` (UNREAL target only) renames DataTable columns to the target project's own
+    USTRUCT field names, keyed by table (``{"<table>": {"<CanonicalField>": "<ExportName>"}}``).
+    Omit it to keep the default field names — the export is then byte-for-byte as before."""
     with _project(content_root, sqlite_path) as project:
         engine = EngineTarget(target_engine)
         export_root = os.getenv("OWCOPILOT_EXPORT_ROOT") or str(
@@ -362,7 +368,12 @@ def export_project(
             ) from exc
         actual_output = confined / engine.value
         assert_export_ready(project)
-        manifest = export_content_bundle(project.bundle, actual_output, target_engine=engine)
+        manifest = export_content_bundle(
+            project.bundle,
+            actual_output,
+            target_engine=engine,
+            row_struct_map=row_struct_map,
+        )
         return {
             "output_dir": str(actual_output),
             "manifest": manifest.model_dump(mode="json"),

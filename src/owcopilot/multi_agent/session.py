@@ -28,36 +28,58 @@ Architecture compliance (SUPERVISOR_rubric P3-7):
 
 Parallel stage dispatch (Anthropic, *How we built our multi-agent research system* and
 *Building Effective Agents* — orchestrator-workers + parallelization/sectioning):
-    Dispatch is a two-wave fan-out/join.  Wave 1 fans out every diagnosis subtask, JOINs (the
-    lead agent "waits for the whole set of subagents to complete before proceeding"), then wave 2
-    fans out every repair subtask — each enriched with the joined wave-1 findings — and JOINs.
-    Within a wave the subtasks are mutually independent, so a bounded pool of consumer threads
-    drains the wave's blackboard mailbox through the SAME optimistic ``claim_task`` lock (now a
-    genuinely contended arbiter, not a dead loss-branch).  Each claimed task is executed by a
-    FRESH ``WorkerAgent`` instance (its own ReActAgent = its own "context window"), so concurrent
-    branches never clobber a shared transcript.  The default single-diagnosis/single-repair
-    topology runs one consumer per wave, so its behaviour is unchanged from the serial driver.
+    Dispatch is a LangGraph ``StateGraph`` supervisor:
+        plan → Send("diag_worker") × N → join_diag → Send("repair_worker") × M → verify → synthesize
+    ``Send`` fans out each subtask (one packet per assignment id) and a superstep JOIN barrier at
+    the downstream node is Anthropic's "wait for the whole set of subagents to complete before
+    proceeding": ``join_diag`` runs once after ALL diagnosis workers, so repair is enriched with the
+    complete wave-1 findings before it fans out. ``config={"max_concurrency": …}`` bounds the
+    per-wave concurrency (replacing the old ``ThreadPoolExecutor(max_workers=…)``), and the reducer
+    on ``diag_results``/``repair_results`` merges each worker's result id in Send-index order =
+    assignment order (so no post-hoc sort is needed).
+
+    The blackboard is retained as the append-only audit + business channel. Its optimistic claim
+    primitive changes ROLE here: a ``Send`` routes each ``assign_id`` directly, so the worker node
+    claims that SPECIFIC id via :meth:`AgentBlackboard.claim_assignment` — an exactly-once
+    IDEMPOTENT GATE (a re-dispatched / recovered Send for an already-run id is refused), not a
+    mailbox-drain arbiter. Each claimed task is executed by a FRESH ``WorkerAgent`` (its own
+    ReActAgent = its own "context window"), so concurrent branches never clobber a shared
+    transcript, and the crash guard lives INSIDE the worker node (an unhandled exception there would
+    otherwise abort the whole supervisor ``invoke``). A single-Send wave (the default
+    single-diagnosis/single-repair topology) runs the node inline on the caller thread — LangGraph's
+    single-task fast path — which is correct: there is no parallelism to gain from one task. Real
+    parallelism (a wave of ≥2 subtasks) runs the workers concurrently on pool threads.
 
 Offline / $0 compliance:
-    All agents work with MockProvider (via LLMGateway built in tests).  The ReAct loops
-    exhaust max_steps and return "max_steps" stop_reason.  All blackboard writes and reads
-    are real SQLite operations.  The session completes and a MultiAgentReport is returned.
-    Total LLM cost = $0.
+    Worker/verifier ReAct loops run against deterministic chat-model fakes in tests, and the
+    orchestrator's decompose calls run against a non-JSON chat-model fake (so decomposition
+    degrades to the static fallback).  All blackboard writes and reads are real SQLite
+    operations.  The session completes and a MultiAgentReport is returned.  Total LLM cost = $0.
 """
 
 from __future__ import annotations
 
 import logging
+import operator
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+import uuid
+from typing import TYPE_CHECKING, Annotated, TypedDict
+
+from langchain_core.language_models.chat_models import BaseChatModel
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
 
 from ..agent.reflexion import ReflexionError, distill_reflection
-from ..llm.gateway import LLMGateway
+from ..llm.telemetry import TelemetryCollector
 from ..skills import SkillRegistry
+from ..storage.checkpointer import resolve_thread_id
 from .blackboard import AgentBlackboard
 
 if TYPE_CHECKING:
+    from langchain_core.runnables import RunnableConfig
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+    from langgraph.graph.state import CompiledStateGraph
+
     from ..llm.cache import Embedder
     from ..storage.sqlite import SQLiteStore
 from .messages import (
@@ -72,6 +94,31 @@ from .verifier import VerifierAgent
 from .workers import DiagWorker, RepairWorker, WorkerAgent
 
 logger = logging.getLogger(__name__)
+
+
+class _OrchestrationState(TypedDict):
+    """LangGraph channels for one multi-agent run.
+
+    Deliberately thin: it carries only REFERENCES (message ids) and FLAGS, never business content.
+    Every payload / transcript / verdict / reflection lives on the SQLite blackboard — the graph
+    state just threads the ids that let each node read/write those rows in the right order.
+
+    * ``diag_results`` / ``repair_results`` use the ``operator.add`` reducer, so each ``Send``
+      worker's one-element ``[result_id]`` write is merged in *Send-index order* = assignment order
+      (LangGraph merges reducer writes by the emitted Send list index, not completion time — see
+      scratchpad ``verify_t3_send.py``). That is what lets the verify loop consume results in stable
+      assignment order WITHOUT the old ``collected.sort`` — the ordering is now a property of the
+      fan-out, not a post-hoc re-sort.
+    """
+
+    goal: str
+    session_id: str
+    decomposition_degraded: bool
+    diag_assign_ids: list[str]
+    repair_assign_ids: list[str]
+    diag_results: Annotated[list[str], operator.add]
+    repair_results: Annotated[list[str], operator.add]
+    report: MultiAgentReport | None
 
 
 class MultiAgentSession:
@@ -97,7 +144,11 @@ class MultiAgentSession:
     def __init__(
         self,
         *,
-        gateway: LLMGateway,
+        # The orchestrator's decompose calls run on their own LangChain chat model (a distinct
+        # constructor param so a studio may route decomposition to a different/cheaper model);
+        # the worker/verifier ReAct loops run on ``model``. Production passes one instance to both.
+        orchestrator_model: BaseChatModel,
+        model: BaseChatModel,
         registry: SkillRegistry,
         db_path: str = ":memory:",
         # Allow callers to inject a pre-built conn (e.g. shared with SQLiteStore) or let
@@ -115,12 +166,29 @@ class MultiAgentSession:
         # separate from the in-memory blackboard, so wiring it never touches blackboard semantics).
         store: SQLiteStore | None = None,
         embedder: Embedder | None = None,
+        # Per-call accounting for the worker/verifier chat-model calls (one shared collector).
+        telemetry: TelemetryCollector | None = None,
+        # T4 (scheme Y): a LangGraph checkpointer compiled onto the supervisor graph. Default None
+        # ⇒ NO checkpointer, the report is byte-identical to the pre-T4 run. When attached it serves
+        # IN-PROCESS resume — a clean interrupt suspend/continue (the T6 HITL substrate). Cross-
+        # process (kill-9) resume of a multi-agent run is deliberately NOT promised: the blackboard
+        # (default :memory:) and the checkpoint are two independently-committed stores, so a crash
+        # between a claim commit and its result post can drop a task on cross-process replay (see
+        # the design's §3.2). In-process suspend stops cleanly at a node boundary with the pending
+        # write stored and the blackboard connection still live, so no such window opens.
+        checkpointer: BaseCheckpointSaver | None = None,
     ) -> None:
-        self._gateway = gateway
+        self._orchestrator_model = orchestrator_model
+        self._model = model
         self._registry = registry
         self._max_workers = max_workers
         self._store = store
         self._embedder = embedder
+        self._telemetry = telemetry
+        self._checkpointer = checkpointer
+        # The thread_id the LAST run used (auto-minted when a checkpointer is attached and none was
+        # passed); the assembly layer surfaces it.
+        self.last_thread_id: str | None = None
 
         # Set up the shared SQLite connection (WAL mode for safe concurrent read).
         if conn is not None:
@@ -139,32 +207,38 @@ class MultiAgentSession:
 
         self.blackboard = AgentBlackboard(self._conn)
 
-        # Instantiate all four agents — each with its own LLM gateway call path and transcript.
-        # The gateway instance may be shared (it is stateless beyond telemetry collection),
-        # but each agent creates its own ReActAgent which owns an independent transcript list.
+        # Instantiate all four agents — each with its own LLM call path and transcript.
+        # The chat model instance may be shared (it is stateless per call), but each agent
+        # creates its own ReActAgent which owns an independent transcript.
         self.orchestrator = OrchestratorAgent(
             agent_id="orchestrator",
-            gateway=gateway,
+            model=orchestrator_model,
             registry=registry,
             # Constrain decomposition to the real routing table (mirrors self._workers below)
             # so the model addresses actual workers; near-miss ids (rep_01 for repair_01) are
             # normalised to the role's registered worker instead of being dropped UNROUTED.
             registered_workers={"diagnosis": "diag_01", "repair_proposal": "repair_01"},
+            # Bill the decompose calls into the shared collector (§1.3) — parity with the retired
+            # gateway telemetry; None ⇒ decompose cost is simply not recorded.
+            telemetry=telemetry,
         )
         self.diag_worker = DiagWorker(
             agent_id="diag_01",
-            gateway=gateway,
+            model=model,
             registry=registry,
+            telemetry=telemetry,
         )
         self.repair_worker = RepairWorker(
             agent_id="repair_01",
-            gateway=gateway,
+            model=model,
             registry=registry,
+            telemetry=telemetry,
         )
         self.verifier = VerifierAgent(
             agent_id="verifier_01",
-            gateway=gateway,
+            model=model,
             registry=registry,
+            telemetry=telemetry,
         )
 
         # Worker routing table: agent_id → WorkerAgent instance. Still used by the serial
@@ -180,43 +254,138 @@ class MultiAgentSession:
             agent_id: worker.role for agent_id, worker in self._workers.items()
         }
 
-    def run(self, goal: str, *, session_id: str | None = None) -> MultiAgentReport:
+        # Per-run recall cache: assign_id → recalled Reflexion lessons (or None). Populated on the
+        # SOLO plan/join supersteps (serial store access — never concurrent, so the store's shared
+        # connection is safe) and READ by the parallel worker nodes. Reset at the top of ``run`` so
+        # a prior run's recall never leaks; inert (stays empty) unless a store+embedder are wired.
+        self._reflections_by_assign: dict[str, list[str] | None] = {}
+
+        # Compile the supervisor graph once; it reads per-run state from the graph channels and the
+        # recall cache above, so a single compiled instance is reused across runs.
+        self._graph = self._build_graph()
+
+    def run(
+        self,
+        goal: str = "",
+        *,
+        session_id: str | None = None,
+        thread_id: str | None = None,
+        resume: bool = False,
+    ) -> MultiAgentReport:
         """Execute one full multi-agent session and return the synthesized report.
 
-        Flow (blackboard-mediated, not a nested call stack):
-        1. Orchestrator decomposes goal → posts task_assign messages to blackboard.
-        2. Two-wave fan-out/join: wave 1 runs every diagnosis subtask in parallel and JOINs;
-           wave 2 runs every repair subtask (enriched with the joined wave-1 findings) in
-           parallel and JOINs. Each wave's consumers claim from the blackboard via the optimistic
-           lock and run a FRESH worker per claimed task.
-        3. Orchestrator posts verify_request for each task_result.
-        4. Verifier reads verify_request + task_result from blackboard, runs independent audit,
-           posts verify_result to blackboard.
-        5. Orchestrator reads all results from blackboard → synthesizes → returns report.
+        Drives the LangGraph supervisor graph (plan → Send diag workers → join_diag → Send repair
+        workers → verify → synthesize). Communication is blackboard-mediated throughout — the graph
+        state threads only ids/flags between nodes, never a nested Python call chain (P3-7).
+
+        Resume (T4, superset signature — IN-PROCESS only, scheme Y): with a checkpointer attached,
+        ``resume=True`` + ``thread_id`` continues a suspended graph (``invoke(None)``) from its last
+        superstep. This is the substrate for T6 in-process HITL (a clean ``interrupt`` suspend, a
+        human decision, then continue). It is NOT a cross-process crash-resume: the recall cache and
+        blackboard connection are live only within this instance, so a fresh process cannot resume a
+        killed multi-agent run — that boundary is deliberate (design §3). The default call (no
+        checkpointer, no thread_id) is byte-identical to the pre-T4 run.
         """
-        import uuid
+        config: RunnableConfig = {
+            # Bounds the per-wave concurrency (LangGraph caps the executor at this many workers) —
+            # the declarative replacement for the old ``ThreadPoolExecutor(max_workers=…)``.
+            "max_concurrency": max(1, self._max_workers)
+        }
+        effective_thread_id = resolve_thread_id(
+            self._checkpointer, thread_id=thread_id, resume=resume
+        )
+        self.last_thread_id = effective_thread_id
+        if effective_thread_id is not None:
+            config["configurable"] = {"thread_id": effective_thread_id}
 
-        sid = session_id or str(uuid.uuid4())
+        if resume:
+            # Continue the suspended graph; its channels (session_id, ids, recall) are in the
+            # checkpoint / this live instance. The recall cache is NOT reset — a resume mid-run
+            # must keep the memory the plan/join supersteps populated.
+            final_state = self._graph.invoke(None, config=config)
+        else:
+            sid = session_id or str(uuid.uuid4())
+            # Reset the recall cache for this run (see the attribute's declaration in __init__).
+            self._reflections_by_assign = {}
+            final_state = self._graph.invoke(
+                {
+                    "goal": goal,
+                    "session_id": sid,
+                    "decomposition_degraded": False,
+                    "diag_assign_ids": [],
+                    "repair_assign_ids": [],
+                    "diag_results": [],
+                    "repair_results": [],
+                    "report": None,
+                },
+                config=config,
+            )
+        report = final_state["report"]
+        # ``synthesize`` is the terminal node and always populates ``report``; the guard keeps the
+        # public return type honest (never a silent None) if the graph is ever short-circuited.
+        assert report is not None, "synthesize node must populate the report"
+        return report
 
-        # Step 1: Orchestrator decomposes and posts task assignments
-        # ② post_task_assignments now returns (msgs, degraded) — degraded must be surfaced
-        task_msgs, decomposition_degraded = self.orchestrator.post_task_assignments(
-            goal=goal,
-            session_id=sid,
-            blackboard=self.blackboard,
+    # ------------------------------------------------------------------
+    # Supervisor graph (LangGraph StateGraph — orchestrator-workers + sectioning)
+    # ------------------------------------------------------------------
+
+    def _build_graph(self) -> CompiledStateGraph:
+        """Wire the two-wave supervisor: plan → diag Send/JOIN → repair Send/JOIN → verify → synth.
+
+        The conditional edges fan each wave out as one ``Send`` per assignment id, and the plain
+        ``worker → join`` edges are the superstep JOIN barriers. An empty wave routes straight to
+        the downstream node (returning ``[]`` from a conditional edge would route NOWHERE —
+        LangGraph writes no edge for an empty list — so a fallback node NAME is returned instead).
+        """
+        g = StateGraph(_OrchestrationState)
+        g.add_node("plan", self._plan_node)
+        # The two worker nodes receive a Send PACKET (``{"assign_id", "session_id"}``), not the full
+        # state — a contract LangGraph's static ``add_node`` types cannot express, so the arg-type
+        # mismatch is ignored here; the other four nodes take the state and type-check.
+        g.add_node("diag_worker", self._diag_worker_node)  # type: ignore[arg-type]
+        g.add_node("join_diag", self._join_diag_node)
+        g.add_node("repair_worker", self._repair_worker_node)  # type: ignore[arg-type]
+        g.add_node("verify", self._verify_node)
+        g.add_node("synthesize", self._synthesize_node)
+
+        g.add_edge(START, "plan")
+        g.add_conditional_edges("plan", self._fan_diag, ["diag_worker", "join_diag"])
+        g.add_edge("diag_worker", "join_diag")  # wave-1 JOIN barrier
+        g.add_conditional_edges("join_diag", self._fan_repair, ["repair_worker", "verify"])
+        g.add_edge("repair_worker", "verify")  # wave-2 JOIN barrier
+        g.add_edge("verify", "synthesize")
+        g.add_edge("synthesize", END)
+        # None ⇒ the compile default (no checkpointer): the run is byte-identical to the pre-T4
+        # graph. A checkpointer persists the supervisor's channels for in-process resume (scheme Y).
+        return g.compile(checkpointer=self._checkpointer)
+
+    def _plan_node(self, state: _OrchestrationState) -> dict:
+        """Decompose the goal, post assignments, split routed vs unrouted, recall diag reflections.
+
+        Runs as a solo superstep (no concurrent siblings), so the single-threaded-safe recall of
+        Reflexion lessons for the diagnosis wave happens here — before any parallel Send.
+        """
+        goal = state["goal"]
+        sid = state["session_id"]
+
+        # ② post_task_assignments returns (msgs, degraded) — degraded must be surfaced.
+        task_msgs, degraded = self.orchestrator.post_task_assignments(
+            goal=goal, session_id=sid, blackboard=self.blackboard
         )
 
-        # Step 2: two-wave fan-out/join (Anthropic orchestrator-workers + parallelization).
-        # Pre-pass (serial, main thread): split routed vs unrouted assignments. Unrouted ones are
-        # recorded here exactly as the serial driver did — posted to the blackboard and surfaced
-        # in synthesis, but (as before) NOT sent through the verify loop.
-        staged: list[AgentMessage] = []
+        diag_assign_ids: list[str] = []
+        repair_assign_ids: list[str] = []
         for task_msg in task_msgs:
             if task_msg.to_agent in self._workers:
-                staged.append(task_msg)
+                role = self._role_by_agent[task_msg.to_agent]
+                if role == "diagnosis":
+                    diag_assign_ids.append(task_msg.id)
+                elif role == "repair_proposal":
+                    repair_assign_ids.append(task_msg.id)
                 continue
-            # ③ Unknown worker_id — NOT silent continue.
-            # Warn loudly and record an unrouted_task message to the blackboard.
+            # ③ Unknown worker_id — NOT a silent continue. Record an unrouted task_result on the
+            # blackboard (surfaced in synthesis, but NOT sent through the verify loop, as before).
             logger.warning(
                 "session %s: task_msg %s targets unknown worker_id %r — task unrouted",
                 sid,
@@ -242,129 +411,164 @@ class MultiAgentSession:
                 status="failed",
             )
             self.blackboard.post_message(unrouted_msg)
-            # Mark the original task_assign as failed too
             self.blackboard.update_status(task_msg.id, "failed")
 
-        # Wave 1: fan out every diagnosis subtask, then JOIN (barrier inside _dispatch_stage).
-        diag_tasks = [t for t in staged if self._role_by_agent[t.to_agent] == "diagnosis"]
-        diag_results = self._dispatch_stage(diag_tasks, sid)
+        self._recall_into_cache(diag_assign_ids)
 
-        # ④ Wave 2: enrich each repair subtask with the JOINED wave-1 diagnosis findings, then fan
-        # out and JOIN. The enriched assign is POSTED and the original superseded, so the repair
-        # consumer claims the enriched version — the real diag→repair handoff. Only diagnosis
-        # results that actually ran (stop_reason ∉ {error, unrouted}) carry findings to inject;
-        # if none did, repair runs un-enriched, matching the serial ``diag_result_msg is None``.
+        return {
+            "decomposition_degraded": degraded,
+            "diag_assign_ids": diag_assign_ids,
+            "repair_assign_ids": repair_assign_ids,
+        }
+
+    def _fan_diag(self, state: _OrchestrationState) -> list[Send] | list[str]:
+        """Fan out one ``Send`` per diagnosis assignment; route straight to join_diag if none."""
+        assign_ids = state["diag_assign_ids"]
+        if not assign_ids:
+            return ["join_diag"]
+        return [
+            Send("diag_worker", {"assign_id": aid, "session_id": state["session_id"]})
+            for aid in assign_ids
+        ]
+
+    def _diag_worker_node(self, arg: dict) -> dict:
+        """Execute one diagnosis assignment routed by ``Send`` (see ``_execute_send``)."""
+        result_id = self._execute_send(arg)
+        return {"diag_results": [result_id] if result_id is not None else []}
+
+    def _join_diag_node(self, state: _OrchestrationState) -> dict:
+        """Wave-1 JOIN: fold ALL diagnosis findings into the repair assigns, recall repair memory.
+
+        ④ Runs once after every diagnosis worker (superstep barrier), so repair sees the COMPLETE
+        wave-1 findings. Each repair assign is enriched with the joined diagnosis final_answer (the
+        original generic assign superseded to 'done', the enriched one posted so the worker claims
+        it) — the real diag→repair handoff. Only diagnosis results that actually ran
+        (stop_reason ∉ {error, unrouted}) carry findings; if none did, repair runs un-enriched.
+        This is also a solo superstep, so the repair-wave reflexion recall (keyed on the ENRICHED
+        goal) is done here, off the parallel path.
+        """
+        sid = state["session_id"]
+
+        diag_msgs = [self.blackboard.get_message(rid) for rid in state["diag_results"]]
         successful_diag = [
-            r
-            for r in diag_results
-            if TaskResultPayload.from_dict(r.payload).stop_reason not in ("error", "unrouted")
+            m
+            for m in diag_msgs
+            if m is not None
+            and TaskResultPayload.from_dict(m.payload).stop_reason not in ("error", "unrouted")
         ]
         combined_diag = _combine_diag_results(successful_diag)
-        repair_tasks = [t for t in staged if self._role_by_agent[t.to_agent] == "repair_proposal"]
-        repair_stage_tasks: list[AgentMessage] = []
-        for repair_task_msg in repair_tasks:
+
+        staged_repair_ids: list[str] = []
+        for rid in state["repair_assign_ids"]:
+            repair_task_msg = self.blackboard.get_message(rid)
+            if repair_task_msg is None:
+                continue  # defensive — an assign we just posted must exist
             stage_task = repair_task_msg
             if combined_diag is not None:
                 enriched = _enrich_repair_task(repair_task_msg, combined_diag, sid)
                 if enriched is not repair_task_msg:
-                    # Mark original generic assign as superseded (not claimable)
-                    self.blackboard.update_status(repair_task_msg.id, "done")
-                    # Post the enriched assign so the worker claims it
-                    self.blackboard.post_message(enriched)
+                    self.blackboard.update_status(repair_task_msg.id, "done")  # supersede original
+                    self.blackboard.post_message(enriched)  # post enriched so the worker claims it
                 stage_task = enriched
-            repair_stage_tasks.append(stage_task)
-        repair_results = self._dispatch_stage(repair_stage_tasks, sid)
+            staged_repair_ids.append(stage_task.id)
 
-        # Verify loop consumes the worker results in stable assignment order (wave 1 then wave 2).
-        # This matches the serial driver's routed-result order for the default topology and is
-        # deterministic despite the racy per-thread ``created_at`` stamps.
-        task_result_msgs: list[AgentMessage] = diag_results + repair_results
+        self._recall_into_cache(staged_repair_ids)
 
-        # Step 3 + 4: Orchestrator requests verification; verifier runs independently
-        for task_result_msg in task_result_msgs:
+        return {"repair_assign_ids": staged_repair_ids}
+
+    def _fan_repair(self, state: _OrchestrationState) -> list[Send] | list[str]:
+        """Fan out one ``Send`` per (enriched) repair assignment; route to verify if none."""
+        assign_ids = state["repair_assign_ids"]
+        if not assign_ids:
+            return ["verify"]
+        return [
+            Send("repair_worker", {"assign_id": aid, "session_id": state["session_id"]})
+            for aid in assign_ids
+        ]
+
+    def _repair_worker_node(self, arg: dict) -> dict:
+        """Execute one repair assignment routed by ``Send`` (see ``_execute_send``)."""
+        result_id = self._execute_send(arg)
+        return {"repair_results": [result_id] if result_id is not None else []}
+
+    def _verify_node(self, state: _OrchestrationState) -> dict:
+        """Serial verify loop over every worker result (wave 1 then wave 2, assignment order).
+
+        The verifier runs its independent audit for each result, and a fail/needs_more verdict
+        DRIVES a single bounded Reflexion retry (Shinn et al., 2023). This whole step is a solo
+        superstep — the single-shot retry re-runs the actor and re-verifies IN PLACE and never emits
+        a new Send, so no retry can cascade into a fresh wave.
+        """
+        sid = state["session_id"]
+        result_ids = list(state["diag_results"]) + list(state["repair_results"])
+        for rid in result_ids:
+            task_result_msg = self.blackboard.get_message(rid)
+            if task_result_msg is None:
+                continue  # defensive
             verify_req = self.orchestrator.post_verify_request(
                 task_result_msg=task_result_msg,
                 session_id=sid,
                 blackboard=self.blackboard,
             )
-            # Verifier claims verify_request and runs its independent audit.
-            # T2: keep its verdict — a fail/needs_more signal now DRIVES a single Reflexion
-            # retry (Shinn et al., 2023) instead of only being annotated in synthesis.
             verify_result_msg = self.verifier.verify(verify_req, self.blackboard)
             self._maybe_reflexion_retry(
                 task_result_msg=task_result_msg,
                 verify_result_msg=verify_result_msg,
                 session_id=sid,
             )
+        return {}
 
-        # Step 5: Orchestrator synthesizes all results
-        # ② Pass decomposition_degraded through so synthesis annotates it — no silent downgrade
-        # Both the initial and any retry task_result/verify_result rows are on the blackboard;
-        # synthesize reads them all, so a flipped-to-pass retry and a still-[INCOMPLETE] second
-        # trial are both surfaced honestly.
-        return self.orchestrator.synthesize(
-            goal=goal,
-            session_id=sid,
-            blackboard=self.blackboard,
-            decomposition_degraded=decomposition_degraded,
-        )
+    def _synthesize_node(self, state: _OrchestrationState) -> dict:
+        """Terminal node: read all blackboard results → synthesized report (deterministic, no LLM).
 
-    # ------------------------------------------------------------------
-    # Parallel stage dispatch (Anthropic orchestrator-workers + sectioning)
-    # ------------------------------------------------------------------
-
-    def _dispatch_stage(self, stage_tasks: list[AgentMessage], sid: str) -> list[AgentMessage]:
-        """Run one fan-out wave of mutually independent subtasks and JOIN before returning.
-
-        A bounded pool of consumer threads drains the wave's blackboard mailbox(es) through the
-        EXISTING optimistic ``claim_task`` lock (genuinely contended when a wave holds >1 subtask
-        for the same worker). Each claimed task is executed by a FRESH ``WorkerAgent`` (its own
-        ReActAgent transcript), so concurrent branches never clobber a shared transcript. Exiting
-        the ``with`` block is the wave barrier — Anthropic's "wait for the whole set of subagents
-        to complete before proceeding". Results are returned in stable *assignment* order, not
-        completion order, because ``created_at`` is stamped per-thread and would otherwise be
-        nondeterministic.
+        ② decomposition_degraded is threaded through so synthesis annotates it. Both the initial and
+        any retry task_result/verify_result rows are on the blackboard, so a flipped-to-pass retry
+        and a still-[INCOMPLETE] second trial are both surfaced honestly.
         """
-        if not stage_tasks:
-            return []
-        n = len(stage_tasks)
-        workers = max(1, min(self._max_workers, n))
-        # Distinct mailbox addresses (normalised decomposition ⇒ one per wave), first-seen order.
-        mailboxes = list(dict.fromkeys(t.to_agent for t in stage_tasks))
-        # assign msg id → assignment index, for deterministic post-join ordering.
-        order = {t.id: i for i, t in enumerate(stage_tasks)}
-        # Recall the Reflexion-buffer lessons for every task HERE, on the main thread, before the
-        # pool starts — the runtime store's SQLite connection is single-threaded, so it must not be
-        # touched from a consumer thread. This is the "query once when composing the tasks" point.
-        reflections_by_task = {t.id: self._reflections_for_task(t) for t in stage_tasks}
-
-        def _consume() -> list[AgentMessage]:
-            produced: list[AgentMessage] = []
-            while True:
-                claimed_any = False
-                for addr in mailboxes:
-                    claimed = self.blackboard.claim_task(addr, sid)
-                    if claimed is None:
-                        continue  # another consumer won this one (or the mailbox is drained)
-                    claimed_any = True
-                    worker = self._spawn_worker(self._role_by_agent[addr], addr)
-                    produced.append(
-                        self._run_one_claimed(
-                            worker, claimed, sid, reflections_by_task.get(claimed.id)
-                        )
-                    )
-                if not claimed_any:
-                    return produced
-
-        collected: list[AgentMessage] = []
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for future in [pool.submit(_consume) for _ in range(workers)]:
-                collected.extend(future.result())
-
-        collected.sort(
-            key=lambda m: order.get(TaskResultPayload.from_dict(m.payload).task_msg_id, len(order))
+        report = self.orchestrator.synthesize(
+            goal=state["goal"],
+            session_id=state["session_id"],
+            blackboard=self.blackboard,
+            decomposition_degraded=state["decomposition_degraded"],
         )
-        return collected
+        return {"report": report}
+
+    def _execute_send(self, arg: dict) -> str | None:
+        """Run ONE ``Send``-routed assignment: idempotent-claim → fresh worker → guarded run.
+
+        Returns the posted task_result msg id, or ``None`` when the claim gate refused the assign
+        (already executed — a re-dispatched / checkpoint-recovered Send), so the wave records no
+        duplicate result. The crash guard (:meth:`_run_one_claimed`) is node-internal by design: an
+        unhandled exception raised inside a ``Send`` node aborts the ENTIRE supervisor ``invoke`` (a
+        sibling's crash would sink the whole wave), whereas the serial driver's contract is "one
+        worker crash ⇒ one failed task_result, the rest of the wave still runs".
+        """
+        assign_id = arg["assign_id"]
+        sid = arg["session_id"]
+        claimed = self.blackboard.claim_assignment(assign_id)
+        if claimed is None:
+            # Idempotent gate: this assignment was already claimed/run (a re-dispatched or
+            # checkpoint-recovered Send) — do not execute it twice.
+            return None
+        role = self._role_by_agent[claimed.to_agent]
+        worker = self._spawn_worker(role, claimed.to_agent)
+        result_msg = self._run_one_claimed(
+            worker, claimed, sid, self._reflections_by_assign.get(assign_id)
+        )
+        return result_msg.id
+
+    def _recall_into_cache(self, assign_ids: list[str]) -> None:
+        """Recall the Reflexion lessons for each assignment into ``self._reflections_by_assign``.
+
+        Called only from the solo plan/join supersteps (never a parallel Send), so the runtime
+        store's shared connection is accessed serially — the constraint is non-concurrent use, not
+        a single owning thread (the store opens ``check_same_thread=False``). Inert without a
+        store/embedder (:meth:`_reflections_for_task` returns None), so the default path is a no-op.
+        """
+        for assign_id in assign_ids:
+            task_msg = self.blackboard.get_message(assign_id)
+            if task_msg is not None:
+                self._reflections_by_assign[assign_id] = self._reflections_for_task(task_msg)
 
     def _run_one_claimed(
         self,
@@ -415,14 +619,19 @@ class MultiAgentSession:
             return failed_result
 
     def _spawn_worker(self, role: str, agent_id: str) -> WorkerAgent:
-        """Build a FRESH worker instance (own gateway/registry/ReActAgent) for one claimed task.
+        """Build a FRESH worker instance (own registry scope/ReActAgent) for one claimed task.
 
         Factory instances share the concrete class with the ``self.diag_worker`` /
         ``self.repair_worker`` singletons (via ``_WORKER_CLASSES``), so class-level test patches on
         ``DiagWorker.run_task`` / ``RepairWorker.run_task`` apply to spawned workers too.
         """
         worker_cls = self._WORKER_CLASSES[role]
-        return worker_cls(agent_id=agent_id, gateway=self._gateway, registry=self._registry)
+        return worker_cls(
+            agent_id=agent_id,
+            model=self._model,
+            registry=self._registry,
+            telemetry=self._telemetry,
+        )
 
     # ------------------------------------------------------------------
     # T2: single-shot Reflexion retry (Shinn et al., 2023)
@@ -521,8 +730,9 @@ class MultiAgentSession:
         goal = worker.build_goal(assign)
 
         # Self-Reflection (T1 piece): distil ONE verbal reflection from the evaluator feedback.
-        # Offline ($0) this is the gated deterministic template; online it is one LLM call through
-        # the worker's own gateway/task. A blank reflection raises ReflexionError — not swallowed.
+        # Offline ($0) this is the gated deterministic template; online it is one call through
+        # the worker's own chat model/task. A blank reflection raises ReflexionError, never
+        # swallowed.
         try:
             reflection = distill_reflection(
                 agent=worker.agent, goal=goal, trial_index=0, feedback=feedback

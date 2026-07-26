@@ -1,0 +1,13 @@
+{
+  "id": "jiamu",
+  "name": "贾母",
+  "type": "npc",
+  "description": "荣国府老祖宗，黛玉的外祖母，合府尊长，一手安排黛玉初来的见礼次序——本描述为改编创作，非原著引文。",
+  "aliases": ["老太太", "史太君"],
+  "tags": ["贾家", "长辈"],
+  "status": "active",
+  "version": null,
+  "metadata": {},
+  "origin": "human",
+  "review_status": "approved"
+}

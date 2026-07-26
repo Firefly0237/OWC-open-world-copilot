@@ -3,7 +3,7 @@
 
 Like `qa.offline.OfflineQAProvider`, these are not language models: they emit minimal structured
 output so the surrounding machinery — constrained prompts, parsing, audit, lint, review queue —
-can be exercised end-to-end at $0. Swap in `OpenAICompatProvider` (`--llm-mode real`) for real
+can be exercised end-to-end at $0. Swap in the real LLM mode (`--llm-mode real`) for real
 generation; nothing else in the flow changes.
 """
 

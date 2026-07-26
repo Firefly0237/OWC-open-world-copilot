@@ -27,7 +27,9 @@ from .models import (
     RegionBrief,
     Relation,
     StyleGuide,
+    StyleRubric,
     Term,
+    relation_sort_key,
 )
 from .normalize import _FORBIDDEN_ID_CHARS, _validate_id_chars
 
@@ -37,6 +39,35 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 # ``root/versions/<version>/``. ``v1`` matches the default scope, so ``load_scoped(version="v1")``
 # with no ``versions/`` dir is byte-identical to ``load()`` (INV-1).
 _BASELINE_VERSION = "v1"
+
+# Internal version-tree machinery for transparent update-ingest (the vendor-branch model of the
+# third-station root-cause fix). A migrated world hides all of these behind the single user-facing
+# "current world": the frozen baseline seed (``v1``), the immutable merge points (``m__<seq>``), the
+# frozen import mirrors (``imp__<seq>``) and the mutable working lines (``work__<seq>``). Only a
+# working line is ever written by the editing/ingest paths; merge points and mirrors are frozen the
+# moment their content lands (``save_scoped`` refuses a frozen version), so the three-way merge base
+# is always immutable -- the property that stops the "mirror hung on a mutable working version =>
+# blind last-write-wins" trap. The ``_head.json`` sidecar records the world's current
+# ``(merge_point, working)`` pair so opening the world lands transparently on the working line
+# without the user ever choosing a version.
+_WORKING_PREFIX = "work__"
+_MERGE_POINT_PREFIX = "m__"
+_MIRROR_PREFIX = "imp__"
+_HEAD_FILE = "_head.json"
+
+
+def is_internal_version(version: str) -> bool:
+    """Whether ``version`` is version-tree machinery that must never surface as a user-selectable
+    world version.
+
+    The baseline seed (``v1``), merge points (``m__*``), import mirrors (``imp__*``) and working
+    lines (``work__*``) are all internal: a migrated world presents exactly one thing to the user --
+    "the current world" -- and resolves that to the working line under the hood. Enumeration points
+    (version pickers, the SQLite version registry) filter on this predicate so the machinery never
+    leaks into the UI/API."""
+    return version == _BASELINE_VERSION or version.startswith(
+        (_WORKING_PREFIX, _MERGE_POINT_PREFIX, _MIRROR_PREFIX)
+    )
 
 
 class ContentStore:
@@ -86,6 +117,8 @@ class ContentStore:
             bundle.terms[term.id] = term
         for style in self._load_style_guides(root):
             bundle.style_guides[style.id] = style
+        for rubric in self._load_style_rubrics(root):
+            bundle.style_rubrics[rubric.id] = rubric
         return bundle
 
     # -- Version overlay (copy-on-write inheritance) ---------------------------------------------
@@ -132,13 +165,36 @@ class ContentStore:
         chain.reverse()  # baseline first, target last
         return chain
 
-    def _version_base(self, version: str) -> str | None:
+    def _version_meta(self, version: str) -> dict[str, Any]:
+        """The parsed ``versions/<version>/version.json`` (``{}`` if absent)."""
         meta = self.root / "versions" / version / "version.json"
         if not meta.exists():
-            return None  # no metadata -> derives directly from the baseline
+            return {}
         data = json.loads(meta.read_text(encoding="utf-8"))
-        base = data.get("base_version")
+        return data if isinstance(data, dict) else {}
+
+    def _version_base(self, version: str) -> str | None:
+        base = self._version_meta(version).get("base_version")
         return str(base) if base else None
+
+    def _version_frozen(self, version: str) -> bool:
+        """Whether a version is frozen (immutable). Merge points and import mirrors freeze the
+        instant their content lands so the three-way merge base can never mutate under them."""
+        return bool(self._version_meta(version).get("frozen"))
+
+    def freeze_version(self, version: str) -> None:
+        """Mark a derived version immutable. Idempotent; refuses the baseline (which has no
+        ``version.json``) and an unknown version. Called after a merge point / import mirror's
+        content is written, so the copy-on-write chain past it stays a stable merge base."""
+        if version == _BASELINE_VERSION:
+            raise ValueError(f"{_BASELINE_VERSION!r} is the baseline and is frozen by construction")
+        meta_path = self.root / "versions" / version / "version.json"
+        if not meta_path.exists():
+            raise ValueError(f"version {version!r} does not exist")
+        meta = self._version_meta(version)
+        meta["frozen"] = True
+        meta_path.write_text(_json(meta), encoding="utf-8")
+        self._parse_cache.clear()
 
     def common_base_version(self, a: str, b: str) -> str:
         """The merge base of two versions: the deepest version common to both base chains.
@@ -153,6 +209,89 @@ class ContentStore:
                 break
             common = va
         return common
+
+    # -- Transparent update-ingest head (vendor-branch working line) ----------------------------
+
+    def _head_path(self) -> Path:
+        return self.root / "versions" / _HEAD_FILE
+
+    def read_head(self) -> dict[str, Any] | None:
+        """The world's migration head (``{merge_point, working, seq}``), or ``None`` if the world
+        has not been migrated to the working-line model yet."""
+        path = self._head_path()
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+
+    def _write_head(self, *, merge_point: str, working: str, seq: int) -> None:
+        path = self._head_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            _json({"merge_point": merge_point, "working": working, "seq": seq}), encoding="utf-8"
+        )
+        self._parse_cache.clear()
+
+    def ensure_migrated(self) -> str:
+        """Transparently migrate this world to the working-line model, once, and return the current
+        working version.
+
+        Idempotent: a world with a head is already migrated, so this just returns its working line.
+        A fresh world freezes the baseline ``v1`` as the first merge point *by convention* (nothing
+        writes to it after this) and branches a mutable working line ``work__0`` off it, then
+        records the head. The migration is lossless -- ``work__0`` is an empty copy-on-write branch,
+        so ``load_scoped(work__0)`` is byte-for-byte the baseline until content is written. Callers
+        open the world at the returned working version so editing/ingest never touch baseline."""
+        head = self.read_head()
+        if head is not None:
+            return str(head["working"])
+        working = f"{_WORKING_PREFIX}0"
+        # Guard the (near-impossible) name clash from a hand-built world tree.
+        if (self.root / "versions" / working / "version.json").exists():
+            raise ValueError(f"cannot migrate: reserved version {working!r} already exists")
+        self.create_version(working, base_version=_BASELINE_VERSION)
+        self._write_head(merge_point=_BASELINE_VERSION, working=working, seq=0)
+        return working
+
+    def advance_head(self, *, merged: ContentBundle) -> str:
+        """Land a completed three-way merge as a new frozen merge point and a fresh working line.
+
+        This is the copy-on-write ratchet that keeps the merge base immutable: it writes ``merged``
+        into a new frozen merge point ``m__<seq+1>`` (based on the current merge point) and into a
+        new mutable working line ``work__<seq+1>`` (based on that merge point), then moves the head.
+        The new working line starts byte-identical to the merge point; subsequent library edits
+        accumulate on it, and the next import's base is this merge point -- never a mutable version.
+        Returns the new working version."""
+        head = self.read_head()
+        if head is None:
+            raise ValueError("world is not migrated; call ensure_migrated() first")
+        seq = int(head["seq"]) + 1
+        base_mp = str(head["merge_point"])
+        new_mp = f"{_MERGE_POINT_PREFIX}{seq}"
+        new_work = f"{_WORKING_PREFIX}{seq}"
+        self.create_version(new_mp, base_version=base_mp)
+        self.save_scoped(merged, version=new_mp)
+        self.freeze_version(new_mp)
+        self.create_version(new_work, base_version=new_mp)
+        self.save_scoped(merged, version=new_work)
+        self._write_head(merge_point=new_mp, working=new_work, seq=seq)
+        return new_work
+
+    def create_import_mirror(self, *, seed: ContentBundle) -> str:
+        """Vendor-drop: write ``seed`` into a new frozen import mirror based on the current merge
+        point, and return its version name (``imp__<seq+1>``). The mirror hangs off the *immutable*
+        merge point (not the working line), so ``common_base_version(working, mirror)`` is that
+        merge point -- the precondition for a real three-way merge (via :func:`merge_versions`)
+        instead of blind last-write-wins. Retention of accumulated mirrors is left to a later unit
+        (this is the vendor-branch drop record)."""
+        head = self.read_head()
+        if head is None:
+            raise ValueError("world is not migrated; call ensure_migrated() first")
+        mirror = f"{_MIRROR_PREFIX}{int(head['seq']) + 1}"
+        self.create_version(mirror, base_version=str(head["merge_point"]))
+        self.save_scoped(seed, version=mirror)
+        self.freeze_version(mirror)
+        return mirror
 
     def _load_tombstones(self, version: str) -> set[str]:
         """The ``"kind:id"`` entries a derived version deletes from its base (``[]`` if none)."""
@@ -187,6 +326,7 @@ class ContentStore:
         base.localized_texts.update(overlay.localized_texts)
         base.terms.update(overlay.terms)
         base.style_guides.update(overlay.style_guides)
+        base.style_rubrics.update(overlay.style_rubrics)
         base.quest_event_refs.update(overlay.quest_event_refs)
         base.relations.extend(overlay.relations)
         if not tombstones:
@@ -201,6 +341,7 @@ class ContentStore:
             "localized_text": base.localized_texts,
             "term": base.terms,
             "style_guide": base.style_guides,
+            "style_rubric": base.style_rubrics,
             "quest_event_ref": base.quest_event_refs,
         }
         relation_tombstones = {t for t in tombstones if t.startswith("relation:")}
@@ -217,13 +358,17 @@ class ContentStore:
                 r for r in base.relations if _relation_tombstone(r) not in relation_tombstones
             ]
 
-    def create_version(self, version: str, *, base_version: str = _BASELINE_VERSION) -> None:
+    def create_version(
+        self, version: str, *, base_version: str = _BASELINE_VERSION, frozen: bool = False
+    ) -> None:
         """Branch a derived ``version`` from ``base_version`` (copy-on-write: no content copied).
 
         Writes only ``versions/<version>/version.json`` recording the base; the override dir starts
         empty, so ``load_scoped(version=<version>)`` immediately equals its base until content is
         saved into it. Refuses the baseline name, an existing version, an unknown base, or a base
-        cycle -- keeping ``_resolve_version_chain`` acyclic by construction."""
+        cycle -- keeping ``_resolve_version_chain`` acyclic by construction. ``frozen=True`` marks
+        the version immutable up front (rare -- callers that must seed content first create it
+        mutable, ``save_scoped`` the content, then :meth:`freeze_version`)."""
         if version == _BASELINE_VERSION:
             raise ValueError(f"{_BASELINE_VERSION!r} is the baseline version and cannot be created")
         _validate_id_chars(version, context="create_version", forbidden=_FORBIDDEN_ID_CHARS)
@@ -238,9 +383,10 @@ class ContentStore:
         if version in self._resolve_version_chain(base_version):
             raise ValueError(f"creating {version!r} on base {base_version!r} would form a cycle")
         vdir.mkdir(parents=True, exist_ok=True)
-        (vdir / "version.json").write_text(
-            _json({"version": version, "base_version": base_version}), encoding="utf-8"
-        )
+        meta: dict[str, Any] = {"version": version, "base_version": base_version}
+        if frozen:
+            meta["frozen"] = True
+        (vdir / "version.json").write_text(_json(meta), encoding="utf-8")
         self._parse_cache.clear()
 
     def save_scoped(self, bundle: ContentBundle, *, version: str = _BASELINE_VERSION) -> None:
@@ -258,6 +404,11 @@ class ContentStore:
             return
         if not (self.root / "versions" / version / "version.json").exists():
             raise ValueError(f"version {version!r} does not exist; call create_version first")
+        if self._version_frozen(version):
+            raise ValueError(
+                f"version {version!r} is frozen (a merge point / import mirror) and cannot be "
+                "written; write to the current working version instead"
+            )
         base = self.load_scoped(version=self._version_base(version) or _BASELINE_VERSION)
         diff, tombstones = self._diff_bundle(bundle, base)
         self._parse_cache.clear()
@@ -284,6 +435,7 @@ class ContentStore:
             ("localized_text", "localized_texts"),
             ("term", "terms"),
             ("style_guide", "style_guides"),
+            ("style_rubric", "style_rubrics"),
             ("quest_event_ref", "quest_event_refs"),
         )
         for kind, attr in dict_kinds:
@@ -332,6 +484,7 @@ class ContentStore:
         self._write_json_dir(root / "localization" / "texts", bundle.localized_texts)
         self._write_terms(root, bundle.terms)
         self._write_style_guides(root, bundle.style_guides)
+        self._write_style_rubrics(root, bundle.style_rubrics)
 
     def exists(self) -> bool:
         return self.root.exists()
@@ -413,6 +566,22 @@ class ContentStore:
             return self._read_parsed(legacy, lambda text: [StyleGuide(body=text)])
         return []
 
+    def _load_style_rubrics(self, root: Path) -> list[StyleRubric]:
+        """Load the versioned style rubrics (aggregate JSON keyed by id, like ``style_guides``).
+
+        Absent file = no rubrics, so every pre-existing world (which has none) is unaffected."""
+        path = root / "world" / "style_rubrics.json"
+        if not path.exists():
+            return []
+
+        def parse_rubrics(text: str) -> list[StyleRubric]:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return [StyleRubric.model_validate(raw) for raw in data.values()]
+            return []
+
+        return self._read_parsed(path, parse_rubrics)
+
     def _load_terms(self, root: Path) -> list[Term]:
         path = root / "world" / "terms.json"
         if not path.exists():
@@ -462,9 +631,27 @@ class ContentStore:
             self._write_json(target, model)
 
     def _write_relations(self, root: Path, relations: list[Relation]) -> None:
+        """Persist relations in canonical ``(source, kind, target)`` order.
+
+        Same rationale as :meth:`_write_json_dir`'s ``sorted(objects.items())`` and
+        :meth:`_write_style_guides`' ``sorted(...)``: the on-disk form of an unordered collection
+        must not record the accident of how it was assembled. Relations are a set keyed on the
+        identity triple (:func:`_relation_tombstone`), so a stable file order means a regenerated /
+        re-imported / merged world rewrites ``relations.jsonl`` only where content actually changed
+        — a readable git diff instead of a whole-file reshuffle. It also makes the positional
+        relation refs derived from load order (``graph.index._relation_ref``,
+        ``patches.fixers``'s ``/relations/{i}`` pointers) stable across saves.
+
+        Ordering here is a *storage* guarantee. Hash stability does not depend on it: bundles
+        assembled in memory and never saved are canonicalized by ``ContentBundle``'s serializer
+        (see :func:`~owcopilot.content.models.relation_sort_key`).
+        """
         path = root / "world" / "relations.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
-        lines = [_json_line(relation) for relation in relations]
+        ordered = sorted(
+            relations, key=lambda r: relation_sort_key(r.model_dump(mode="json", exclude_none=True))
+        )
+        lines = [_json_line(relation) for relation in ordered]
         path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
     def _write_quest_event_refs(self, root: Path, refs: dict[str, QuestEventReference]) -> None:
@@ -496,6 +683,22 @@ class ContentStore:
         }
         path.write_text(_json(payload), encoding="utf-8")
         legacy.unlink(missing_ok=True)
+
+    def _write_style_rubrics(self, root: Path, style_rubrics: dict[str, StyleRubric]) -> None:
+        """Persist every rubric as one aggregate JSON (same shape as ``style_guides.json``).
+
+        Writes nothing (and removes a stale file) when there is no rubric, so a world without
+        rubrics keeps its on-disk tree byte-for-byte as before this content type existed."""
+        path = root / "world" / "style_rubrics.json"
+        if not style_rubrics:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            rubric_id: rubric.model_dump(mode="json", exclude_none=True)
+            for rubric_id, rubric in sorted(style_rubrics.items())
+        }
+        path.write_text(_json(payload), encoding="utf-8")
 
     def _write_json(self, path: Path, model: BaseModel) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

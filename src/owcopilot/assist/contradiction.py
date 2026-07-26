@@ -13,8 +13,11 @@ confirm, never auto-assert):
   2. semantic candidates (needs a real bge-m3 embedder): multiple statements *about the same
      subject* whose meanings are close enough to be talking about the same thing.
   3. LLM judge (real, optional): reads each candidate pair and decides whether it is a genuine
-     contradiction + names the conflicting point. Without a judge the candidates are surfaced as
-     "待人工确认" (review) — never reported as a confirmed contradiction.
+     contradiction + names the conflicting point. The judge only ever UPGRADES a candidate from
+     "待人工确认" (review) to a confirmed contradiction — every candidate is still surfaced, so the
+     ones it does not confirm (and the ones past ``max_judge`` it never reads) stay review, never
+     silently dropped. Without any judge, all candidates are review — never a confirmed
+     contradiction.
 
 Also absorbs the batch-0 L1 finding: an LLM judge can catch "unstated identity merge / inferred
 attribute" contradictions that the lexical faithfulness check structurally cannot.
@@ -62,6 +65,7 @@ class ContradictionReport:
     findings: list[ContradictionFinding] = field(default_factory=list)
     candidate_count: int = 0
     judged_count: int = 0
+    judge_skipped: int = 0  # candidates NOT shown to the judge (max_judge cap) — kept as review
     semantic_used: bool = False
     llm_used: bool = False
 
@@ -123,35 +127,33 @@ class ContradictionDetector:
         )
         if not candidates:
             return report
-        if use_llm and self.gateway is not None:
+        # The judge is a PRECISION stamp, never a recall filter: it can only UPGRADE a candidate
+        # from "review" to a judge-confirmed "contradiction". Every candidate is still surfaced —
+        # the ones the judge does not confirm, and the ones past ``max_judge`` it never sees, stay
+        # "review" exactly as they would with no judge at all. So judge-on recall is always ≥
+        # judge-off (never the earlier inversion where confirming a subset dropped the rest).
+        # Mirrors ThemeSweepService, whose judge only overwrites a review on a positive verdict.
+        confirmed: dict[int, str] = {}  # candidate index -> conflict point named by the judge
+        if report.llm_used:
             to_judge = candidates[:max_judge]
             report.judged_count = len(to_judge)
+            report.judge_skipped = len(candidates) - len(to_judge)
             for start in range(0, len(to_judge), _JUDGE_BATCH):
                 batch = to_judge[start : start + _JUDGE_BATCH]
-                for index, point in self._judge(batch):
-                    cand = batch[index]
-                    report.findings.append(
-                        ContradictionFinding(
-                            refs=cand.refs,
-                            subjects=cand.subjects,
-                            statements=cand.statements,
-                            verdict="contradiction",
-                            point=point,
-                            layer=cand.layer,
-                        )
-                    )
-        else:  # no judge: surface candidates for a human, never assert a contradiction
-            for cand in candidates:
-                report.findings.append(
-                    ContradictionFinding(
-                        refs=cand.refs,
-                        subjects=cand.subjects,
-                        statements=cand.statements,
-                        verdict="review",
-                        point=cand.reason,
-                        layer=cand.layer,
-                    )
+                for local_index, point in self._judge(batch):
+                    confirmed[start + local_index] = point
+        for index, cand in enumerate(candidates):
+            judged = index in confirmed
+            report.findings.append(
+                ContradictionFinding(
+                    refs=cand.refs,
+                    subjects=cand.subjects,
+                    statements=cand.statements,
+                    verdict="contradiction" if judged else "review",
+                    point=confirmed[index] if judged else cand.reason,
+                    layer=cand.layer,
                 )
+            )
         report.findings.sort(key=lambda f: (f.verdict != "contradiction", f.refs))
         return report
 

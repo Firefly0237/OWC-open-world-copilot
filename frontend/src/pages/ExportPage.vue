@@ -23,6 +23,48 @@ const outputDir = ref("");
 const manifest = ref<Manifest | null>(null);
 const project = currentProject();
 
+// data-pack export options
+const targetEngine = ref("generic");
+const unityLocalization = ref(false);
+const rowStructMap = ref<Record<string, Record<string, string>> | null>(null);
+const rowStructMapName = ref("");
+const rowStructMapError = ref("");
+
+// Parse + validate the Unreal column-rename map ({table: {canonical: exportName}}) in the browser,
+// so a malformed file is caught with a plain-language message before we ever call the export.
+async function onRowStructMapFile(e: Event): Promise<void> {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  rowStructMapError.value = "";
+  rowStructMap.value = null;
+  rowStructMapName.value = "";
+  if (!file) return;
+  let data: unknown;
+  try {
+    data = JSON.parse(await file.text());
+  } catch {
+    rowStructMapError.value = "这个文件不是合法的 JSON，请检查后重新选择。";
+    return;
+  }
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    rowStructMapError.value = '映射必须是 JSON 对象，形如 {"表名": {"原字段": "导出名"}}。';
+    return;
+  }
+  for (const [table, fields] of Object.entries(data)) {
+    const ok =
+      typeof fields === "object" &&
+      fields !== null &&
+      !Array.isArray(fields) &&
+      Object.values(fields).every((v) => typeof v === "string");
+    if (!ok) {
+      rowStructMapError.value = `表「${table}」的值必须是「原字段 → 导出名」的对象。`;
+      return;
+    }
+  }
+  rowStructMap.value = data as Record<string, Record<string, string>>;
+  rowStructMapName.value = file.name;
+}
+
 const importText = ref("");
 const importing = ref(false);
 const importError = ref("");
@@ -35,9 +77,13 @@ async function runExport(): Promise<void> {
   error.value = "";
   manifest.value = null;
   try {
+    const payload: Record<string, unknown> = { target_engine: targetEngine.value };
+    if (targetEngine.value === "unity") payload.unity_localization = unityLocalization.value;
+    if (targetEngine.value === "unreal" && rowStructMap.value)
+      payload.row_struct_map = rowStructMap.value;
     const body = await apiPost<{ output_dir: string; manifest: Manifest }>(
       `/projects/${project}/exports`,
-      { target_engine: "generic" },
+      payload,
     );
     outputDir.value = body.output_dir;
     manifest.value = body.manifest;
@@ -108,6 +154,28 @@ async function runImport(): Promise<void> {
         <p class="muted small">
           将世界数据导出为标准格式，包含给程序员用的数据文件和给本地化团队用的翻译文件。
         </p>
+        <label class="cfg-row">
+          <span class="cfg-label">目标引擎</span>
+          <select v-model="targetEngine">
+            <option value="generic">通用（引擎无关）</option>
+            <option value="unreal">Unreal</option>
+            <option value="unity">Unity</option>
+          </select>
+        </label>
+        <label v-if="targetEngine === 'unity'" class="cfg-check">
+          <input v-model="unityLocalization" type="checkbox" />
+          <span>附带 Unity 本地化字符串表（String Table CSV）</span>
+        </label>
+        <div v-if="targetEngine === 'unreal'" class="cfg-file">
+          <span class="cfg-label">字段映射（可选）</span>
+          <p class="muted tiny">
+            把导出数据表的列名换成你 Unreal 工程里的字段名。上传 JSON，形如
+            <code class="mono">{"表名":{"原字段":"导出名"}}</code>；不上传则用默认列名。
+          </p>
+          <input type="file" accept="application/json,.json" @change="onRowStructMapFile" />
+          <p v-if="rowStructMapName" class="ok-file tiny">已载入映射：{{ rowStructMapName }}</p>
+          <p v-if="rowStructMapError" class="error tiny">{{ rowStructMapError }}</p>
+        </div>
         <div class="row">
           <button class="primary" :disabled="running" @click="runExport">
             {{ running ? "导出中…" : "导出数据包" }}
@@ -198,6 +266,54 @@ async function runImport(): Promise<void> {
 
 .small {
   font-size: 0.8rem;
+}
+
+.tiny {
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.cfg-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.cfg-label {
+  font-size: 0.8rem;
+  color: var(--ow-muted);
+  white-space: nowrap;
+}
+
+.cfg-check {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.82rem;
+}
+
+.cfg-file {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--ow-line);
+  border-radius: var(--ow-control-radius);
+  background: rgba(16, 22, 48, 0.4);
+}
+
+.cfg-file input[type="file"] {
+  font-size: 0.78rem;
+  color: var(--ow-muted);
+}
+
+.cfg-file code {
+  color: var(--ow-cyan);
+  word-break: break-all;
+}
+
+.ok-file {
+  color: #8ed4ac;
 }
 
 .row {

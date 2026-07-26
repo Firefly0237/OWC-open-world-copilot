@@ -21,7 +21,7 @@ import numpy as np
 
 from ..audit.models import AuditRun, Issue
 from ..content.hash import content_hash
-from ..content.models import ContentBundle
+from ..content.models import ContentBundle, DialogueTree
 from ..graph.index import ContentGraph
 from ..llm.telemetry import CallRecord
 
@@ -58,7 +58,11 @@ class SQLiteStore:
         # Broad scope-aware filtering of the content/audit read paths happens in retrieval.
         self.world_id = world_id
         self.version = version
-        self.conn = sqlite3.connect(self.path)
+        # check_same_thread=False: the LangGraph agent loop executes tools on ThreadPoolExecutor
+        # worker threads (not the caller thread), so a store bound into a skill must be usable
+        # off-thread. Safe under CPython's sqlite3 (threadsafety=3, module-level serialization);
+        # same precedent as platform/store.py and multi_agent/session.py.
+        self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         # CJK bigram rewrite as a SQL function, so INSERT...SELECT repopulation paths can apply
         # the same transform as the parameterized write paths (one definition, no drift).
@@ -407,7 +411,8 @@ class SQLiteStore:
                 goal       TEXT NOT NULL,
                 summary    TEXT NOT NULL,
                 vector     BLOB NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                deleted_at TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_agent_run_embeddings_model
@@ -420,7 +425,8 @@ class SQLiteStore:
                 source     TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 vector     BLOB,
-                model_id   TEXT
+                model_id   TEXT,
+                deleted_at TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_reflections_model
@@ -432,6 +438,13 @@ class SQLiteStore:
         self._ensure_column("patches", "rollback_ops_json", "TEXT")
         self._ensure_column("patches", "rolled_back_by", "TEXT")
         self._ensure_column("patches", "rolled_back_at", "TEXT")
+        # 审计问题的六要素里，除任务 id 与原因之外的四项（文件、行号、节点 id、建议动作）。落库是
+        # 因为"列出已存问题"这条出口是从这张表读回去的，不落库的话，报告在内存里带着六要素、一
+        # 从库里查就退回两要素。旧库原地升级，历史行读回来是空值 = 未定位，与今天的行为一致。
+        self._ensure_column("issues", "source_path", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("issues", "source_line", "INTEGER")
+        self._ensure_column("issues", "node_ref", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("issues", "suggested_action", "TEXT NOT NULL DEFAULT ''")
         # The critic's final verdict/score, recorded at draft time so reviewer calibration can pair
         # it with the human decision later. Older runtime DBs upgrade in place.
         self._ensure_column("review_items", "critic_verdict", "TEXT")
@@ -450,6 +463,12 @@ class SQLiteStore:
         # not revoked, so existing behaviour is unchanged.
         self._ensure_column("lessons", "revoked_at", "TEXT")
         self._ensure_column("lessons", "revoked_reason", "TEXT")
+        # T7 memory lifecycle soft-delete tombstone. Over-capacity episodic memories are marked
+        # (deleted_at = <iso>) rather than physically deleted, so recall filters them out but a
+        # mistaken eviction stays recoverable (restore_* clears the tombstone). Ensure-only, like
+        # the columns above; legacy rows back-fill to NULL = live, so existing behaviour is intact.
+        self._ensure_column("agent_run_embeddings", "deleted_at", "TEXT")
+        self._ensure_column("reflections", "deleted_at", "TEXT")
         # Hierarchical GraphRAG (T13) added a parent link + level to community reports. Older
         # runtime DBs predate them; the NULL parent / 0 level defaults back-fill existing
         # single-level rows to their (correct) flat semantics, so a legacy index keeps working.
@@ -694,8 +713,9 @@ class SQLiteStore:
             """
             INSERT OR REPLACE INTO issues (
                 id, rule_code, severity, category, target_ref, message, evidence_json,
-                fingerprint, audit_run_id, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                fingerprint, audit_run_id, status,
+                source_path, source_line, node_ref, suggested_action
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 saved.id,
@@ -708,6 +728,10 @@ class SQLiteStore:
                 saved.fingerprint,
                 saved.audit_run_id,
                 saved.status.value,
+                saved.source_path,
+                saved.source_line,
+                saved.node_ref,
+                saved.suggested_action,
             ),
         )
         self.conn.commit()
@@ -1238,17 +1262,20 @@ class SQLiteStore:
         self.conn.commit()
 
     def query_agent_run_embeddings(self, *, model_id: str) -> list[dict[str, Any]]:
-        """Recall candidates: every FINISHED run's embedding in the ``model_id`` embedding space.
+        """Recall candidates: every FINISHED, live run embedding in the ``model_id`` space.
 
         Joins ``agent_runs`` so only runs whose ``stop_reason == 'finished'`` are returned (a
-        run that ran out of step budget carries no trustworthy conclusion to recall). The blob is
-        returned raw; the cosine ranking happens in the retrieval layer (``agent.episodic``)."""
+        run that ran out of step budget carries no trustworthy conclusion to recall) and excludes
+        soft-deleted rows (``deleted_at IS NULL``) — an over-capacity eviction stops surfacing them.
+        ``step_count`` is lifted from the run row so the retrieval layer can weigh an episode's
+        importance; the blob is returned raw and the three-factor ranking happens in
+        ``agent.episodic``."""
         rows = self.conn.execute(
             """
-            SELECT e.run_id, e.goal, e.summary, e.vector, e.created_at
+            SELECT e.run_id, e.goal, e.summary, e.vector, e.created_at, r.step_count
             FROM agent_run_embeddings AS e
             JOIN agent_runs AS r ON r.id = e.run_id
-            WHERE e.model_id = ? AND r.stop_reason = 'finished'
+            WHERE e.model_id = ? AND r.stop_reason = 'finished' AND e.deleted_at IS NULL
             """,
             (model_id,),
         ).fetchall()
@@ -1259,6 +1286,7 @@ class SQLiteStore:
                 "summary": str(row["summary"]),
                 "vector": bytes(row["vector"]),
                 "created_at": str(row["created_at"]),
+                "step_count": int(row["step_count"]),
             }
             for row in rows
         ]
@@ -1298,12 +1326,13 @@ class SQLiteStore:
         """Recall candidates: every embedded reflection in the ``model_id`` embedding space.
 
         Rows without a vector (embedder was unavailable at write time) are excluded — they cannot
-        be ranked. Cosine ranking happens in the retrieval layer (``agent.episodic``)."""
+        be ranked — as are soft-deleted rows (``deleted_at IS NULL``), so an over-capacity eviction
+        stops surfacing them. Ranking happens in the retrieval layer (``agent.episodic``)."""
         rows = self.conn.execute(
             """
             SELECT id, goal, reflection, source, created_at, vector
             FROM reflections
-            WHERE model_id = ? AND vector IS NOT NULL
+            WHERE model_id = ? AND vector IS NOT NULL AND deleted_at IS NULL
             """,
             (model_id,),
         ).fetchall()
@@ -1318,6 +1347,108 @@ class SQLiteStore:
             }
             for row in rows
         ]
+
+    # --- episodic capacity lifecycle (T7: soft-delete retention) -------------------------------
+    # The query-independent retention inputs (when a memory was written + how substantive it was)
+    # that ``agent.episodic`` scores to decide which over-capacity memories to soft-delete. Kept as
+    # dumb reads here; the recency/importance policy lives in the memory-policy module, not storage.
+
+    def list_run_embedding_retention(self, *, model_id: str) -> list[dict[str, Any]]:
+        """Live (non-tombstoned) run embeddings in ``model_id`` with their retention inputs.
+
+        Returns every un-deleted embedding — not only finished runs — because capacity bounds the
+        *stored volume* of the space. ``step_count`` (LEFT-joined, COALESCE 0 if the run row is
+        somehow absent) feeds the importance factor; ``created_at`` feeds recency."""
+        rows = self.conn.execute(
+            """
+            SELECT e.run_id, e.created_at, COALESCE(r.step_count, 0) AS step_count
+            FROM agent_run_embeddings AS e
+            LEFT JOIN agent_runs AS r ON r.id = e.run_id
+            WHERE e.model_id = ? AND e.deleted_at IS NULL
+            """,
+            (model_id,),
+        ).fetchall()
+        return [
+            {
+                "run_id": str(row["run_id"]),
+                "created_at": str(row["created_at"]),
+                "step_count": int(row["step_count"]),
+            }
+            for row in rows
+        ]
+
+    def list_reflection_retention(self, *, model_id: str) -> list[dict[str, Any]]:
+        """Live (non-tombstoned) reflection ids + ``created_at`` in ``model_id`` for retention."""
+        rows = self.conn.execute(
+            """
+            SELECT id, created_at
+            FROM reflections
+            WHERE model_id = ? AND vector IS NOT NULL AND deleted_at IS NULL
+            """,
+            (model_id,),
+        ).fetchall()
+        return [
+            {"id": str(row["id"]), "created_at": str(row["created_at"])} for row in rows
+        ]
+
+    def soft_delete_agent_run_embeddings(
+        self, run_ids: list[str], *, at: str | None = None
+    ) -> None:
+        """Tombstone the given run embeddings (over-capacity eviction). No-op on an empty list.
+
+        Records ``deleted_at`` rather than deleting the row, so recall stops surfacing it but
+        ``restore_agent_run_embedding`` can revive a mistaken eviction. Only stamps rows that are
+        still live (``deleted_at IS NULL``), so a re-run keeps each row's original eviction time."""
+        if not run_ids:
+            return
+        placeholders = ",".join("?" for _ in run_ids)
+        self.conn.execute(
+            f"UPDATE agent_run_embeddings SET deleted_at = ? "  # noqa: S608 - generated placeholders
+            f"WHERE deleted_at IS NULL AND run_id IN ({placeholders})",
+            (at or _now_iso(), *run_ids),
+        )
+        self.conn.commit()
+
+    def soft_delete_reflections(self, ids: list[str], *, at: str | None = None) -> None:
+        """Tombstone the given reflections (over-capacity eviction). No-op on an empty list."""
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        self.conn.execute(
+            f"UPDATE reflections SET deleted_at = ? "  # noqa: S608 - generated placeholders
+            f"WHERE deleted_at IS NULL AND id IN ({placeholders})",
+            (at or _now_iso(), *ids),
+        )
+        self.conn.commit()
+
+    def restore_agent_run_embedding(self, run_id: str) -> bool:
+        """Clear a run embedding's tombstone so recall can surface it again (recovery path).
+
+        Returns ``True`` when a row with this id exists (tombstoned or not), ``False`` when none
+        does — so a caller can surface a guided error instead of silently succeeding."""
+        row = self.conn.execute(
+            "SELECT run_id FROM agent_run_embeddings WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        self.conn.execute(
+            "UPDATE agent_run_embeddings SET deleted_at = NULL WHERE run_id = ?", (run_id,)
+        )
+        self.conn.commit()
+        return True
+
+    def restore_reflection(self, reflection_id: str) -> bool:
+        """Clear a reflection's tombstone so recall can surface it again (recovery path)."""
+        row = self.conn.execute(
+            "SELECT id FROM reflections WHERE id = ?", (reflection_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        self.conn.execute(
+            "UPDATE reflections SET deleted_at = NULL WHERE id = ?", (reflection_id,)
+        )
+        self.conn.commit()
+        return True
 
     # ------------------------------------------------------------------------------------------
 
@@ -2226,20 +2357,24 @@ def _review_item_from_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _issue_from_row(row: sqlite3.Row) -> Issue:
-    return Issue.model_validate(
-        {
-            "id": row["id"],
-            "rule_code": row["rule_code"],
-            "severity": row["severity"],
-            "category": row["category"],
-            "target_ref": row["target_ref"],
-            "message": row["message"],
-            "evidence": json.loads(str(row["evidence_json"])),
-            "fingerprint": row["fingerprint"],
-            "audit_run_id": row["audit_run_id"],
-            "status": row["status"],
-        }
-    )
+    payload = {
+        "id": row["id"],
+        "rule_code": row["rule_code"],
+        "severity": row["severity"],
+        "category": row["category"],
+        "target_ref": row["target_ref"],
+        "message": row["message"],
+        "evidence": json.loads(str(row["evidence_json"])),
+        "fingerprint": row["fingerprint"],
+        "audit_run_id": row["audit_run_id"],
+        "status": row["status"],
+    }
+    # 六要素的四列是 _ensure_column 后加的：旧库里可能整列不存在，取不到就退回模型默认值。
+    keys = row.keys()
+    for name in ("source_path", "source_line", "node_ref", "suggested_action"):
+        if name in keys and row[name] is not None:
+            payload[name] = row[name]
+    return Issue.model_validate(payload)
 
 
 def _content_rows(bundle: ContentBundle) -> list[tuple[str, str, str, str, str]]:
@@ -2365,6 +2500,26 @@ def _content_rows(bundle: ContentBundle) -> list[tuple[str, str, str, str, str]]
                         f"locale={dialogue.locale or ''}",
                         f"ui_max_len={dialogue.ui_max_len or ''}",
                         _metadata_text(dialogue.metadata),
+                    ]
+                ),
+            )
+        )
+    for tree in bundle.dialogue_trees.values():
+        rows.append(
+            (
+                "dialogue_tree:" + tree.id,
+                "dialogue_tree",
+                tree.id,
+                tree.title or tree.id,
+                " ".join(
+                    [
+                        tree.id,
+                        f"quest_id={tree.quest_id or ''}",
+                        f"root_node={tree.root_node or ''}",
+                        "participants=" + " ".join(tree.participants),
+                        " ".join(tree.tags),
+                        _dialogue_tree_body(tree),
+                        _metadata_text(tree.metadata),
                     ]
                 ),
             )
@@ -2528,6 +2683,47 @@ def _now_iso() -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _dialogue_tree_body(tree: DialogueTree) -> str:
+    """The searchable text of one dialogue tree: its wiring, not just its prose.
+
+    A tree's *structure* is what a reader has to see — which node points where, which choice is
+    gated on what, which variable a choice mutates, which line has no ``text_key``. Indexing only
+    the spoken lines would put a tree in the index while still hiding every structural defect, so
+    each node and each choice contributes its link/gate/effect fields as ``name=value`` tokens
+    alongside the text. Node and choice ids are emitted bare so a query naming ``n_orphan`` (or a
+    dangling ``next_node`` target that exists nowhere else) can retrieve the tree that mentions it.
+    """
+    parts: list[str] = []
+    for node_id, node in tree.nodes.items():
+        parts.append(
+            " ".join(
+                [
+                    f"node={node_id}",
+                    node_id,
+                    f"speaker_id={node.speaker_id or ''}",
+                    f"text_key={node.text_key or ''}",
+                    f"next_node={node.next_node or ''}",
+                    node.text or "",
+                ]
+            )
+        )
+        for index, choice in enumerate(node.choices):
+            effects = " ".join(f"{e.var}:{e.op}={e.value}" for e in choice.effects)
+            parts.append(
+                " ".join(
+                    [
+                        f"choice={node_id}#{index}",
+                        f"next_node={choice.next_node or ''}",
+                        f"condition={choice.condition or ''}",
+                        f"effects={effects}",
+                        f"text_key={choice.text_key or ''}",
+                        choice.text or "",
+                    ]
+                )
+            )
+    return " ".join(parts)
 
 
 def _metadata_text(metadata: dict[str, Any]) -> str:

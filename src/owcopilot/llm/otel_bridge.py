@@ -411,6 +411,39 @@ def gen_ai_chat_span(
 
 
 @contextlib.contextmanager
+def gen_ai_compact_span(
+    tracer: Any,
+    *,
+    model: str = "",
+) -> Generator[Any, None, None]:
+    """Child span for one context-compaction (transcript-summary) LLM call.
+
+    The compaction summariser call is a distinct chat call the compressor makes WHILE building a
+    planning turn's read-time view, so this span is opened around that ``model.invoke`` and nests
+    under the planning ``gen_ai.chat`` span that triggered it. Nesting it as a child (rather than a
+    sibling) is deliberate: a trace tool's "self time" for the planning span is its duration minus
+    its children's, so a child compact span makes the planning span's self time exclude the
+    compaction cost — the whole point of giving compaction its own span instead of folding it into
+    the planning call. Marked ``gen_ai.owc.task="compact"`` to set it apart from the step-indexed
+    planning spans.
+
+    Attributes:
+    - ``gen_ai.operation.name`` = "chat"
+    - ``gen_ai.request.model``  = model (``"(unknown)"`` when the model reports none)
+    - ``gen_ai.owc.task``       = "compact"
+    """
+    with tracer.start_as_current_span(
+        "gen_ai.chat",
+        attributes={
+            "gen_ai.operation.name": "chat",
+            "gen_ai.request.model": model or "(unknown)",
+            "gen_ai.owc.task": "compact",
+        },
+    ) as span:
+        yield span
+
+
+@contextlib.contextmanager
 def execute_tool_span(
     tracer: Any,
     *,

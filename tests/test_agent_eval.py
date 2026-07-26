@@ -3,6 +3,10 @@
 The scorecard is an aggregation of existing deterministic ``$0`` signals, so these assert it is
 deterministic, covers the five JD dimensions with provenance, and that each dimension actually
 reflects its underlying evaluator (not a hard-coded constant).
+
+W1-2 标注：工具调用效果维度的 F1=1.0 是离线 fixture（OfflineGoalAwareChatModel）产物，不代表真实
+LLM 能力；reliability 字段的 pass_hat_k 在这里恒等于 pass@1（全部 39 场景 n_trials=1）。两者均不得
+作为对外材料声称的数字，详见 ``evaluation/agent_eval.py``/``evaluation/reliability.py`` 模块头。
 """
 
 from __future__ import annotations

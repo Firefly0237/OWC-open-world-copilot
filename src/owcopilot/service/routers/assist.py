@@ -13,7 +13,11 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from ...app.actions import detect_contradictions_action, run_theme_sweep_action
+from ...app.actions import (
+    detect_contradictions_action,
+    dismiss_sweep_finding_action,
+    run_theme_sweep_action,
+)
 from ...assist.barks import BarkBatchService
 from ...assist.critic import BarkCritic, DialogueCritic, FlavorCritic, QuestCritic
 from ...assist.dialogue_trees import DialogueTreeService, OfflineDialogueTreeProvider
@@ -49,6 +53,7 @@ from ..schemas import (
     ProjectFlavorResponse,
     ProjectSweepRequest,
     ProjectSweepResponse,
+    SweepDismissRequest,
 )
 
 router = APIRouter()
@@ -418,3 +423,27 @@ def run_theme_sweep(
     return ProjectSweepResponse(
         project=project, **{k: v for k, v in result.items() if k != "terms"}
     )
+
+
+@router.post("/projects/{project}/sweeps:dismiss")
+def dismiss_sweep_finding(
+    project: str,
+    req: SweepDismissRequest,
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> dict[str, Any]:
+    """逐一排除 one sweep finding (signed, persisted); the same theme's next sweep suppresses it."""
+    try:
+        result = dismiss_sweep_finding_action(
+            _project_root_or_404(project),
+            theme=req.theme,
+            finding_id=req.finding_id,
+            ref=req.ref,
+            locator=req.locator,
+            layer=req.layer,
+            operator=req.operator,
+            reason=req.reason,
+        )
+    except ValueError as e:  # empty signature / missing 排除码 → client error, not a 500
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    return {"project": project, **result}

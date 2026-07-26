@@ -260,6 +260,10 @@ class ProjectExportRequest(BaseModel):
     # UNITY target only: also emit the opt-in Unity Localization String Table Collection CSV under
     # unity/localization/. Additive; default False keeps the export byte-for-byte as before.
     unity_localization: bool = Field(default=False)
+    # UNREAL target only: rename DataTable columns to the target project's own USTRUCT field names,
+    # keyed by table ({"<table>": {"<CanonicalField>": "<ExportName>"}}). None/omit keeps the
+    # default field names, so the export stays byte-for-byte as before.
+    row_struct_map: dict[str, dict[str, str]] | None = Field(default=None)
 
 
 class ProjectExportResponse(BaseModel):
@@ -546,6 +550,20 @@ class ProjectSweepRequest(BaseModel):
     max_judge: int = Field(default=400, ge=1, le=2000)
 
 
+class SweepDismissRequest(BaseModel):
+    """逐一排除 one sweep finding. ``finding_id`` (the 排除码 a prior sweep response emitted) is the
+    stable dismissal key; ``ref`` / ``locator`` / ``layer`` are the audit trail persisted with it.
+    ``operator`` is the required signature."""
+
+    theme: str = Field(min_length=1, max_length=200)
+    finding_id: str = Field(min_length=1, max_length=80)
+    ref: str = Field(min_length=1, max_length=400)
+    locator: str = Field(default="", max_length=400)
+    layer: str = Field(default="", max_length=40)
+    operator: str = Field(min_length=1, max_length=200)
+    reason: str = Field(default="", max_length=2000)
+
+
 class StyleGuidePatchRequest(BaseModel):
     body: str | None = None
     rules: list[str] | None = None
@@ -567,6 +585,9 @@ class ProjectSweepResponse(BaseModel):
     judge_skipped: int
     hits: list[dict[str, Any]]
     review_suggested: list[dict[str, Any]]
+    # findings past dismissals suppressed this run (逐一排除 honesty counter); defaulted so the
+    # field is additive and older clients keep working.
+    dismissed_count: int = 0
     markdown: str
     cost_budget: dict[str, Any]
 

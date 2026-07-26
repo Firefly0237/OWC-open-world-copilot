@@ -59,6 +59,7 @@ def export_project_content(
             output_dir,
             target_engine=engine,
             unity_localization=req.unity_localization,
+            row_struct_map=req.row_struct_map,
         )
         return ProjectExportResponse(
             request_id=request_id,

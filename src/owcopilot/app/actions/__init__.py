@@ -17,6 +17,7 @@ from .analytics import world_analytics_action
 from .assets import asset_attach_action, asset_detach_action, asset_list_action
 from .assist import (
     detect_contradictions_action,
+    dismiss_sweep_finding_action,
     fill_extraction_gaps_action,
     run_barks_action,
     run_character_action,
@@ -97,6 +98,7 @@ __all__ = [
     "delete_mapping_template_action",
     "delete_object_action",
     "detect_contradictions_action",
+    "dismiss_sweep_finding_action",
     "draft_quest_logic_action",
     "fill_extraction_gaps_action",
     "get_review_item_context_action",

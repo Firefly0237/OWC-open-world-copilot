@@ -15,10 +15,11 @@ import json
 import os
 import time
 
+from ..errors import OWCopilotError
 from .models import Principal, Role
 
 
-class AuthError(ValueError):
+class AuthError(OWCopilotError, ValueError):
     """Raised when a token is missing, malformed, tampered, or expired."""
 
 
