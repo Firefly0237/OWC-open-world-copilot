@@ -1,3 +1,4 @@
+# 在人看到之前主动收缩 LLM 幻觉：识别到的关系先过校验/接地再呈现。
 """§8 — proactively shrink LLM hallucination *before* a human ever sees it.
 
 The product's DNA is a deterministic gate around the model ("no source, no answer", post-verified).

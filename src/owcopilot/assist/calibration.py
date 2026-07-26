@@ -1,3 +1,4 @@
+# 评审校准：critic 判断与人审最终决定是否一致？用 Wilson 区间给诚实的小样本置信。
 """Reviewer calibration: does the critic's verdict agree with the human's final decision?
 
 The critic is a quality *signal*, not a gate — a human still signs off (see ``critic.py``). This
@@ -43,7 +44,7 @@ def primary_failing_dimension(result: CritiqueResult) -> str:
     Returns 'general' when parse_ok=False or no dimensions present.
     Priority: first blocker > first minor > first non-ok > 'general'.
 
-    IN-B1 M2: used by the refine loop to stamp critic_primary_dim on ReviewItem.
+    Used by the refine loop to stamp critic_primary_dim on ReviewItem.
     """
     if not result.parse_ok or not result.dimensions:
         return "general"
@@ -71,7 +72,7 @@ class FalsePassItem(BaseModel):
     item_type: str
     object_ref: str
     critic_score: float | None = None
-    dimension: str = "general"  # IN-B1 M2: primary failing dimension; default "general" for compat
+    dimension: str = "general"  # primary failing dimension; default "general" for compat
 
 
 class CalibrationReport(BaseModel):
@@ -97,7 +98,7 @@ def primary_dim_from_trail(
 ) -> str | None:
     """Extract the primary failing dimension from the last round of a refine trail.
 
-    IN-B1 M2: Returns the 'primary_dim' field from the last trail step when the critique was
+    Returns the 'primary_dim' field from the last trail step when the critique was
     parseable (auto_review_ok=True). Returns None when no trail or critique was unparseable.
     Callers use None to mean "unknown" and fall back to 'general' when stamping ReviewItem.
     """
@@ -157,7 +158,7 @@ def build_calibration_report(resolved: list[ReviewItem]) -> CalibrationReport:
         if score is not None:
             (accepted_scores if human_accept else rejected_scores).append(score)
         if verdict == "pass" and not human_accept:
-            # IN-B1 M2: read primary dimension from ReviewItem (written by refine loop)
+            # Read primary dimension from ReviewItem (written by refine loop)
             primary_dim = getattr(item, "critic_primary_dim", None) or "general"
             report.false_pass_items.append(
                 FalsePassItem(
@@ -165,7 +166,7 @@ def build_calibration_report(resolved: list[ReviewItem]) -> CalibrationReport:
                     item_type=item.item_type.value,
                     object_ref=item.object_ref,
                     critic_score=score,
-                    dimension=primary_dim,  # IN-B1 M2
+                    dimension=primary_dim,
                 )
             )
     _finalize_rates(report, accepted_scores, rejected_scores)

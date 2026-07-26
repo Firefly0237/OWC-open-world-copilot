@@ -1,3 +1,4 @@
+# 词表约束注入：把受控词汇塞进 LLM prompt。
 """Vocabulary-constraint injection for LLM prompts.
 
 Builds a [vocabulary-constraints] block from a project's Term objects and injects it
@@ -44,7 +45,8 @@ def build_term_block(
     else:
         hits_set = set(context_hits)
         working_set = [
-            t for t in terms
+            t
+            for t in terms
             if (
                 t.id in hits_set
                 or t.canonical in hits_set
@@ -83,8 +85,8 @@ def build_term_block_for_critic(terms: list[Term]) -> str:
     return _build_block(working_set)
 
 
-_MAX_FORBIDDEN_LEN = 100   # a forbidden word longer than this is almost certainly injected content
-_MAX_ALIAS_LEN = 150       # aliases are slightly longer (compound names) but still bounded
+_MAX_FORBIDDEN_LEN = 100  # a forbidden word longer than this is almost certainly injected content
+_MAX_ALIAS_LEN = 150  # aliases are slightly longer (compound names) but still bounded
 
 
 def _safe_forbidden(w: str) -> str | None:

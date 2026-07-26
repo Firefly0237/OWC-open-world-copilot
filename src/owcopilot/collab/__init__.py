@@ -1,3 +1,4 @@
+# 团队协作创作（WS-B）：指派/评论/编辑锁/乐观并发。
 """Team-authoring collaboration (WS-B): assignments, comments, edit locks, optimistic concurrency.
 
 Built on the per-world JSON ledger + the WS-P role model. Lets multiple authors work a world without

@@ -1,0 +1,21 @@
+{
+  "name": "com.owcopilot.content-import",
+  "version": "0.1.0",
+  "displayName": "OWCopilot Content Import",
+  "description": "Editor tooling that imports OWCopilot's exported content_bundle.json into native Unity ScriptableObject assets (entities, quests + quest logic, dialogues, relations) with string-id references resolved in two passes. Text-only, version-agnostic, no vendored binaries.",
+  "unity": "2021.3",
+  "dependencies": {
+    "com.unity.nuget.newtonsoft-json": "3.2.1"
+  },
+  "keywords": [
+    "owcopilot",
+    "content",
+    "importer",
+    "scriptableobject",
+    "narrative"
+  ],
+  "author": {
+    "name": "Tingxuan Su"
+  },
+  "license": "MIT"
+}

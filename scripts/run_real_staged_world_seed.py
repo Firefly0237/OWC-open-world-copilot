@@ -29,7 +29,8 @@ from owcopilot.app.actions import add_reference_action  # noqa: E402
 from owcopilot.content.models import ContentBundle  # noqa: E402
 from owcopilot.content.store import ContentStore  # noqa: E402
 from owcopilot.llm.cache import NoOpCache  # noqa: E402
-from owcopilot.llm.gateway import LLMGateway, OpenAICompatProvider  # noqa: E402
+from owcopilot.llm.gateway import LLMGateway  # noqa: E402
+from owcopilot.llm.resilience import build_real_provider  # noqa: E402
 from owcopilot.llm.router import StaticRouter  # noqa: E402
 from owcopilot.llm.telemetry import TelemetryCollector  # noqa: E402
 from owcopilot.pipeline.project import ProjectContext  # noqa: E402
@@ -110,7 +111,7 @@ def _single_shot_system(brief: WorldSeedBrief, project_pack: Any, inspiration_pa
 
 def _real_gateway(model: str) -> tuple[LLMGateway, TelemetryCollector]:
     telemetry = TelemetryCollector()
-    provider = OpenAICompatProvider(model=model, timeout=240.0, max_output_tokens=6000)
+    provider = build_real_provider(model=model, timeout=240.0, max_output_tokens=6000)
     gateway = LLMGateway(
         providers={"cheap": provider},
         router=StaticRouter(mapping={"world_seed": "cheap"}),

@@ -1,3 +1,4 @@
+# 确定性设计就绪度评估：按完整度打分（是完整度，不是正确性）。
 """Deterministic design-readiness assessment.
 
 Pure functions over a ``ContentBundle``: zero LLM cost, no side effects, fully reproducible —

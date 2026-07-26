@@ -1,0 +1,1499 @@
+{
+  "version": "v1",
+  "seed": 14,
+  "world_content_hash": "784ea3f613af2ecb4a825c0d286bda6bc5b2d16c38475413d2d2b03c4dcb009d",
+  "queries": [
+    {
+      "query_id": "vb-000",
+      "text": "沈清河是谁",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:npc_r1_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-001",
+      "text": "陆照夜是谁",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:npc_r2_b"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-002",
+      "text": "苏承影是什么人",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:npc_r3_c"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-003",
+      "text": "白听澜效力于哪个势力",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:npc_r6_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-004",
+      "text": "赵忘川驻守在哪里",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:npc_r9_b"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-005",
+      "text": "铁卫军团是什么势力",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-006",
+      "text": "雾隐盟和谁敌对",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:fac_mist"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-007",
+      "text": "雾脊山道烽燧在哪",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:loc_r1_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-008",
+      "text": "黑沙戈壁渡口由谁控制",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:loc_r4_b"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-009",
+      "text": "玄武之约是什么事件",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:evt_xuanwu_pact"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-010",
+      "text": "盐风海战的经过",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:evt_salt_battle"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-011",
+      "text": "玄铁令有什么用",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:item_xuantie_seal"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-012",
+      "text": "漕运制度是什么",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:concept_caoyun"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-013",
+      "text": "雾脊山道的巡查烽燧任务",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "quest:quest_r1_q1"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-014",
+      "text": "沧浪河谷的护送盐车任务",
+      "locale": "zh-CN",
+      "category": "verbatim",
+      "expected_refs": [
+        "quest:quest_r5_q2"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-015",
+      "text": "Who or what is Shen Qinghe?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:npc_r1_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-016",
+      "text": "Who or what is Lu Wangchuan?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:npc_r2_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-017",
+      "text": "Who or what is Su Yanqiu?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:npc_r3_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-018",
+      "text": "Who or what is Gu Wangshu?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:npc_r4_b"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-019",
+      "text": "Who or what is Qin Qinghe?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:npc_r5_c"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-020",
+      "text": "Who or what is Han Wangshu?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:npc_r7_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-021",
+      "text": "Who or what is Ye Qinghe?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:npc_r8_b"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-022",
+      "text": "Who or what is Cheng Tinglan?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:npc_r10_c"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-023",
+      "text": "Who or what is Caravan Guild?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:fac_trade"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-024",
+      "text": "Who or what is Black Sand Gang?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:fac_sand"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-025",
+      "text": "Who or what is Reedmarsh Fen Beacon?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:loc_r2_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-026",
+      "text": "Who or what is Ironwall Pass Crossing?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:loc_r6_b"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-027",
+      "text": "Who or what is Saltwind Coast Beacon?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:loc_r9_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-028",
+      "text": "Who or what is Old Road Ruins Crossing?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:loc_r10_b"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "vb-029",
+      "text": "Who or what is Iron Ward Legion?",
+      "locale": "en",
+      "category": "verbatim",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-000",
+      "text": "镇守北境群山隘口的最大常备军团",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-001",
+      "text": "the standing legion that guards the northern mountain passes",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-002",
+      "text": "统筹边地商队与货运路线的行会组织",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:fac_trade"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-003",
+      "text": "the guild coordinating caravans and freight routes on the frontier",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:fac_trade"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-004",
+      "text": "与戈壁劫掠帮派为敌的隐秘盟会",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:fac_mist"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-005",
+      "text": "the secretive pact at war with the desert raiders",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:fac_mist"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-006",
+      "text": "盘踞荒漠、以劫掠商旅为生的帮派",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:fac_sand"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-007",
+      "text": "the marauder band living off raiding travelers in the wastes",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:fac_sand"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-008",
+      "text": "多年前焚毁隐秘盟据点的那场大火灾",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:evt_mist_fire"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-009",
+      "text": "the great blaze that razed the hidden pact's stronghold years ago",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:evt_mist_fire"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-010",
+      "text": "北方诸方缔结的那纸镇北盟誓",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:evt_xuanwu_pact"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-011",
+      "text": "the northern oath sworn to bind the frontier powers together",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:evt_xuanwu_pact"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-012",
+      "text": "在海岸线上爆发的那场著名海战",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:evt_salt_battle"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-013",
+      "text": "the famous naval clash fought along the coastline",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:evt_salt_battle"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-014",
+      "text": "使古老商道彻底陷落的那次浩劫",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:evt_road_fall"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-015",
+      "text": "the catastrophe that brought the ancient trade road to ruin",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:evt_road_fall"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-016",
+      "text": "边关要塞遭长期围困的那场战事",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:evt_ironwall_siege"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-017",
+      "text": "the prolonged siege laid against the frontier fortress gateway",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:evt_ironwall_siege"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-018",
+      "text": "河堤决口酿成的那场吞没谷地的大水",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:evt_canglang_flood"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-019",
+      "text": "the great flood loosed when the river levee broke and drowned the valley",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:evt_canglang_flood"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-020",
+      "text": "由北军签发、准许通行关隘的凭证",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:item_xuantie_seal"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-021",
+      "text": "the token issued by the northern army granting safe passage through the checkpoints",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:item_xuantie_seal"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-022",
+      "text": "标注隐秘小径与暗哨的行军地图",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:item_mist_map"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-023",
+      "text": "the campaign chart marking hidden trails and covert lookout posts",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:item_mist_map"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-024",
+      "text": "贩运食盐所必需的官方许可文书",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:item_salt_permit"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-025",
+      "text": "the official license required to haul and sell salt",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:item_salt_permit"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-026",
+      "text": "古代经由水路调运粮货的管理体制",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:concept_caoyun"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-027",
+      "text": "the ancient administration for moving grain and goods by waterway",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:concept_caoyun"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-028",
+      "text": "以点燃烟火逐台传警的边防制度",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:concept_beacon"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-029",
+      "text": "the frontier signaling system that relays alarms from tower to tower by lit smoke",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:concept_beacon"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-030",
+      "text": "坐落在雾脊山道、由驻军与商队共同据守的烽火哨台",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r1_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-031",
+      "text": "the beacon watch-post in Mistridge Pass held jointly by the garrison and caravans",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r1_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-032",
+      "text": "坐落在苇泽沼地、由驻军与商队共同据守的烽火哨台",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r2_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-033",
+      "text": "the beacon watch-post in Reedmarsh Fen held jointly by the garrison and caravans",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r2_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-034",
+      "text": "坐落在北望平原、由驻军与商队共同据守的烽火哨台",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r3_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-035",
+      "text": "the beacon watch-post in Northwatch Plain held jointly by the garrison and caravans",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r3_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-036",
+      "text": "坐落在黑沙戈壁、由驻军与商队共同据守的烽火哨台",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r4_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-037",
+      "text": "the beacon watch-post in Blacksand Gobi held jointly by the garrison and caravans",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r4_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-038",
+      "text": "坐落在沧浪河谷、由驻军与商队共同据守的烽火哨台",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r5_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-039",
+      "text": "the beacon watch-post in Canglang Valley held jointly by the garrison and caravans",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r5_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-040",
+      "text": "坐落在铁壁关隘、由驻军与商队共同据守的烽火哨台",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r6_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-041",
+      "text": "the beacon watch-post in Ironwall Pass held jointly by the garrison and caravans",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r6_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-042",
+      "text": "坐落在落霞丘陵、由驻军与商队共同据守的烽火哨台",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r7_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-043",
+      "text": "the beacon watch-post in Sunsetfall Hills held jointly by the garrison and caravans",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r7_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-044",
+      "text": "坐落在寒杉林海、由驻军与商队共同据守的烽火哨台",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r8_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-045",
+      "text": "the beacon watch-post in Coldfir Forest held jointly by the garrison and caravans",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r8_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-046",
+      "text": "坐落在盐风海岸、由驻军与商队共同据守的烽火哨台",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r9_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-047",
+      "text": "the beacon watch-post in Saltwind Coast held jointly by the garrison and caravans",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r9_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-048",
+      "text": "坐落在古道废城、由驻军与商队共同据守的烽火哨台",
+      "locale": "zh-CN",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r10_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "pp-049",
+      "text": "the beacon watch-post in Old Road Ruins held jointly by the garrison and caravans",
+      "locale": "en",
+      "category": "paraphrase",
+      "expected_refs": [
+        "entity:loc_r10_a"
+      ],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "id-000",
+      "text": "第一行省第一个委托任务的发布者效力于哪一方势力",
+      "locale": "zh-CN",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "quest:quest_r1_q1"
+        ],
+        [
+          "entity:npc_r1_a"
+        ],
+        [
+          "entity:fac_iron"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-001",
+      "text": "which faction does the giver of quest 1 in province 1 serve",
+      "locale": "en",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "quest:quest_r1_q1"
+        ],
+        [
+          "entity:npc_r1_a"
+        ],
+        [
+          "entity:fac_iron"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-002",
+      "text": "第二行省第二个委托任务的发布者效力于哪一方势力",
+      "locale": "zh-CN",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_trade"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "quest:quest_r2_q2"
+        ],
+        [
+          "entity:npc_r2_b"
+        ],
+        [
+          "entity:fac_trade"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-003",
+      "text": "which faction does the giver of quest 2 in province 2 serve",
+      "locale": "en",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_trade"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "quest:quest_r2_q2"
+        ],
+        [
+          "entity:npc_r2_b"
+        ],
+        [
+          "entity:fac_trade"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-004",
+      "text": "第三行省第一个委托任务的发布者效力于哪一方势力",
+      "locale": "zh-CN",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "quest:quest_r3_q1"
+        ],
+        [
+          "entity:npc_r3_a"
+        ],
+        [
+          "entity:fac_iron"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-005",
+      "text": "which faction does the giver of quest 1 in province 3 serve",
+      "locale": "en",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "quest:quest_r3_q1"
+        ],
+        [
+          "entity:npc_r3_a"
+        ],
+        [
+          "entity:fac_iron"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-006",
+      "text": "第四行省第二个委托任务的发布者效力于哪一方势力",
+      "locale": "zh-CN",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_trade"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "quest:quest_r4_q2"
+        ],
+        [
+          "entity:npc_r4_b"
+        ],
+        [
+          "entity:fac_trade"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-007",
+      "text": "which faction does the giver of quest 2 in province 4 serve",
+      "locale": "en",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_trade"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "quest:quest_r4_q2"
+        ],
+        [
+          "entity:npc_r4_b"
+        ],
+        [
+          "entity:fac_trade"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-008",
+      "text": "第五行省第一个委托任务的发布者效力于哪一方势力",
+      "locale": "zh-CN",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "quest:quest_r5_q1"
+        ],
+        [
+          "entity:npc_r5_a"
+        ],
+        [
+          "entity:fac_iron"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-009",
+      "text": "which faction does the giver of quest 1 in province 5 serve",
+      "locale": "en",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "quest:quest_r5_q1"
+        ],
+        [
+          "entity:npc_r5_a"
+        ],
+        [
+          "entity:fac_iron"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-010",
+      "text": "第六行省第二个委托任务的发布者效力于哪一方势力",
+      "locale": "zh-CN",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_trade"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "quest:quest_r6_q2"
+        ],
+        [
+          "entity:npc_r6_b"
+        ],
+        [
+          "entity:fac_trade"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-011",
+      "text": "which faction does the giver of quest 2 in province 6 serve",
+      "locale": "en",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_trade"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "quest:quest_r6_q2"
+        ],
+        [
+          "entity:npc_r6_b"
+        ],
+        [
+          "entity:fac_trade"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-012",
+      "text": "第一行省的烽燧据点归哪支武装力量节制",
+      "locale": "zh-CN",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_trade"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "entity:loc_r1_a"
+        ],
+        [
+          "entity:fac_trade"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-013",
+      "text": "which armed force controls the beacon outpost in province 1",
+      "locale": "en",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_trade"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "entity:loc_r1_a"
+        ],
+        [
+          "entity:fac_trade"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-014",
+      "text": "第二行省的烽燧据点归哪支武装力量节制",
+      "locale": "zh-CN",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_mist"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "entity:loc_r2_a"
+        ],
+        [
+          "entity:fac_mist"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-015",
+      "text": "which armed force controls the beacon outpost in province 2",
+      "locale": "en",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_mist"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "entity:loc_r2_a"
+        ],
+        [
+          "entity:fac_mist"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-016",
+      "text": "第三行省的烽燧据点归哪支武装力量节制",
+      "locale": "zh-CN",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "entity:loc_r3_a"
+        ],
+        [
+          "entity:fac_iron"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-017",
+      "text": "which armed force controls the beacon outpost in province 3",
+      "locale": "en",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "entity:loc_r3_a"
+        ],
+        [
+          "entity:fac_iron"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-018",
+      "text": "第四行省的烽燧据点归哪支武装力量节制",
+      "locale": "zh-CN",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_trade"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "entity:loc_r4_a"
+        ],
+        [
+          "entity:fac_trade"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-019",
+      "text": "which armed force controls the beacon outpost in province 4",
+      "locale": "en",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_trade"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "entity:loc_r4_a"
+        ],
+        [
+          "entity:fac_trade"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-020",
+      "text": "第五行省的烽燧据点归哪支武装力量节制",
+      "locale": "zh-CN",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_mist"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "entity:loc_r5_a"
+        ],
+        [
+          "entity:fac_mist"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-021",
+      "text": "which armed force controls the beacon outpost in province 5",
+      "locale": "en",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_mist"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "entity:loc_r5_a"
+        ],
+        [
+          "entity:fac_mist"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-022",
+      "text": "第六行省的烽燧据点归哪支武装力量节制",
+      "locale": "zh-CN",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "entity:loc_r6_a"
+        ],
+        [
+          "entity:fac_iron"
+        ]
+      ]
+    },
+    {
+      "query_id": "id-023",
+      "text": "which armed force controls the beacon outpost in province 6",
+      "locale": "en",
+      "category": "indirect",
+      "expected_refs": [
+        "entity:fac_iron"
+      ],
+      "source": "template",
+      "evidence_hops": [
+        [
+          "entity:loc_r6_a"
+        ],
+        [
+          "entity:fac_iron"
+        ]
+      ]
+    },
+    {
+      "query_id": "un-000",
+      "text": "龙王住在哪座海底宫殿",
+      "locale": "zh-CN",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-001",
+      "text": "谁偷走了夜空里的月亮",
+      "locale": "zh-CN",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-002",
+      "text": "独角兽最爱吃什么野花",
+      "locale": "zh-CN",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-003",
+      "text": "巧克力喷泉停在哪朵云上",
+      "locale": "zh-CN",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-004",
+      "text": "外星飞碟何时降落",
+      "locale": "zh-CN",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-005",
+      "text": "彩虹尽头埋着多少黄金",
+      "locale": "zh-CN",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-006",
+      "text": "精灵公主住在哪棵大树",
+      "locale": "zh-CN",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-007",
+      "text": "会说话的南瓜马车去哪了",
+      "locale": "zh-CN",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-008",
+      "text": "who is the dragon king",
+      "locale": "en",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-009",
+      "text": "how do unicorns fly",
+      "locale": "en",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-010",
+      "text": "when will the spaceship land",
+      "locale": "en",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-011",
+      "text": "which castle hides the fairy queen",
+      "locale": "en",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-012",
+      "text": "how tall is the giant beanstalk",
+      "locale": "en",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-013",
+      "text": "which mermaid guards the coral palace",
+      "locale": "en",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-014",
+      "text": "how many wishes does the lamp grant",
+      "locale": "en",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    },
+    {
+      "query_id": "un-015",
+      "text": "which planet grows candy trees",
+      "locale": "en",
+      "category": "unanswerable",
+      "expected_refs": [],
+      "source": "template",
+      "evidence_hops": []
+    }
+  ]
+}

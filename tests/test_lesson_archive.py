@@ -13,10 +13,13 @@ Covers:
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 from owcopilot.assist.calibration import CalibrationReport, FalsePassItem
 from owcopilot.assist.lessons import (
+    _MAX_EXEMPLARS,
+    build_critic_lesson_block,
     build_lesson_block,
     extract_lessons_from_report,
 )
@@ -44,6 +47,7 @@ def _make_report_with_false_passes(item_type: str, count: int) -> CalibrationRep
 # ---------------------------------------------------------------------------
 # extract_lessons_from_report
 # ---------------------------------------------------------------------------
+
 
 def test_lesson_written_at_threshold() -> None:
     """[硬] >= 3 false_pass -> lesson written to store."""
@@ -77,6 +81,7 @@ def test_exactly_at_threshold() -> None:
 def test_multiple_item_types() -> None:
     """Multiple item_types, each with enough false_pass, both get lessons."""
     store = _make_store()
+
     def _fp(prefix: str, item_type: str, n: int) -> list[FalsePassItem]:
         return [
             FalsePassItem(
@@ -130,6 +135,7 @@ def test_extract_lessons_upsert_across_reports() -> None:
 # build_lesson_block
 # ---------------------------------------------------------------------------
 
+
 def test_lesson_injected_in_prompt() -> None:
     """[硬] Lessons present -> [lesson-memory] block appears."""
     lessons = [{"lesson_text": "此类 quest_draft 历史上有 3 次被拒。", "item_type": "quest_draft"}]
@@ -153,10 +159,7 @@ def test_empty_lessons_returns_empty() -> None:
 
 def test_at_most_3_lessons_injected() -> None:
     """[软] At most 3 lessons in the block."""
-    lessons = [
-        {"lesson_text": f"lesson {i}", "item_type": "quest_draft"}
-        for i in range(10)
-    ]
+    lessons = [{"lesson_text": f"lesson {i}", "item_type": "quest_draft"} for i in range(10)]
     block = build_lesson_block(lessons, inject_lessons=True)
     # Count the "N. " pattern (numbered list items)
     count = sum(1 for i in range(1, 5) if f"{i}. " in block)
@@ -177,6 +180,7 @@ def test_lesson_block_numbered_list() -> None:
 # ---------------------------------------------------------------------------
 # get_lessons_for_type (90-day deprioritization)
 # ---------------------------------------------------------------------------
+
 
 def test_90day_deprioritization() -> None:
     """[软] 90-day+ lesson sorts after recent lesson.
@@ -234,6 +238,7 @@ def test_get_lessons_max_count_respected() -> None:
     # Here test that max_count=3 is respected even if store has more.
     # Insert extra for same type by inserting directly
     import uuid
+
     for i in range(5):
         now = datetime.now(UTC).isoformat()
         try:
@@ -250,3 +255,128 @@ def test_get_lessons_max_count_respected() -> None:
             pass  # unique constraint
     lessons = store.get_lessons_for_type("test_type", max_count=3)
     assert len(lessons) <= 3
+
+
+# ---------------------------------------------------------------------------
+# T18: episodic exemplars attached to a lesson
+# ---------------------------------------------------------------------------
+
+
+def test_migration_lessons_has_exemplar_ids_column() -> None:
+    """[硬] The lessons table gains an exemplar_ids column, added idempotently."""
+    store = _make_store()
+    cols = {str(r["name"]) for r in store.conn.execute("PRAGMA table_info(lessons)")}
+    assert "exemplar_ids" in cols
+    # initialize is idempotent: re-running must not error or duplicate the column.
+    store.initialize()
+    cols_again = {str(r["name"]) for r in store.conn.execute("PRAGMA table_info(lessons)")}
+    assert cols_again == cols
+
+
+def test_extract_records_exemplar_object_refs() -> None:
+    """[硬] extract stores the concrete rejected object_refs as episodic exemplars."""
+    store = _make_store()
+    report = _make_report_with_false_passes("quest_draft", 3)  # object_ref = ref_0..ref_2
+    extract_lessons_from_report(report, store, min_false_pass=3)
+    lessons = store.get_lessons_for_type("quest_draft")
+    assert json.loads(lessons[0]["exemplar_ids"]) == ["ref_0", "ref_1", "ref_2"]
+
+
+def test_exemplars_capped_at_max() -> None:
+    """[硬] At most _MAX_EXEMPLARS refs are stored, keeping insertion order."""
+    store = _make_store()
+    report = _make_report_with_false_passes("quest_draft", 5)  # ref_0..ref_4
+    extract_lessons_from_report(report, store, min_false_pass=3)
+    lessons = store.get_lessons_for_type("quest_draft")
+    refs = json.loads(lessons[0]["exemplar_ids"])
+    assert refs == [f"ref_{i}" for i in range(_MAX_EXEMPLARS)]
+
+
+def test_exemplars_deduped() -> None:
+    """[硬] Repeated object_ref values collapse to a single exemplar."""
+    store = _make_store()
+    items = [
+        FalsePassItem(
+            item_id=f"item_{i}", item_type="quest_draft", object_ref="same_ref", critic_score=0.5
+        )
+        for i in range(3)
+    ]
+    report = CalibrationReport(false_pass_items=items)
+    extract_lessons_from_report(report, store, min_false_pass=3)
+    lessons = store.get_lessons_for_type("quest_draft")
+    assert json.loads(lessons[0]["exemplar_ids"]) == ["same_ref"]
+
+
+def test_save_lesson_without_exemplars_writes_null() -> None:
+    """[硬 向后兼容] A pre-T18 save (no exemplar_ids) leaves the column NULL."""
+    store = _make_store()
+    store.save_lesson("quest_draft", "lesson text")
+    lessons = store.get_lessons_for_type("quest_draft")
+    assert lessons[0]["exemplar_ids"] is None
+
+
+def test_save_lesson_empty_exemplars_writes_null() -> None:
+    """[硬 向后兼容] An empty exemplar list is stored as NULL, identical to None."""
+    store = _make_store()
+    store.save_lesson("quest_draft", "lesson text", exemplar_ids=[])
+    lessons = store.get_lessons_for_type("quest_draft")
+    assert lessons[0]["exemplar_ids"] is None
+
+
+def test_exemplars_replaced_on_conflict() -> None:
+    """[硬] On upsert the exemplar_ids are REPLACED (mirrors lesson_text), count still climbs."""
+    store = _make_store()
+    store.save_lesson("quest_draft", "L", exemplar_ids=["a"])
+    store.save_lesson("quest_draft", "L", exemplar_ids=["b", "c"])
+    lessons = store.get_lessons_for_type("quest_draft")
+    assert json.loads(lessons[0]["exemplar_ids"]) == ["b", "c"]
+    assert lessons[0]["false_pass_count"] == 2
+
+
+def test_lesson_block_without_exemplars_is_unchanged() -> None:
+    """[硬 向后兼容] A lesson dict without exemplar_ids renders byte-for-byte as before."""
+    lessons = [{"lesson_text": "L1", "item_type": "t"}]
+    block = build_lesson_block(lessons, inject_lessons=True)
+    assert block == ("[lesson-memory]\n以下是此类内容历史系统性问题总结，生成时请特别注意：\n1. L1")
+
+
+def test_lesson_block_renders_exemplars() -> None:
+    """[硬] When a lesson carries exemplars, the generation block cites the concrete instances."""
+    lessons = [
+        {"lesson_text": "L1", "item_type": "t", "exemplar_ids": json.dumps(["quest:a", "quest:b"])}
+    ]
+    block = build_lesson_block(lessons, inject_lessons=True)
+    assert "1. L1（参见历史被拒实例：quest:a、quest:b）" in block
+
+
+def test_critic_block_without_exemplars_is_unchanged() -> None:
+    """[硬 向后兼容] Critic block for an exemplar-less lesson matches the pre-T18 output exactly."""
+    lessons = [{"lesson_text": "L1", "item_type": "t", "dimension": "general"}]
+    block = build_critic_lesson_block(lessons, inject_lessons=True)
+    assert block == (
+        "[critic-lesson-memory]\n"
+        "以下是此类内容历史上评判侧的系统性漏判记录，请据此加强核查：\n"
+        "1. L1\n"
+        "如发现上述历史薄弱维度有类似问题，请将 severity 提升为 blocker。"
+    )
+
+
+def test_critic_block_renders_exemplars() -> None:
+    """[硬] The critic block cites the same concrete rejected instances (Reflexion detail)."""
+    lessons = [
+        {
+            "lesson_text": "L1",
+            "item_type": "t",
+            "dimension": "completeness",
+            "exemplar_ids": json.dumps(["quest:a"]),
+        }
+    ]
+    block = build_critic_lesson_block(lessons, inject_lessons=True)
+    assert "（重点核查「completeness」维度）（参见历史被拒实例：quest:a）" in block
+
+
+def test_lesson_block_accepts_decoded_exemplar_list() -> None:
+    """A caller/test may pass an already-decoded list; it renders the same as the JSON string."""
+    lessons = [{"lesson_text": "L1", "item_type": "t", "exemplar_ids": ["quest:a"]}]
+    block = build_lesson_block(lessons, inject_lessons=True)
+    assert "（参见历史被拒实例：quest:a）" in block

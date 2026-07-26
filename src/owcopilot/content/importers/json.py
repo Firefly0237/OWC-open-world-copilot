@@ -1,3 +1,4 @@
+# 原生内容文件与简单导出数组的 JSON 导入器。
 """JSON importer for native content files and simple exported arrays."""
 
 from __future__ import annotations

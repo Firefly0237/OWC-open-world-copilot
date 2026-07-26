@@ -22,6 +22,7 @@ from owcopilot.benchmark import (
     render_result,
     run_benchmark,
 )
+
 from owcopilot.util import use_utf8_stdout
 
 

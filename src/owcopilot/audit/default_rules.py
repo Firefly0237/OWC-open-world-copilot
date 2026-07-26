@@ -1,3 +1,4 @@
+# 默认 v2 确定性规则目录（一致性规则的装配处）。
 """Default v2 deterministic rule catalog."""
 
 from __future__ import annotations
@@ -7,16 +8,21 @@ from .rules import (
     CharacterStateContradictionRule,
     DeprecatedEntityReferenceRule,
     DialogueChoiceConditionRule,
+    DialogueSelfReportInconsistencyRule,
     DialogueTreeBrokenLinkRule,
+    DialogueTreeMissingTextKeyRule,
     DialogueTreeUnknownSpeakerRule,
     DialogueTreeUnreachableNodeRule,
+    DialogueUngatedSiblingChoiceRule,
     DuplicateRelationRule,
     EventResultReferencedTooEarlyRule,
     FactionConflictRule,
+    FlagTemporalInvariantRule,
     MissingDialogueReferenceRule,
     MissingEntityReferenceRule,
     MissingLocalizationKeyRule,
     MissingPrerequisiteRule,
+    MissingRegionReferenceRule,
     MissingRelationEndpointRule,
     PlaceholderMismatchRule,
     POILevelOutOfBoundsRule,
@@ -43,6 +49,7 @@ def build_default_rule_registry() -> RuleRegistry:
             DeprecatedEntityReferenceRule(),
             MissingPrerequisiteRule(),
             MissingDialogueReferenceRule(),
+            MissingRegionReferenceRule(),
             MissingLocalizationKeyRule(),
             QuestMissingObjectiveRule(),
             TextTooLongForUIRule(),
@@ -63,9 +70,13 @@ def build_default_rule_registry() -> RuleRegistry:
             DialogueTreeBrokenLinkRule(),
             DialogueTreeUnknownSpeakerRule(),
             DialogueTreeUnreachableNodeRule(),
+            DialogueTreeMissingTextKeyRule(),
             DialogueChoiceConditionRule(),
+            DialogueSelfReportInconsistencyRule(),
+            DialogueUngatedSiblingChoiceRule(),
             QuestLogicRule(),
             QuestGlobalReachabilityRule(),
+            FlagTemporalInvariantRule(),
             PromptInjectionRule(),
             UnreviewedAIContentRule(),
         ]

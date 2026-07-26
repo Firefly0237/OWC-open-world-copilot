@@ -1,3 +1,4 @@
+# 内容导出：引擎无关的数据 + 本地化交接包。
 """Content export — the engine-agnostic data + localization handoff.
 
 `content_bundle.json` + `manifest.json` is the universal handoff: deterministic, checksummed files
@@ -16,7 +17,13 @@ from pathlib import Path
 from ..content.hash import content_hash
 from ..content.models import ContentBundle
 from .models import EngineTarget, ExportedFile, ExportManifest
+from .unity_localization import UnityLocalizationSummary, write_unity_localization
+from .unity_manifest import write_unity_manifest
+from .unreal_datatable import export_unreal_datatables
 from .xliff import write_localization_csv, write_localization_xliff
+
+_UNREAL_SUBDIR = "unreal"
+_UNITY_SUBDIR = "unity"
 
 
 def export_content_bundle(
@@ -24,10 +31,12 @@ def export_content_bundle(
     output_dir: str | Path,
     *,
     target_engine: EngineTarget | str = EngineTarget.GENERIC,
+    unity_localization: bool = False,
+    row_struct_map: dict[str, dict[str, str]] | None = None,
 ) -> ExportManifest:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    engine = EngineTarget(target_engine)  # GENERIC is the only target; kept for manifest provenance
+    engine = EngineTarget(target_engine)  # GENERIC base; UNREAL/UNITY add an engine-side projection
 
     content_payload = bundle.model_dump(mode="json", exclude_none=True)
     (output / "content_bundle.json").write_text(_json(content_payload), encoding="utf-8")
@@ -41,6 +50,52 @@ def export_content_bundle(
         write_localization_xliff(bundle, output / "localized_texts.xlf")
         files.append(_file_entry(output, "localized_texts.csv", "localization_csv"))
         files.append(_file_entry(output, "localized_texts.xlf", "localization_xliff"))
+
+    # UNREAL target is a superset: keep the generic bundle above byte-for-byte, then add the UE
+    # DataTable projection under unreal/. Preflight may raise UnrealExportError (guided) before any
+    # UE file is written; the generic files already on disk stay valid.
+    # ``row_struct_map`` (canonical field name -> the project's own export column name, keyed by
+    # table) is meaningful only for the UNREAL projection; None/omit keeps the default {} so the
+    # generic and unity outputs stay byte-for-byte identical to before.
+    if engine is EngineTarget.UNREAL:
+        ue_result = export_unreal_datatables(
+            bundle, output / _UNREAL_SUBDIR, row_struct_map=row_struct_map
+        )
+        for item in ue_result.files:
+            files.append(
+                ExportedFile(
+                    path=f"{_UNREAL_SUBDIR}/{item.path}", kind=item.kind, sha256=item.sha256
+                )
+            )
+
+    # UNITY target is also a superset: the generic bundle above stays byte-for-byte, then add one
+    # sidecar manifest under unity/ that points the UPM importer at the bundle and carries the
+    # per-category counts for cross-checking the in-editor import report. The Unity Localization
+    # String Table CSV is opt-in (`unity_localization`); with it off, the unity/ projection is
+    # byte-for-byte what it was before.
+    if engine is EngineTarget.UNITY:
+        localization_files: list[ExportedFile] = []
+        localization_summary: UnityLocalizationSummary | None = None
+        if unity_localization:
+            localization_files, localization_summary = write_unity_localization(
+                bundle, output / _UNITY_SUBDIR
+            )
+        unity_file = write_unity_manifest(
+            bundle, output / _UNITY_SUBDIR, localization=localization_summary
+        )
+        files.append(
+            ExportedFile(
+                path=f"{_UNITY_SUBDIR}/{unity_file.path}",
+                kind=unity_file.kind,
+                sha256=unity_file.sha256,
+            )
+        )
+        for item in localization_files:
+            files.append(
+                ExportedFile(
+                    path=f"{_UNITY_SUBDIR}/{item.path}", kind=item.kind, sha256=item.sha256
+                )
+            )
 
     manifest = ExportManifest(
         target_engine=engine,

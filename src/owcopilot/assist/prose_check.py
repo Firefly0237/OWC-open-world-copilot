@@ -1,3 +1,4 @@
+# 自由文本一致性检查：这章是否与世界档案冲突。
 """Free-text consistency check: does this chapter agree with the world archive?
 
 Deterministic v1 (zero LLM): resolve known mentions, flag unknown proper-noun candidates,

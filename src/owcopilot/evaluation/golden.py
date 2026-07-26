@@ -1,3 +1,4 @@
+# Golden World 夹具 + 确定性评测跑法。
 """Golden World fixture and deterministic evaluation runner."""
 
 from __future__ import annotations

@@ -1,0 +1,172 @@
+{
+  "id": "dlg_hl_q3_xifeng",
+  "title": "凤姐登场",
+  "quest_id": "hl_q3_xifeng",
+  "participants": ["daiyu", "xifeng"],
+  "root_node": "q3n010",
+  "tags": ["main", "chapter3"],
+  "metadata": {},
+  "origin": "human",
+  "review_status": "approved",
+  "nodes": {
+    "q3n010": {
+      "id": "q3n010",
+      "speaker_id": "daiyu",
+      "text": "正说话之间，忽听得后院一阵笑声，爽利异常，隔着帘子便先声夺人，倒把满座的低声细语都压了下去。黛玉心下纳罕：这是谁，竟这样放诞无礼？",
+      "text_key": "hl_q3_n010_text",
+      "next_node": "q3n020",
+      "choices": []
+    },
+    "q3n020": {
+      "id": "q3n020",
+      "speaker_id": "xifeng",
+      "text": "凤姐一路笑着进来，携了黛玉的手，上下端详一回，又拭泪又笑道：天下竟有这样标致的人物，我今儿才算见着了！竟不像老祖宗的外孙女儿，倒像是嫡亲的孙女儿一般。",
+      "text_key": "hl_q3_n020_text",
+      "next_node": null,
+      "choices": [
+        {
+          "text": "黛玉忙起身，含笑应道：姐姐过奖了。落落大方受了这声夸赞。",
+          "text_key": "hl_q3_n020_c1",
+          "next_node": "q3n030",
+          "condition": "",
+          "effects": [
+            { "var": "xifeng_favor", "op": "inc", "value": 1 }
+          ]
+        },
+        {
+          "text": "黛玉只低头浅笑，谦辞道：不敢当，妹妹年幼，当不得姐姐这般夸赞。",
+          "text_key": "hl_q3_n020_c2",
+          "next_node": "q3n030",
+          "condition": "",
+          "effects": [
+            { "var": "careful", "op": "set", "value": true }
+          ]
+        }
+      ]
+    },
+    "q3n030": {
+      "id": "q3n030",
+      "speaker_id": "xifeng",
+      "text": "凤姐又携着黛玉的手，细问妹妹今年多大年纪了，坐车可还乏累，一路可还惯么，语声温软，倒像是自家姐妹一般关切。",
+      "text_key": "hl_q3_n030_text",
+      "next_node": null,
+      "choices": [
+        {
+          "text": "黛玉一一如实答了，年岁、路途都说得清楚，不曾遮掩。",
+          "text_key": "hl_q3_n030_c1",
+          "next_node": "q3n040",
+          "condition": "",
+          "effects": [
+            { "var": "xifeng_favor", "op": "inc", "value": 1 }
+          ]
+        },
+        {
+          "text": "黛玉只简短应了几句，不肯多说家中光景，只推年纪尚小，不知深浅。",
+          "text_key": "hl_q3_n030_c2",
+          "next_node": "q3n040",
+          "condition": "",
+          "effects": [
+            { "var": "careful", "op": "set", "value": true }
+          ]
+        }
+      ]
+    },
+    "q3n040": {
+      "id": "q3n040",
+      "speaker_id": "xifeng",
+      "text": "凤姐又笑问道：妹妹在家，跟着先生念的是什么书？",
+      "text_key": "hl_q3_n040_text",
+      "next_node": null,
+      "choices": [
+        {
+          "text": "黛玉便如实答道：不过是跟着西宾启蒙，读了几年书罢了。",
+          "text_key": "hl_q3_n040_c1",
+          "next_node": "q3n050",
+          "condition": "said_read_books == true",
+          "effects": [
+            { "var": "xifeng_favor", "op": "inc", "value": 1 }
+          ]
+        },
+        {
+          "text": "黛玉只浅浅一笑，说：不过是些须认得几个字，当不得读书二字。",
+          "text_key": "hl_q3_n040_c2",
+          "next_node": "q3n050",
+          "condition": "",
+          "effects": [
+            { "var": "careful", "op": "set", "value": true }
+          ]
+        }
+      ]
+    },
+    "q3n050": {
+      "id": "q3n050",
+      "speaker_id": "xifeng",
+      "text": "凤姐又问起黛玉可曾请医服药，如今可还按时吃着，一面说一面吩咐丫头好生伺候，休教怠慢了。",
+      "text_key": "hl_q3_n050_text",
+      "next_node": null,
+      "choices": [
+        {
+          "text": "黛玉便细细说了病症与所服何药，倒把话说得详尽。",
+          "text_key": "hl_q3_n050_c1",
+          "next_node": "q3n060",
+          "condition": "",
+          "effects": [
+            { "var": "xifeng_favor", "op": "inc", "value": 1 }
+          ]
+        },
+        {
+          "text": "黛玉只含混应了一声：如今好多了，不劳姐姐费心。不肯多提病中琐事。",
+          "text_key": "hl_q3_n050_c2",
+          "next_node": "q3n060",
+          "condition": "",
+          "effects": [
+            { "var": "careful", "op": "set", "value": true }
+          ]
+        }
+      ]
+    },
+    "q3n060": {
+      "id": "q3n060",
+      "speaker_id": "xifeng",
+      "text": "凤姐便命人取了两匹缎子、两对荷包并些针线来，笑道：这是一点子见面礼，妹妹别嫌简慢。",
+      "text_key": "hl_q3_n060_text",
+      "next_node": null,
+      "choices": [
+        {
+          "text": "黛玉忙起身道谢，双手接过，言语间十分恭谨。",
+          "text_key": "hl_q3_n060_c1",
+          "next_node": "q3n070",
+          "condition": "",
+          "effects": [
+            { "var": "xifeng_favor", "op": "inc", "value": 1 }
+          ]
+        },
+        {
+          "text": "黛玉只略略欠身道谢，并不多言，只交丫鬟收了下去。",
+          "text_key": "hl_q3_n060_c2",
+          "next_node": "q3n070",
+          "condition": "",
+          "effects": [
+            { "var": "careful", "op": "set", "value": true }
+          ]
+        }
+      ]
+    },
+    "q3n070": {
+      "id": "q3n070",
+      "speaker_id": "daiyu",
+      "text": "正说着，只见外面几个媳妇进来回事，凤姐便丢下手边的话，一一听了回报，处置得极是爽利，竟不因黛玉在座而有半分迟滞。",
+      "text_key": "hl_q3_n070_text",
+      "next_node": "q3n080",
+      "choices": []
+    },
+    "q3n080": {
+      "id": "q3n080",
+      "speaker_id": "daiyu",
+      "text": "黛玉冷眼瞧着，只见凤姐言谈举止，竟把偌大一个家务事料理得妥妥帖帖，心下便多留了一层心思。",
+      "text_key": "hl_q3_n080_text",
+      "next_node": null,
+      "choices": []
+    }
+  }
+}

@@ -1,8 +1,11 @@
 """Phase B implementation tests — B4-R1.
 
 Covers all [硬] acceptance criteria for the 4 items:
-- IN-B2 T2: SkillRegistry.manifest(allowed=...) + ReActAgent.allowed_skills
-- IN-B4 C1+T3: AgentStep.observation_chars/is_truncated + transcript budget _trim_transcript
+- IN-B2 T2: SkillRegistry.manifest(allowed=...) + ReActAgent.allowed_skills (post-T2 host: the
+  allowed set filters the BOUND TOOL SCHEMA — the manifest's function-calling equivalent)
+- IN-B4 C1: AgentStep.observation_chars/is_truncated (the T3 text-path transcript trim retired
+  with the text loop; the token budget is enforced by the compression middleware, pinned in
+  test_agent_middleware.py / test_t4_context_compressor.py)
 - IN-B1 M2: dimension-aware lessons (FalsePassItem, save/get, extract, primary_failing_dimension)
 - IN-B3 M1: build_critic_lesson_block + critic lesson injection (all 6 critics, default off)
 """
@@ -10,14 +13,12 @@ Covers all [硬] acceptance criteria for the 4 items:
 from __future__ import annotations
 
 import inspect
-import re
 
-from owcopilot.agent.react import (
-    AgentStep,
-    ReActAgent,
-    _trim_transcript,
-    _user_prompt,
-)
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage
+from pydantic import Field as PydField
+
+from owcopilot.agent.react import AgentStep, ReActAgent
 from owcopilot.assist.calibration import (
     CalibrationReport,
     FalsePassItem,
@@ -41,22 +42,24 @@ from owcopilot.assist.lessons import (
     extract_lessons_from_report,
 )
 from owcopilot.assist.review_queue import ReviewItemType, ReviewQueue
-from owcopilot.core.skills import (
+from owcopilot.fakes import scripted_chat_model
+from owcopilot.llm.cache import NoOpCache
+from owcopilot.llm.gateway import LLMGateway
+from owcopilot.llm.router import StaticRouter
+from owcopilot.skills import (
     CostTier,
     SideEffect,
     Skill,
     SkillParameter,
     SkillRegistry,
 )
-from owcopilot.llm.cache import NoOpCache
-from owcopilot.llm.gateway import LLMGateway
-from owcopilot.llm.router import StaticRouter
 from owcopilot.storage.sqlite import SQLiteStore
 from owcopilot.worldgen.critic import WorldQuestCritic, run_quest_refine_loop
 
 # ============================================================
 # Helpers
 # ============================================================
+
 
 def _make_store() -> SQLiteStore:
     return SQLiteStore(":memory:")
@@ -80,34 +83,25 @@ def _make_registry(*names: str) -> SkillRegistry:
     return reg
 
 
-class _ScriptedProvider:
-    """Returns canned ReAct turns in sequence."""
+class _ToolRecordingModel(GenericFakeChatModel):
+    """Scripted chat fake recording the bound tool names and every call's message list."""
 
-    def __init__(self, turns: list[str]) -> None:
-        self.turns = turns
-        self.calls = 0
-        self.captured_systems: list[str] = []
-        self.captured_users: list[str] = []
+    bound: list[list[str]] = PydField(default_factory=list)
+    seen: list[list[object]] = PydField(default_factory=list)
 
-    def complete(self, *, system: str, user: str, model: str):
-        self.captured_systems.append(system)
-        self.captured_users.append(user)
-        text = self.turns[min(self.calls, len(self.turns) - 1)]
-        self.calls += 1
-        return text, 0, 0
+    def bind_tools(self, tools, **kwargs):
+        self.bound.append([t.name for t in tools])
+        return self
 
-
-def _gateway(provider) -> LLMGateway:
-    return LLMGateway(
-        providers={"cheap": provider},
-        router=StaticRouter(mapping={"agent_react": "cheap"}),
-        cache=NoOpCache(),
-    )
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.seen.append(list(messages))
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
 # ============================================================
 # IN-B2 T2 — SkillRegistry.manifest(allowed=...) + ReActAgent.allowed_skills
 # ============================================================
+
 
 class TestT2ManifestFilter:
     """H-T2-1 through H-T2-7"""
@@ -145,57 +139,42 @@ class TestT2ManifestFilter:
         reg = _make_registry("skill_a", "skill_b")
         assert reg.manifest(allowed=set()) == ""
 
-    def test_H_T2_5_react_agent_none_system_same_as_no_param(self):
-        """H-T2-5: allowed_skills=None gives same system prompt as not passing allowed_skills."""
+    def test_H_T2_5_react_agent_none_binds_same_tools_as_no_param(self):
+        """H-T2-5: allowed_skills=None binds the same tool set as not passing allowed_skills."""
         reg = _make_registry("skill_a", "skill_b")
-        provider_old = _ScriptedProvider(["Thought: done\nFinal Answer: ok"])
-        provider_new = _ScriptedProvider(["Thought: done\nFinal Answer: ok"])
-        gw_old = _gateway(provider_old)
-        gw_new = _gateway(provider_new)
+        model_old = _ToolRecordingModel(messages=iter([AIMessage(content="ok")]))
+        model_new = _ToolRecordingModel(messages=iter([AIMessage(content="ok")]))
 
-        agent_old = ReActAgent(gateway=gw_old, registry=reg)
-        agent_new = ReActAgent(gateway=gw_new, registry=reg, allowed_skills=None)
+        ReActAgent(model=model_old, registry=reg).run("test")
+        ReActAgent(model=model_new, registry=reg, allowed_skills=None).run("test")
 
-        agent_old.run("test")
-        agent_new.run("test")
+        assert model_old.bound[-1] == model_new.bound[-1] == ["skill_a", "skill_b"]
 
-        assert provider_old.captured_systems[0] == provider_new.captured_systems[0]
-
-    def test_H_T2_6_allowed_skills_set_filters_system_manifest(self):
-        """H-T2-6: allowed_skills={"skill_a"} gives manifest only containing skill_a."""
+    def test_H_T2_6_allowed_skills_set_filters_bound_tools(self):
+        """H-T2-6: allowed_skills={"skill_a"} exposes only skill_a to the model."""
         reg = _make_registry("skill_a", "skill_b", "skill_c")
-        provider = _ScriptedProvider(["Thought: done\nFinal Answer: ok"])
-        agent = ReActAgent(gateway=_gateway(provider), registry=reg, allowed_skills={"skill_a"})
-        agent.run("test")
-        system = provider.captured_systems[0]
-        assert "skill_a" in system
-        assert "skill_b" not in system
-        assert "skill_c" not in system
+        model = _ToolRecordingModel(messages=iter([AIMessage(content="ok")]))
+        ReActAgent(model=model, registry=reg, allowed_skills={"skill_a"}).run("test")
+        assert model.bound[-1] == ["skill_a"]
 
     def test_H_T2_7_model_calls_blocked_skill_gets_error_not_crash(self):
-        """H-T2-7: model calling skill not in manifest gets SkillError observation, no crash."""
+        """H-T2-7: model calling a tool outside its bound set gets an error observation (or the
+        execution-layer dispatch, for a registered skill), never a crash."""
         reg = _make_registry("skill_a", "skill_b")
-        provider = _ScriptedProvider([
-            "Thought: try blocked\nAction: skill_b\nAction Input: {}",
-            "Thought: done\nFinal Answer: recovered",
-        ])
-        # Only allow skill_a; skill_b is "blocked" from manifest
+        # skill_b IS registered, so the execution-layer registry dispatch still runs it (the
+        # historical contract: the schema filter hides, the registry gate decides) — no crash.
         agent = ReActAgent(
-            gateway=_gateway(provider),
+            model=scripted_chat_model([("skill_b", {}), "recovered"]),
             registry=reg,
             allowed_skills={"skill_a"},
             max_steps=3,
         )
-        agent.run("test")  # side-effect only; this just verifies no crash
-        # skill_b IS registered, so calling it won't error — but the key test is:
-        # with a truly unknown skill, it becomes an error observation.
-        # Let's use a truly unknown skill here:
-        provider2 = _ScriptedProvider([
-            "Thought: try unknown\nAction: nonexistent_tool\nAction Input: {}",
-            "Thought: done\nFinal Answer: recovered",
-        ])
+        result = agent.run("test")
+        assert result.stop_reason == "finished"
+
+        # A truly unknown skill becomes a recoverable error observation.
         agent2 = ReActAgent(
-            gateway=_gateway(provider2),
+            model=scripted_chat_model([("nonexistent_tool", {}), "recovered"]),
             registry=reg,
             allowed_skills={"skill_a"},
             max_steps=3,
@@ -207,11 +186,13 @@ class TestT2ManifestFilter:
 
 
 # ============================================================
-# IN-B4 C1+T3 — AgentStep fields + _trim_transcript + _user_prompt budget
+# IN-B4 C1 — AgentStep observation fields (the T3 text-path trim helpers retired with the
+# text loop; token-budget behaviour is pinned by the compression-middleware tests)
 # ============================================================
 
+
 class TestC1T3TranscriptBudget:
-    """H-C1-1 through H-C1-12"""
+    """H-C1-1 through H-C1-12 (budget-helper items superseded by the compression middleware)"""
 
     def test_H_C1_1_agent_step_observation_chars_default_zero(self):
         """H-C1-1: AgentStep().observation_chars == 0."""
@@ -227,12 +208,11 @@ class TestC1T3TranscriptBudget:
     def test_H_C1_3_observation_chars_equals_len_observation_after_truncation(self):
         """H-C1-3: observation_chars == len(step.observation) after truncation."""
         reg = _make_registry("skill_a")
-        provider = _ScriptedProvider([
-            "Thought: run skill\nAction: skill_a\nAction Input: {}",
-            "Thought: done\nFinal Answer: ok",
-        ])
-        agent = ReActAgent(gateway=_gateway(provider), registry=reg, max_steps=3)
+        agent = ReActAgent(
+            model=scripted_chat_model([("skill_a", {}), "ok"]), registry=reg, max_steps=3
+        )
         result = agent.run("test")
+        assert result.steps
         for step in result.steps:
             if step.action:  # only action steps have obs
                 assert step.observation_chars == len(step.observation)
@@ -252,12 +232,8 @@ class TestC1T3TranscriptBudget:
         reg = SkillRegistry()
         reg.register(long_skill)
 
-        provider = _ScriptedProvider([
-            "Thought: run\nAction: long_skill\nAction Input: {}",
-            "Thought: done\nFinal Answer: ok",
-        ])
         agent = ReActAgent(
-            gateway=_gateway(provider),
+            model=scripted_chat_model([("long_skill", {}), "ok"]),
             registry=reg,
             observation_char_limit=100,  # small limit -> truncation
             max_steps=3,
@@ -280,12 +256,8 @@ class TestC1T3TranscriptBudget:
         reg = SkillRegistry()
         reg.register(small_skill)
 
-        provider = _ScriptedProvider([
-            "Thought: run\nAction: small_skill\nAction Input: {}",
-            "Thought: done\nFinal Answer: ok",
-        ])
         agent = ReActAgent(
-            gateway=_gateway(provider),
+            model=scripted_chat_model([("small_skill", {}), "ok"]),
             registry=reg,
             observation_char_limit=10000,  # large limit -> no truncation
             max_steps=3,
@@ -295,92 +267,15 @@ class TestC1T3TranscriptBudget:
         assert len(action_steps) == 1
         assert action_steps[0].is_truncated is False
 
-    def test_H_C1_5_user_prompt_budget_none_no_truncation_no_marker(self):
-        """H-C1-5: transcript_char_budget=None -> no truncation, no marker."""
-        transcript = ["turn1" * 1000, "turn2" * 1000, "turn3" * 1000]
-        old_prompt = _user_prompt("goal", transcript)
-        new_prompt = _user_prompt("goal", transcript, None)
-        assert old_prompt == new_prompt
-        assert "[earlier turns omitted]" not in new_prompt
-
-    def test_H_C1_6_user_prompt_truncates_oldest_when_over_budget(self):
-        """H-C1-6: transcript total > budget -> oldest turn removed, marker appears, newest kept.
-
-        Updated for T4-C: budget is now passed as transcript_token_budget (tiktoken units).
-        We use a small token budget (2500) that admits "C"*8000 (≈2000 tokens) and "B"*8000
-        (≈2000 tokens) but not all three together (total ≈5000 > 2500).
-        """
-        transcript = ["A" * 8000, "B" * 8000, "C" * 8000]
-        # token budget of 2500: fits C (2000) but not B+C (4000) → only C kept
-        prompt = _user_prompt("goal", transcript, transcript_token_budget=2500)
-        # Marker must appear
-        assert re.search(r"\[\d+ earlier turns omitted\]", prompt)
-        # Oldest turn content must not appear (first 100 chars of 'A'*8000)
-        assert "A" * 100 not in prompt
-        # Newest turn content must appear
-        assert "C" * 100 in prompt
-
-    def test_H_C1_7_trim_transcript_total_within_budget(self):
-        """H-C1-7: _trim_transcript drops oldest turns when token total exceeds budget.
-
-        Updated for T4-C: budget is now in token units (tiktoken cl100k_base).
-        We use a small budget (50 tokens) with short turns (~4 tokens each) so that
-        all 3 turns together exceed the budget but 2 or fewer fit.
-        """
-        from owcopilot.llm.tokenizer import count_tokens
-
-        # Short turns that are well-understood in token count (~4 tokens each in cl100k)
-        turns = ["hello world " * 5, "foo bar baz " * 5, "the quick fox " * 5]
-        # Verify our assumption: each turn is small
-        per_turn_tokens = [count_tokens(t) for t in turns]
-        total_all = sum(per_turn_tokens)
-        # Budget fits 2 but not 3 turns
-        budget = per_turn_tokens[-1] + per_turn_tokens[-2] + 1  # fits last 2, not all 3
-        assert total_all > budget, "Test setup: total should exceed budget"
-
-        trimmed, n_omitted = _trim_transcript(turns, budget=budget)
-        total_tokens = sum(count_tokens(t) for t in trimmed)
-        # At most 2 turns kept; the kept set fits within budget
-        assert n_omitted >= 1
-        # The trimmed total fits within budget (kept within budget, newest-first greedy)
-        assert total_tokens <= budget
-
-    def test_H_C1_8_trim_transcript_single_oversize_turn_kept(self):
-        """H-C1-8: single turn that exceeds budget -> still kept (never empty transcript)."""
-        turns = ["X" * 100000]  # single huge turn
-        trimmed, n_omitted = _trim_transcript(turns, budget=1000)
-        assert len(trimmed) == 1
-        assert n_omitted == 0
-
-    def test_H_C1_9_trim_transcript_none_budget_returns_original(self):
-        """H-C1-9: budget=None -> (original list, 0 omitted)."""
-        turns = ["A" * 10000, "B" * 10000]
-        trimmed, n_omitted = _trim_transcript(turns, None)
-        assert trimmed == turns  # same content
-        assert n_omitted == 0
-
-    def test_H_C1_9_trim_transcript_none_budget_same_object(self):
-        """H-C1-9: budget=None -> returns same object (not a copy)."""
-        turns = ["A" * 10000, "B" * 10000]
-        trimmed, n_omitted = _trim_transcript(turns, None)
-        assert trimmed is turns
-        assert n_omitted == 0
-
-    def test_H_C1_10_marker_format_is_N_earlier_turns_omitted(self):
-        """H-C1-10: marker format exactly '[N earlier turns omitted]'."""
-        turns = ["A" * 8000, "B" * 8000, "C" * 8000]
-        prompt = _user_prompt("goal", turns, transcript_char_budget=10000)
-        match = re.search(r"\[(\d+) earlier turns omitted\]", prompt)
-        assert match is not None
-        assert int(match.group(1)) >= 1
+    # H-C1-5..10 and the _trim_transcript unit tests covered the text path's _user_prompt /
+    # _trim_transcript safety-net helpers, deleted with the text loop. The transcript token
+    # budget is now enforced by ContextCompressionMiddleware, pinned in
+    # test_agent_middleware.py and test_t4_context_compressor.py.
 
     def test_H_C1_11_no_regression_default_budget(self):
         """H-C1-11: ReActAgent with default budget completes normally (no regression)."""
         reg = _make_registry("skill_a")
-        provider = _ScriptedProvider([
-            "Thought: done\nFinal Answer: ok",
-        ])
-        agent = ReActAgent(gateway=_gateway(provider), registry=reg)
+        agent = ReActAgent(model=scripted_chat_model(["ok"]), registry=reg)
         result = agent.run("test goal")
         assert result.stop_reason == "finished"
         assert result.final_answer == "ok"
@@ -388,43 +283,24 @@ class TestC1T3TranscriptBudget:
     def test_H_C1_12_budget_none_behavior_consistent(self):
         """H-C1-12: transcript_char_budget=None -> same behavior as no budget param."""
         reg = _make_registry("skill_a")
-        provider1 = _ScriptedProvider(["Thought: done\nFinal Answer: ok"])
-        provider2 = _ScriptedProvider(["Thought: done\nFinal Answer: ok"])
+        model1 = _ToolRecordingModel(messages=iter([AIMessage(content="ok")]))
+        model2 = _ToolRecordingModel(messages=iter([AIMessage(content="ok")]))
 
-        agent1 = ReActAgent(gateway=_gateway(provider1), registry=reg, transcript_char_budget=None)
-        agent2 = ReActAgent(gateway=_gateway(provider2), registry=reg)
+        agent1 = ReActAgent(model=model1, registry=reg, transcript_char_budget=None)
+        agent2 = ReActAgent(model=model2, registry=reg)
 
         result1 = agent1.run("goal")
         result2 = agent2.run("goal")
 
         assert result1.final_answer == result2.final_answer
-        # With no steps, user prompts should be identical
-        assert provider1.captured_users[0] == provider2.captured_users[0]
-
-    def test_trim_transcript_empty_list(self):
-        """Edge: empty transcript -> ([], 0)."""
-        trimmed, n = _trim_transcript([], budget=1000)
-        assert trimmed == []
-        assert n == 0
-
-    def test_trim_transcript_single_fits(self):
-        """Single turn within budget -> unchanged."""
-        turns = ["hello"]
-        trimmed, n = _trim_transcript(turns, budget=100)
-        assert trimmed == turns
-        assert n == 0
-
-    def test_trim_transcript_multiple_keeps_newest(self):
-        """Budget tight enough to keep only newest turn."""
-        turns = ["old" * 1000, "new_turn"]
-        trimmed, n = _trim_transcript(turns, budget=50)
-        assert trimmed == ["new_turn"]
-        assert n == 1
+        # With no steps, the first model call sees identical context either way.
+        assert [str(m.text) for m in model1.seen[0]] == [str(m.text) for m in model2.seen[0]]
 
 
 # ============================================================
 # IN-B1 M2 — Lesson dimension細化
 # ============================================================
+
 
 class TestM2LessonDimension:
     """H-M2-1 through H-M2-9"""
@@ -444,9 +320,7 @@ class TestM2LessonDimension:
         """H-M2-2: save_lesson without dimension -> dimension='general' in DB."""
         store = _make_store()
         store.save_lesson("quest", "test text")
-        row = store.conn.execute(
-            "SELECT dimension FROM lessons WHERE item_type='quest'"
-        ).fetchone()
+        row = store.conn.execute("SELECT dimension FROM lessons WHERE item_type='quest'").fetchone()
         assert row is not None
         assert row["dimension"] == "general"
 
@@ -662,9 +536,9 @@ class TestM2WorldgenGenesisChain:
         """Drive the real run_quest_refine_loop for ONE round with a grounding-blocker
         critique. regenerate is never expected to be called past the cap; if it is, it
         returns the same quests so the loop terminates."""
-        critic = WorldQuestCritic(gateway=_world_gateway(
-            _WorldCritiqueProvider(_WORLD_GROUNDING_BLOCKER)
-        ))
+        critic = WorldQuestCritic(
+            gateway=_world_gateway(_WorldCritiqueProvider(_WORLD_GROUNDING_BLOCKER))
+        )
         quests = [
             {
                 "id": "q1",
@@ -767,6 +641,7 @@ class TestM2WorldgenGenesisChain:
 # IN-B3 M1 — Critic lesson injection (build_critic_lesson_block + all 6 critics)
 # ============================================================
 
+
 class TestM1CriticLessonInjection:
     """H-M1-1 through H-M1-8"""
 
@@ -776,8 +651,9 @@ class TestM1CriticLessonInjection:
             sig = inspect.signature(cls.critique)
             assert "lessons" in sig.parameters, f"{cls.__name__} missing 'lessons'"
             assert "inject_lessons" in sig.parameters, f"{cls.__name__} missing 'inject_lessons'"
-            assert sig.parameters["inject_lessons"].default is False, \
+            assert sig.parameters["inject_lessons"].default is False, (
                 f"{cls.__name__} inject_lessons default must be False"
+            )
 
     def test_H_M1_1_world_quest_critic_accepts_lessons_params(self):
         """H-M1-1: WorldQuestCritic accepts lessons and inject_lessons params."""
@@ -865,6 +741,7 @@ class TestM1CriticLessonInjection:
 # ============================================================
 # Cross-item backward-compat sanity checks
 # ============================================================
+
 
 class TestBackwardCompatibility:
     """Verify that all default paths are unchanged from pre-Phase-B behavior."""

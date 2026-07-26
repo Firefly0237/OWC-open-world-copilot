@@ -1,3 +1,5 @@
+# 跨任务状态传播的全局可达性审计（IN-5 L2）。
+# 把各任务的状态前置/后置连成图做可达分析，抓『这一步永远触发不了』这类全局死锁。
 """Global cross-quest state-propagation reachability audit rule (IN-5 L2).
 
 Implements "global reachable-state fixpoint + conservative unsatisfiable-precondition detection"
@@ -55,31 +57,28 @@ class QuestGlobalReachabilityRule:
 
         for quest_id in sorted(unreachable):
             # Try to identify which atomic condition makes the quest permanently unreachable.
-            blocking_atom = _find_blocking_atom(
-                quest_id, ctx, reachable_quest_ids, reachable_values
-            )
+            blocking = _find_blocking_atom(quest_id, ctx, reachable_quest_ids, reachable_values)
 
-            if blocking_atom is None:
+            if blocking is None:
                 # We cannot identify a specific unsatisfiable atom — conservatively skip.
                 # This prevents false positives (e.g. when the quest is unreachable due to
                 # graph structure but we cannot prove a specific atom is permanently false).
                 continue
 
+            reason, suggestion = blocking
             yield Issue(
                 rule_code=self.code,
                 severity=self.severity,
                 category=self.category,
                 target_ref=f"quest:{quest_id}",
-                message=(
-                    f"Quest '{quest_id}' cannot be reached: {blocking_atom}. "
-                    "Check prerequisites/unlocks/precondition for missing links."
-                ),
+                message=f"任务《{quest_id}》玩家永远解锁不了：{reason}。",
+                suggested_action=suggestion,
                 evidence=[
                     Evidence(
                         kind="quest_reachability",
                         data={
                             "quest_id": quest_id,
-                            "blocking_atom": blocking_atom,
+                            "blocking_atom": reason,
                             "reachable_quest_count": len(reachable_quest_ids),
                         },
                     )
@@ -261,6 +260,7 @@ def _precondition_satisfiable(precondition: str, rv: _ReachableValues) -> bool:
     """
     try:
         from ...logic.expr import parse_expr
+
         expr = parse_expr(precondition)
     except Exception:
         return True  # parse error: assume satisfiable (conservative)
@@ -297,6 +297,7 @@ def _expr_can_be_true(expr: Any, rv: _ReachableValues) -> bool:
             from ...logic.expr import BoolLit as BL
             from ...logic.expr import IntLit, StrLit
             from ...logic.expr import Ref as ExprRef
+
             if isinstance(expr.left, ExprRef) and isinstance(expr.right, (BL, IntLit, StrLit)):
                 return rv.can_satisfy_eq(expr.left.name, expr.right.value)
             if isinstance(expr.right, ExprRef) and isinstance(expr.left, (BL, IntLit, StrLit)):
@@ -340,36 +341,48 @@ def _expr_can_be_false(expr: Any, rv: _ReachableValues) -> bool:
 # Find a specific blocking atom for reporting
 # ---------------------------------------------------------------------------
 
+
 def _find_blocking_atom(
     quest_id: str,
     ctx: AuditContext,
     reachable_quest_ids: set[str],
     rv: _ReachableValues,
-) -> str | None:
-    """Return a human-readable explanation of why quest_id is unreachable, or None if
-    we cannot identify a specific permanently-false atom (conservative: no report when unsure).
+) -> tuple[str, str] | None:
+    """Return ``(原因说明, 建议动作)`` for why ``quest_id`` is unreachable, or ``None`` if we cannot
+    identify a specific permanently-false atom (conservative: no report when unsure — never invent
+    a reason we cannot prove).
     """
     quest = ctx.bundle.quests[quest_id]
 
     # Check missing prerequisites
     for prereq in quest.prerequisites:
         if prereq not in reachable_quest_ids:
-            return f"prerequisite '{prereq}' is not globally reachable"
+            return (
+                f"它的前置任务《{prereq}》本身也永远达不成",
+                f"先去检查任务《{prereq}》为什么达不成；如果《{prereq}》其实不需要作为任务"
+                f"《{quest_id}》的前置条件，就从任务《{quest_id}》的前置任务列表里把它删掉。",
+            )
 
     # Check quest-level precondition atoms
     if quest.logic is not None and quest.logic.precondition.strip():
-        atom_desc = _find_permanently_false_atom(quest.logic.precondition, rv)
-        if atom_desc is not None:
-            return f"precondition atom permanently false: {atom_desc}"
+        atom = _find_permanently_false_atom(quest.logic.precondition, rv)
+        if atom is not None:
+            atom_text, hint = atom
+            return (
+                f"触发条件『{quest.logic.precondition}』永远无法满足 —— 具体是 {atom_text}",
+                f"打开任务《{quest_id}》的触发条件：{hint}",
+            )
 
     # Cannot identify a specific atom
     return None
 
 
-def _find_permanently_false_atom(precondition: str, rv: _ReachableValues) -> str | None:
-    """Return a description of a specific atom that is permanently false, or None."""
+def _find_permanently_false_atom(precondition: str, rv: _ReachableValues) -> tuple[str, str] | None:
+    """Return ``(恒为假的具体判断, 建议动作)`` for a specific atom that is permanently false, or
+    ``None`` when the precondition does not parse (conservative: might still be satisfiable)."""
     try:
         from ...logic.expr import parse_expr
+
         expr = parse_expr(precondition)
     except Exception:
         return None
@@ -377,52 +390,79 @@ def _find_permanently_false_atom(precondition: str, rv: _ReachableValues) -> str
     return _find_false_atom_in_expr(expr, rv)
 
 
-def _find_false_atom_in_expr(expr: Any, rv: _ReachableValues) -> str | None:
-    """Recursively find a permanently-false atomic condition. Return description or None."""
-    from ...logic.expr import BoolLit, BoolOp, Compare, IntLit, Not, Ref, StrLit
+def _atom_value_text(value: object) -> str:
+    """把字面值渲染成触发条件里原本的写法（``true``/``false``，不是 Python 的 True/False）。"""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return f'"{value}"'
+    return str(value)
+
+
+def _find_false_atom_in_expr(expr: Any, rv: _ReachableValues) -> tuple[str, str] | None:
+    """Recursively find a permanently-false atomic condition. Return
+    ``(恒为假的具体判断, 建议动作)`` or ``None``."""
+    from ...logic.expr import BoolLit, BoolOp, Compare, IntLit, Not, Ref, StrLit, render_expr
 
     if isinstance(expr, BoolLit):
-        return "literal false" if not expr.value else None
+        if expr.value:
+            return None
+        return (
+            "这里写死了 false，恒为假",
+            "把触发条件里写死的 false 删掉，或者改成正确的判断条件。",
+        )
 
     if isinstance(expr, Ref):
         # A boolean ref that can never be True
-        if not rv.can_be_true(expr.name):
-            return f"'{expr.name}' can never be true in reachable states"
-        return None
+        if rv.can_be_true(expr.name):
+            return None
+        return (
+            f"变量 '{expr.name}' 在游戏能达到的所有状态里都不会变成 true",
+            f"需要新增或调整某个任务的效果，把变量 '{expr.name}' 设成 true；如果这个判断本来"
+            "就不需要，从触发条件里去掉它。",
+        )
 
     if isinstance(expr, Not):
         # not(X): permanently false when X can never be False
-        if not _expr_can_be_false(expr.operand, rv):
-            return f"'{expr}' is permanently true (inner cannot be false)"
-        return None
+        if _expr_can_be_false(expr.operand, rv):
+            return None
+        inner = render_expr(expr.operand)
+        return (
+            f"『{inner}』这部分恒为真，取反之后就恒为假",
+            f"检查『{inner}』这部分为什么永远成立；如果不该恒真，调整对应的任务效果或"
+            "前置条件。",
+        )
 
-    if isinstance(expr, Compare):
-        if expr.op == "==":
-            if isinstance(expr.left, Ref) and isinstance(expr.right, (BoolLit, IntLit, StrLit)):
-                if not rv.can_satisfy_eq(expr.left.name, expr.right.value):
-                    return (
-                        f"'{expr.left.name} == {expr.right.value!r}' can never be satisfied"
-                    )
-            elif isinstance(expr.right, Ref) and isinstance(expr.left, (BoolLit, IntLit, StrLit)):
-                if not rv.can_satisfy_eq(expr.right.name, expr.left.value):
-                    return (
-                        f"'{expr.right.name} == {expr.left.value!r}' can never be satisfied"
-                    )
-        return None
+    if isinstance(expr, Compare) and expr.op == "==":
+        if isinstance(expr.left, Ref) and isinstance(expr.right, (BoolLit, IntLit, StrLit)):
+            name, value = expr.left.name, expr.right.value
+        elif isinstance(expr.right, Ref) and isinstance(expr.left, (BoolLit, IntLit, StrLit)):
+            name, value = expr.right.name, expr.left.value
+        else:
+            return None
+        if rv.can_satisfy_eq(name, value):
+            return None
+        value_text = _atom_value_text(value)
+        return (
+            f"'{name} == {value_text}' 这个判断永远无法满足",
+            f"变量 '{name}' 在游戏能达到的所有状态里都取不到 {value_text}；需要新增或调整某个"
+            f"任务的效果让它能被设成 {value_text}，或者把触发条件里的这一项改掉。",
+        )
 
     if isinstance(expr, BoolOp):
         if expr.op == "and":
             # For (A and B): find the first atom that is permanently false
-            left_atom = _find_false_atom_in_expr(expr.left, rv)
-            if left_atom:
-                return left_atom
-            return _find_false_atom_in_expr(expr.right, rv)
-        else:  # "or"
-            # Both arms must be permanently false for us to report
-            left_atom = _find_false_atom_in_expr(expr.left, rv)
-            right_atom = _find_false_atom_in_expr(expr.right, rv)
-            if left_atom and right_atom:
-                return f"both branches false: ({left_atom}) and ({right_atom})"
-            return None
+            return _find_false_atom_in_expr(expr.left, rv) or _find_false_atom_in_expr(
+                expr.right, rv
+            )
+        # "or": both arms must be permanently false for us to report
+        left_atom = _find_false_atom_in_expr(expr.left, rv)
+        right_atom = _find_false_atom_in_expr(expr.right, rv)
+        if left_atom and right_atom:
+            return (
+                f"『或』的两个分支都恒为假：{left_atom[0]}；以及 {right_atom[0]}",
+                f"{left_atom[1]}另外，{right_atom[1]}",
+            )
+        return None
 
     return None

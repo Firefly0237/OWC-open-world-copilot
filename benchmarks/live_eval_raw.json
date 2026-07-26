@@ -1,0 +1,77 @@
+{
+  "date": "2026-07-03",
+  "faithfulness_contrast_offline_answers": {
+    "acceptance_report_passed": false,
+    "answers_judged": 4,
+    "claims_judged": 50,
+    "claims_unsupported": 10,
+    "faithfulness": 0.8,
+    "gate_passed": false,
+    "judge_cost_usd": 0.0176
+  },
+  "faithfulness_live_e2e": {
+    "answerable": 4,
+    "claims_judged": 5,
+    "claims_unsupported": 0,
+    "cost_usd": 0.0058,
+    "faithfulness": 1.0,
+    "per_question": [
+      {
+        "claims": 2,
+        "faithfulness": 1.0,
+        "q": "铁卫军团是什么？",
+        "refused": false,
+        "unsupported": 0
+      },
+      {
+        "claims": 1,
+        "faithfulness": 1.0,
+        "q": "雾隐盟和黄沙客栈之间是什么关系？",
+        "refused": false,
+        "unsupported": 0
+      },
+      {
+        "claims": 1,
+        "faithfulness": 1.0,
+        "q": "护送盐车的任务要做什么？",
+        "refused": false,
+        "unsupported": 0
+      },
+      {
+        "claims": 1,
+        "faithfulness": 1.0,
+        "q": "黑沙戈壁有哪些值得注意的地点？",
+        "refused": false,
+        "unsupported": 0
+      },
+      {
+        "q": "龙王是谁？",
+        "refused": true
+      },
+      {
+        "q": "谁偷走了月亮？",
+        "refused": true
+      }
+    ],
+    "questions": 6,
+    "unanswerable_refused": "2/2"
+  },
+  "hallucination_probe_live": {
+    "fabricated_faithfulness": 0.0,
+    "fabricated_flagged": true,
+    "grounded_faithfulness": 1.0,
+    "grounded_passed": true,
+    "total_judge_cost_usd": 0.0179
+  },
+  "model": "deepseek-v4-flash",
+  "retrieval_ablation": {
+    "bge_m3_hit_rate": 0.4615,
+    "bm25_only_hit_rate": 0.2308,
+    "delta_hit_rate": 0.2308,
+    "note": "n=13 answerable queries (paraphrase + indirect). Sample size is too small for Wilson CI < ±5% (need n>=100 for that). Verbatim queries (entity-name based) are omitted here -- they primarily test BM25 reliability, not semantic retrieval quality. HashingEmbedder pin in acceptance_gate: demonstrates BM25 reproducibility, not bge-m3 semantic recall. Semantic uplift (delta): +23.1% on paraphrase queries.",
+    "paraphrase_hit_rate_bge_m3": 0.6,
+    "paraphrase_hit_rate_bm25": 0.3,
+    "queries": 13,
+    "skipped": false
+  }
+}

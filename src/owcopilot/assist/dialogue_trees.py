@@ -1,3 +1,4 @@
+# 分支对话树生成：voice-card 约束 + 完整性校验 + 可审阅。
 """Branching dialogue tree generation: voice-card constrained, integrity-checked, reviewable."""
 
 from __future__ import annotations
@@ -70,6 +71,7 @@ class DialogueTreeService:
         review_queue: ReviewQueue | None = None,
         critic: DialogueCritic | None = None,
         max_refine_rounds: int = 0,
+        lessons: list[dict] | None = None,  # cross-session lesson archive (get_lessons_for_type)
     ) -> None:
         self.gateway = gateway
         self.bundle = bundle
@@ -77,6 +79,10 @@ class DialogueTreeService:
         # Opt-in critique→refine loop: without a critic the service is the original single shot.
         self.critic = critic
         self.max_refine_rounds = max_refine_rounds if critic is not None else 0
+        # Lessons injected into BOTH the generation prompt and the critic prompt (same pattern as
+        # the quest draft path). None when injection is disabled or the archive is empty → prompts
+        # render byte-for-byte unchanged.
+        self.lessons = lessons
 
     def generate(
         self,
@@ -116,6 +122,9 @@ class DialogueTreeService:
                     nodes=t.model_dump(mode="json", exclude_none=True).get("nodes", {}),
                     speaker_ids=participant_ids,
                     structure_problems=problems,
+                    # Same archive the generator sees; inject guard mirrors the quest draft path.
+                    lessons=self.lessons,
+                    inject_lessons=self.lessons is not None,
                 )
                 return problems, critique
 
@@ -150,12 +159,12 @@ class DialogueTreeService:
         if self.review_queue is not None:
             _dialogue_trail_dump = [r.model_dump(mode="json") for r in trail]
             verdict, score = critic_from_trail(_dialogue_trail_dump)
-            dim = primary_dim_from_trail(_dialogue_trail_dump)  # IN-B1 M2
+            dim = primary_dim_from_trail(_dialogue_trail_dump)
             result.review_item = self.review_queue.add_dialogue_tree(
                 tree.model_dump(mode="json", exclude_none=True),
                 critic_verdict=verdict,
                 critic_score=score,
-                critic_primary_dim=dim,  # IN-B1 M2
+                critic_primary_dim=dim,
             )
         return result
 
@@ -177,8 +186,17 @@ class DialogueTreeService:
         # Keep dialogue in the brief's language — the English quality bar can otherwise drift the
         # model to English on a Chinese brief (same fix as the quest-draft prompt).
         lang = language_directive(detect_language(brief)) if brief.strip() else ""
+        # Lesson memory block after the rubric/quality bar, before the per-run context. Empty when
+        # no lessons → the system prompt is byte-for-byte unchanged from before this hook.
+        lesson_section = ""
+        if self.lessons:
+            from .lessons import build_lesson_block
+
+            lb = build_lesson_block(self.lessons, inject_lessons=True)
+            lesson_section = f"{lb}\n" if lb else ""
         system = (
-            f"{_SYSTEM_PROMPT}\nCharacter budget per line: {max_chars}. Max nodes: {max_nodes}.\n"
+            f"{_SYSTEM_PROMPT}\n{lesson_section}"
+            f"Character budget per line: {max_chars}. Max nodes: {max_nodes}.\n"
             f"{(lang + chr(10)) if lang else ''}Voice cards: {cards_json}"
         )
         user = _dialogue_user_message(brief, participant_ids, prior=prior, feedback=feedback)
@@ -253,6 +271,8 @@ def _dialogue_user_message(
     )
 
 
+# Kept off complete_structured: the DialogueTree is CONSTRUCTED from a loose payload (id generation,
+# speaker name→id alias resolution, per-node/choice coercion), not validated from one model shape.
 def parse_dialogue_tree(
     raw: str,
     *,

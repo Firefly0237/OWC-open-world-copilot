@@ -1,3 +1,4 @@
+# Spotlighting：把不可信的检索内容与指令隔离（OWASP LLM01 防注入）。
 """Spotlighting: isolate untrusted retrieved content from instructions (OWASP LLM01).
 
 Indirect prompt injection is the highest-prevalence LLM01 vector: an uploaded reference can carry

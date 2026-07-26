@@ -24,6 +24,7 @@ import TableImportPage from "./pages/TableImportPage.vue";
 import TemplatesPage from "./pages/TemplatesPage.vue";
 import TimelinePage from "./pages/TimelinePage.vue";
 import WorkspacesPage from "./pages/WorkspacesPage.vue";
+import GalleryPage from "./pages/v2/GalleryPage.vue";
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -55,5 +56,7 @@ export const router = createRouter({
     { path: "/worlds", component: WorkspacesPage },
     { path: "/history", component: HistoryPage },
     { path: "/settings", component: SettingsPage },
+    // v2 云上智库并行灰度区（docs/前端重设计方案.md §4.2）：/v2 前缀与旧壳并行，旧路由一律不动
+    { path: "/v2/gallery", component: GalleryPage },
   ],
 });

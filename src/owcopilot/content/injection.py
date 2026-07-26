@@ -1,3 +1,4 @@
+# 能到达模型 prompt 的自由文本的注入检测。
 """Prompt-injection detection for any free text that can reach a model prompt.
 
 Per OWASP LLM01 (2025), the highest-prevalence prompt-injection vector is *indirect*: adversarial

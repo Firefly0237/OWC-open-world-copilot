@@ -1,3 +1,4 @@
+# quests 阶段的世界级评审（generate→critique→refine 的 critique 半边）。
 """World-level reviewer for the quests stage (the critic half of a generate→critique→refine loop).
 
 This is the same Reflexion / Self-Refine pattern as ``assist/critic.py``'s ``QuestCritic`` — and it
@@ -19,10 +20,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ..assist.calibration import primary_failing_dimension  # IN-B1 M2
+from ..assist.calibration import primary_failing_dimension
 from ..assist.critic import CritiqueResult, critique_with_retry
 from ..assist.industry import QUEST_RUBRIC_SOURCES, industry_source_block
-from ..assist.refine import summarize_reflection, with_reflection_memory
+from ..assist.refine import snapshot_artifact, summarize_reflection, with_reflection_memory
 from ..assist.term_injection import build_term_block_for_critic  # BE-2
 from ..content.models import Term  # BE-2
 from ..llm.gateway import LLMGateway
@@ -80,10 +81,10 @@ class WorldQuestCritic:
         context_lines: list[str],
         gaps: list[str],
         evaluator_gateway: LLMGateway | None = None,
-        terms: list[Term] | None = None,     # BE-2: vocab-constraint injection
-        inject_terms: bool = True,           # BE-2: default True (matches assist/critic.py)
-        lessons: list[dict] | None = None,   # IN-B3 M1
-        inject_lessons: bool = False,        # IN-B3 M1: default False (guard)
+        terms: list[Term] | None = None,  # BE-2: vocab-constraint injection
+        inject_terms: bool = True,  # BE-2: default True (matches assist/critic.py)
+        lessons: list[dict] | None = None,
+        inject_lessons: bool = False,  # default False (guard)
     ) -> CritiqueResult:
         return critique_with_retry(
             self.gateway,
@@ -102,12 +103,13 @@ class WorldQuestCritic:
 
 
 def _critic_system_prompt(
-    terms: list[Term] | None = None,     # BE-2: vocab-constraint injection
-    inject_terms: bool = True,           # BE-2
-    lessons: list[dict] | None = None,   # IN-B3 M1
-    inject_lessons: bool = False,        # IN-B3 M1: default False
+    terms: list[Term] | None = None,  # BE-2: vocab-constraint injection
+    inject_terms: bool = True,  # BE-2
+    lessons: list[dict] | None = None,
+    inject_lessons: bool = False,  # default False
 ) -> str:
-    from ..assist.lessons import build_critic_lesson_block  # IN-B3 M1
+    from ..assist.lessons import build_critic_lesson_block
+
     # BE-2: term injection into worldgen critic (mirrors assist/critic.py)
     term_block = build_term_block_for_critic(list(terms) if terms else []) if inject_terms else ""
     term_section = f"\n\n{term_block}" if term_block else ""
@@ -130,8 +132,8 @@ def _critic_system_prompt(
         "- craft: specific, world-specific hooks rather than generic fetch-quest boilerplate?\n"
         "Set verdict to 'revise' if ANY dimension is a blocker. Each non-ok dimension MUST give a "
         "concrete, actionable fix the writer can apply. Be strict but fair; do not rewrite quests."
-        + term_section    # BE-2: vocab constraints (MUST NOT use forbidden terms)
-        + lesson_section  # IN-B3 M1
+        + term_section  # BE-2: vocab constraints (MUST NOT use forbidden terms)
+        + lesson_section
     )
 
 
@@ -196,7 +198,7 @@ def run_quest_refine_loop(
             context_lines=context_lines,
             gaps=gaps,
             evaluator_gateway=evaluator_gateway,
-            terms=terms,        # BE-2: vocab-constraint injection
+            terms=terms,  # BE-2: vocab-constraint injection
             inject_terms=True,  # BE-2: always inject when terms present
         )
         auto_review_incomplete = not critique.parse_ok
@@ -212,7 +214,7 @@ def run_quest_refine_loop(
                 summary=critique.summary,
                 auto_review_ok=critique.parse_ok,
                 reflection=reflection,
-                primary_dim=primary_failing_dimension(critique),  # IN-B1 M2
+                primary_dim=primary_failing_dimension(critique),
             )
         )
         if critique.parse_ok and critique.verdict == "pass" and not gaps:
@@ -222,6 +224,9 @@ def run_quest_refine_loop(
         emit("refining")
         # Feed the whole reflection history forward (Reflexion), not just this round's fixes.
         reflections.append(reflection)
+        # This round revises: snapshot the quest batch being replaced so complete preference
+        # pairs stay recoverable (see assist/dpo_export.py).
+        trail[-1].artifact_before = {"quests": [snapshot_artifact(q) for q in quests]}
         quests, relations, reference_rows = regenerate(
             quests, with_reflection_memory(fixes, reflections)
         )

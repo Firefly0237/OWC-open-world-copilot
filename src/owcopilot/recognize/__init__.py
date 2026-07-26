@@ -1,3 +1,4 @@
+# 读现有游戏工程文件，识别其中的实体 + 关系。
 """Read an existing game-project file and recognize its entities + relationships.
 
 Deterministic-first, LLM-assisted (default off, §8-guarded), review-gated: every run produces an

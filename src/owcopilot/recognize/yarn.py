@@ -1,3 +1,4 @@
+# 从 Yarn Spinner 脚本（.yarn）识别叙事结构。
 """Recognize narrative structure from Yarn Spinner scripts (.yarn).
 
 Yarn's structure is explicit enough to extract deterministically: ``title:``-delimited nodes, the
@@ -13,12 +14,12 @@ import re
 
 from .models import ImportPlan, ProposedEntity, ProposedRelation, SourceRef
 
-_JUMP = re.compile(r"<<\s*(?:jump|detour)\s+([A-Za-z_]\w*)\s*>>")
+_JUMP = re.compile(r"<<\s*(?:jump|detour)\s+([^\W\d]\w*)\s*>>")
 # [[text|Target]] or [[Target]] option links
-_OPTION_LINK = re.compile(r"\[\[(?:[^\]|]*\|)?\s*([A-Za-z_]\w*)\s*\]\]")
-_DECLARE = re.compile(r"<<\s*declare\s+\$([A-Za-z_]\w*)\s*(?:=|to)\s*(.+?)\s*>>")
+_OPTION_LINK = re.compile(r"\[\[(?:[^\]|]*\|)?\s*([^\W\d]\w*)\s*\]\]")
+_DECLARE = re.compile(r"<<\s*declare\s+\$([^\W\d]\w*)\s*(?:=|to)\s*(.+?)\s*>>")
 # A dialogue line "Speaker: text" — speaker is a bare word; commands (<<...>>) and options aren't.
-_SPEAKER = re.compile(r"^\s*([A-Za-z_][\w ]*?)\s*:\s*\S")
+_SPEAKER = re.compile(r"^\s*([^\W\d][\w ]*?)\s*:\s*\S")
 
 
 def recognize_yarn(text: str, *, source_file: str = "") -> ImportPlan:

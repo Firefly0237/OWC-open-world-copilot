@@ -15,60 +15,72 @@ interface Step {
   features?: Feature[];
 }
 
-// One step per sidebar section. Each lists the features inside it with a one-line "what it does /
-// when to reach for it", so the tour actually teaches the tool instead of naming the menus.
+// The tour walks the world lifecycle in order — 建世界 → 喂素材 → 看知识库 → 验证 → 交付 — one step
+// per sidebar section. Each lists a few features with a one-line "what it does", so the tour
+// teaches the workflow instead of just naming menus.
 const STEPS: Step[] = [
   {
     title: "欢迎来到 OWCopilot",
-    body: "本地优先的开放世界策划工作台。下面逐个区块带你认门，方向键 ← → 翻页，Esc 关闭。",
+    body:
+      "本地优先的开放世界策划工作台。这条引导按「建世界 → 喂素材 → 看知识库 → 验证 → 交付」" +
+      "的顺序带你走一遍。方向键 ← → 翻页，Esc 关闭。",
   },
   {
-    selector: '[data-tour="概览"]',
-    title: "概览",
-    body: "掌握世界的全貌与每条设定的来路。",
+    selector: '[data-tour="总览"]',
+    title: "第一步 · 总览",
+    body: "先看世界的全貌：规模、来源与就绪度。点指标可展开明细。",
     features: [
-      { name: "世界总览", desc: "规模、来源与就绪度，点指标可展开明细。" },
+      { name: "世界总览", desc: "一屏掌握世界现状与每条设定的来路。" },
+    ],
+  },
+  {
+    selector: '[data-tour="项目"]',
+    title: "建世界 · 项目",
+    body: "新建或切换世界，随时回看变更、接入模型。",
+    features: [
+      { name: "工作区", desc: "新建、切换与管理世界。" },
       { name: "设定档案", desc: "逐条查阅与编辑已入档设定。" },
+      { name: "变更史", desc: "拍快照，与当前状态对比。" },
+      { name: "设置", desc: "接入 AI 服务（填 API Key）后才能用生成功能。" },
     ],
   },
   {
-    selector: '[data-tour="创世 · 创作"]',
-    title: "创世 · 创作",
-    body: "从一句话长成整个世界，再把人物与故事逐层做厚。",
+    selector: '[data-tour="素材 · 生成"]',
+    title: "喂素材 · 生成",
+    body: "把现成素材接进来，或从一句话长出新内容。",
     features: [
-      { name: "创世工坊", desc: "一句话开辟整个世界。" },
-      { name: "扩写工坊", desc: "锚定焦点，长出接地于既有设定的新内容。" },
-      { name: "人物工坊", desc: "生成可维护的角色卡。" },
-      { name: "创作工坊", desc: "产出任务、对话树、台词与物品文案。" },
-      { name: "对话流", desc: "把对话树铺成可编辑的分支流程图。" },
-    ],
-  },
-  {
-    selector: '[data-tour="汇编 · 入库"]',
-    title: "汇编 · 入库",
-    body: "把现成素材接进来变成结构化设定。",
-    features: [
-      { name: "文稿提炼", desc: "文档与小说整理成结构化设定。" },
+      { name: "文稿提炼", desc: "文档、小说整理成结构化设定。" },
       { name: "表格导入", desc: "表格批量入库，先预演再写入。" },
-      { name: "灵感库", desc: "收录参考素材，仅用于创世检索。" },
+      { name: "创世工坊", desc: "一句话开辟整个世界。" },
+      { name: "扩写 / 创作工坊", desc: "接地于既有设定，长出人物、任务与台词。" },
     ],
   },
   {
-    selector: '[data-tour="校勘 · 分析"]',
-    title: "校勘 · 分析",
-    body: "改动前看清涟漪，改动后用规则引擎检查一致性。",
+    selector: '[data-tour="知识库"]',
+    title: "看知识库",
+    body: "入库后的设定在这里查阅、编织与串联。",
     features: [
-      { name: "校勘修复", desc: "审查一致性，给出可回滚的修复。" },
-      { name: "影响分析", desc: "预演一处改动会牵连哪些设定。" },
+      { name: "人物 / 对话流", desc: "角色卡与可编辑的分支对话。" },
+      { name: "关系图谱", desc: "点节点改名、连线、拖动重排。" },
       { name: "时间线", desc: "任务与事件按编年排布，违例标红。" },
-      { name: "关系星图", desc: "点节点改名、连线、拖动重排。" },
-      { name: "专项清查", desc: "按主题地毯式排查同类问题。" },
+      { name: "本地化", desc: "多语言文案集中维护。" },
     ],
   },
   {
-    selector: '[data-tour="问答 · 交付"]',
-    title: "问答 · 交付",
-    body: "对世界发问、守门落盘、打包交付。",
+    selector: '[data-tour="验证"]',
+    title: "验证",
+    body: "改动前看清涟漪，入库后查矛盾、防吃书。",
+    features: [
+      { name: "校勘修复", desc: "查一致性并给出可回滚的修复；扫描设定矛盾（防吃书）。" },
+      { name: "影响分析", desc: "预演一处改动会牵连哪些设定。" },
+      { name: "专项清查", desc: "按主题地毯式排查，可逐一排除误报。" },
+      { name: "版号合规", desc: "按清单核查送审前的敏感项。" },
+    ],
+  },
+  {
+    selector: '[data-tour="交付"]',
+    title: "交付",
+    body: "对世界发问、守门采纳、打包交付。",
     features: [
       { name: "世界问答", desc: "基于已入档设定回答，查不到会直说。" },
       { name: "审阅台", desc: "AI 产物逐条采纳或退回。" },
@@ -76,18 +88,10 @@ const STEPS: Step[] = [
     ],
   },
   {
-    selector: '[data-tour="管理"]',
-    title: "管理",
-    body: "管理世界、拍快照对比。模型接入在左下角「设置」。",
-    features: [
-      { name: "工作区", desc: "新建、切换与管理世界。" },
-      { name: "变更史", desc: "快照与当前状态对比。" },
-    ],
-  },
-  {
     title: "开始吧",
     body:
-      "建议先到「设置」填入 AI 服务的账号凭证（API Key），这样才能用生成功能。如果暂时没有，也可以先到「工作区」建一个世界，导入已有素材、使用一致性检查等功能不需要接入模型。" +
+      "建议先到「项目 · 设置」填入 AI 服务的账号凭证（API Key），才能用生成功能。暂时没有也没关系：" +
+      "先到「项目 · 工作区」建一个世界，导入素材、一致性检查等都不需要接入模型。" +
       "每个页面标题旁的「?」可看本页详细说明，左下角「新手引导」随时重开本向导。",
   },
 ];

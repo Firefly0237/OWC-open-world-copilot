@@ -1,3 +1,4 @@
+# 中英混排 lore 的词法小工具（分词/归一化）。
 """Small lexical helpers for mixed English/CJK lore retrieval.
 
 These power the deterministic ``$0`` offline / BM25-fallback path only. The real semantic path

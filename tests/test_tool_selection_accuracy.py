@@ -1,9 +1,11 @@
 """Tests for C1: compute_tool_selection_accuracy, GoldReActScenario, and the 6th AcceptanceCheck.
 
 诚实说明：
-- OfflineGoalAwareReActProvider 被设计成精确返回 gold 序列，offline F1=1.0 是设计预期。
+- OfflineGoalAwareChatModel 被设计成精确返回 gold 序列，offline F1=1.0 是设计预期。
 - sanity gate（10 个手工标注场景，集合 F1，不计顺序）不是统计基准，是 CI 确定性回归门禁。
 - 所有测试均 $0 无 LLM 调用。
+- W1-2 标注：这里的 F1=1.0 是 fixture 产物，不代表真实 LLM 的工具选择能力，不得作为对外材料声称
+  的工具选择准确率数字（真 live-model 评测见 Wave 5 W5-1）。
 """
 
 from __future__ import annotations
@@ -11,8 +13,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from langchain_core.messages import HumanMessage, ToolMessage
 
-from owcopilot.agent.offline import OfflineGoalAwareReActProvider
+from owcopilot.agent.offline import OfflineGoalAwareChatModel
 from owcopilot.agent.react import AgentStep
 from owcopilot.content.store import ContentStore
 from owcopilot.evaluation.acceptance import (
@@ -24,6 +27,11 @@ from owcopilot.evaluation.acceptance import (
     compute_tool_selection_accuracy,
     run_acceptance_evaluation,
 )
+
+
+def _goal_messages(goal: str) -> list:
+    return [HumanMessage(content=f"Goal: {goal}")]
+
 
 # ── compute_tool_selection_accuracy ──────────────────────────────────────────
 
@@ -127,9 +135,7 @@ def test_gold_scenarios_covers_6_skills() -> None:
     all_actions: set[str] = set()
     for s in scenarios:
         all_actions.update(s.expected_actions)
-    assert required_skills <= all_actions, (
-        f"Missing skills: {required_skills - all_actions}"
-    )
+    assert required_skills <= all_actions, f"Missing skills: {required_skills - all_actions}"
 
 
 def test_gold_scenarios_unique_ids() -> None:
@@ -151,92 +157,85 @@ def test_gold_scenario_model() -> None:
     assert s.description == ""
 
 
-# ── OfflineGoalAwareReActProvider ─────────────────────────────────────────────
+# ── OfflineGoalAwareChatModel ─────────────────────────────────────────────────
 
 
 def test_offline_provider_deterministic() -> None:
     """C1-H1: same goal → identical output on repeated calls."""
     scenarios = [("审计世界", ["audit_project", "list_issues"])]
-    provider = OfflineGoalAwareReActProvider.from_scenarios(scenarios)
-    user = "Goal: 审计世界\n\nBegin. Output your first Thought and Action."
-    out1, _, _ = provider.complete(system="", user=user, model="")
-    out2, _, _ = provider.complete(system="", user=user, model="")
-    assert out1 == out2
+    model = OfflineGoalAwareChatModel.from_scenarios(scenarios)
+    out1 = model.invoke(_goal_messages("审计世界"))
+    out2 = model.invoke(_goal_messages("审计世界"))
+    assert out1.content == out2.content
+    assert out1.tool_calls == out2.tool_calls
 
 
 def test_offline_provider_returns_correct_action() -> None:
-    """C1-H2: provider returns the gold action at step 0."""
+    """C1-H2: the fake emits the gold action as a native tool_call at step 0."""
     scenarios = [("单步目标", ["quality_harness"])]
-    provider = OfflineGoalAwareReActProvider.from_scenarios(scenarios)
-    user = "Goal: 单步目标\n\nBegin. Output your first Thought and Action."
-    text, _, _ = provider.complete(system="", user=user, model="")
-    assert "quality_harness" in text
+    model = OfflineGoalAwareChatModel.from_scenarios(scenarios)
+    reply = model.invoke(_goal_messages("单步目标"))
+    assert [tc["name"] for tc in reply.tool_calls] == ["quality_harness"]
 
 
 def test_offline_provider_no_network_calls(monkeypatch) -> None:
-    """C1-H5: provider completes without any HTTP/socket calls."""
+    """C1-H5: the fake completes without any HTTP/socket calls."""
     import socket
 
     def mock_connect(*args, **kwargs):
-        raise AssertionError("Unexpected network call in OfflineGoalAwareReActProvider")
+        raise AssertionError("Unexpected network call in OfflineGoalAwareChatModel")
 
     monkeypatch.setattr(socket.socket, "connect", mock_connect)
     scenarios = [("无网络测试", ["audit_project"])]
-    provider = OfflineGoalAwareReActProvider.from_scenarios(scenarios)
-    user = "Goal: 无网络测试\n\nBegin. Output your first Thought and Action."
-    text, in_tok, out_tok = provider.complete(system="", user=user, model="")
-    assert "audit_project" in text
-    assert in_tok >= 1
-    assert out_tok >= 1
+    model = OfflineGoalAwareChatModel.from_scenarios(scenarios)
+    reply = model.invoke(_goal_messages("无网络测试"))
+    assert [tc["name"] for tc in reply.tool_calls] == ["audit_project"]
 
 
 def test_offline_provider_multi_step() -> None:
-    """Multi-action scenario: step index advances correctly."""
+    """Multi-action scenario: the tool-result count advances the script index."""
     goal = "多步测试"
     actions = ["audit_project", "list_issues"]
-    provider = OfflineGoalAwareReActProvider.from_scenarios([(goal, actions)])
+    model = OfflineGoalAwareChatModel.from_scenarios([(goal, actions)])
 
-    # Step 0 — no observations yet
-    user0 = f"Goal: {goal}\n\nBegin. Output your first Thought and Action."
-    text0, _, _ = provider.complete(system="", user=user0, model="")
-    assert "audit_project" in text0
+    # Step 0 — no tool results yet
+    reply0 = model.invoke(_goal_messages(goal))
+    assert [tc["name"] for tc in reply0.tool_calls] == ["audit_project"]
 
-    # Step 1 — one Observation in transcript
-    user1 = (
-        f"Goal: {goal}\n\n"
-        "Thought: Auditing.\nAction: audit_project\nAction Input: {}\n"
-        "Observation: {\"open_errors\": 3}\n\n"
-        "Continue."
+    # Step 1 — one ToolMessage in the conversation
+    reply1 = model.invoke(
+        [
+            *_goal_messages(goal),
+            reply0,
+            ToolMessage(content='{"open_errors": 3}', tool_call_id=reply0.tool_calls[0]["id"]),
+        ]
     )
-    text1, _, _ = provider.complete(system="", user=user1, model="")
-    assert "list_issues" in text1
+    assert [tc["name"] for tc in reply1.tool_calls] == ["list_issues"]
 
 
 def test_offline_provider_fallback_for_unknown_goal() -> None:
-    """Unknown goal → fallback script returns audit_project."""
-    provider = OfflineGoalAwareReActProvider.from_scenarios([("已知目标", ["propose_fix"])])
-    user = "Goal: 未知目标\n\nBegin. Output your first Thought and Action."
-    text, _, _ = provider.complete(system="", user=user, model="")
-    assert "Action:" in text or "Final Answer:" in text
+    """Unknown goal → fallback script still produces a tool call or a final answer."""
+    model = OfflineGoalAwareChatModel.from_scenarios([("已知目标", ["propose_fix"])])
+    reply = model.invoke(_goal_messages("未知目标"))
+    assert reply.tool_calls or str(reply.content)
 
 
 # ── Wrong-action gate-fail test (C1-H3) ──────────────────────────────────────
 
 
 def test_wrong_action_gate_fails() -> None:
-    """C1-H3: if provider returns wrong action, F1<1.0 and gate would fail."""
-    # Construct a provider that returns build_context_pack when gold expects audit_project
-    provider = OfflineGoalAwareReActProvider(
+    """C1-H3: if the fake returns a wrong action, F1<1.0 and the gate would fail."""
+    # Construct a fake that returns build_context_pack when gold expects audit_project
+    model = OfflineGoalAwareChatModel(
         scripts={
             "错误动作目标": [
-                "Thought: Wrong.\nAction: build_context_pack\nAction Input: {}",
-                "Thought: Done.\nFinal Answer: 完毕。",
+                ("build_context_pack", {"query": "x"}),
+                "完毕。",
             ]
         }
     )
-    user = "Goal: 错误动作目标\n\nBegin. Output your first Thought and Action."
-    text, _, _ = provider.complete(system="", user=user, model="")
-    assert "build_context_pack" in text
+    reply = model.invoke(_goal_messages("错误动作目标"))
+    assert [tc["name"] for tc in reply.tool_calls] == ["build_context_pack"]
 
     # Now compute F1 against gold expectation of audit_project
     actual_steps = [AgentStep(action="build_context_pack", is_error=False)]
@@ -269,25 +268,24 @@ def test_gate_fails_when_provider_returns_wrong_actions(tmp_path: Path, monkeypa
     ContentStore(clean_root).save(build_acceptance_world())
 
     gold = _build_gold_react_scenarios()
-    # Build a provider whose script for EVERY gold goal returns build_context_pack instead
+    # Build a fake whose script for EVERY gold goal returns build_context_pack instead
     # of the expected action(s) — a single wrong action per scenario.
     wrong_scripts = {
         scenario.goal: [
-            "Thought: Wrong on purpose.\n"
-            'Action: build_context_pack\nAction Input: {"query": "x"}',
-            "Thought: Done.\nFinal Answer: 完毕。",
+            ("build_context_pack", {"query": "x"}),
+            "完毕。",
         ]
         for scenario in gold
     }
-    wrong_provider = OfflineGoalAwareReActProvider(scripts=wrong_scripts)
+    wrong_model = OfflineGoalAwareChatModel(scripts=wrong_scripts)
 
     # Patch the factory the gate calls internally (the gate does a local import of this same
     # class object, so patching the classmethod here is seen inside the gate). The real gate
-    # path then drives ReActAgent → _NullSkillRegistry with the wrong-action provider.
+    # path then drives ReActAgent → _NullSkillRegistry with the wrong-action fake.
     monkeypatch.setattr(
-        OfflineGoalAwareReActProvider,
+        OfflineGoalAwareChatModel,
         "from_scenarios",
-        classmethod(lambda cls, scenarios: wrong_provider),
+        classmethod(lambda cls, scenarios: wrong_model),
     )
 
     metrics: dict = {}
@@ -324,8 +322,7 @@ def test_acceptance_has_tool_selection_check(tmp_path: Path) -> None:
     """
     report = run_acceptance_evaluation(tmp_path)
     assert len(report.checks) >= 6, (
-        f"Expected at least 6 checks, got {len(report.checks)}: "
-        f"{[c.name for c in report.checks]}"
+        f"Expected at least 6 checks, got {len(report.checks)}: {[c.name for c in report.checks]}"
     )
     check_names = [c.name for c in report.checks]
     assert "tool_selection_accuracy_gate" in check_names
@@ -351,9 +348,7 @@ def test_acceptance_sixth_check_note_honest(tmp_path: Path) -> None:
     report = run_acceptance_evaluation(tmp_path)
     note = report.checks[-1].details.get("note", "")
     keywords = ["sanity gate", "手工标注", "集合F1", "不计顺序"]
-    assert any(kw in note for kw in keywords), (
-        f"note does not contain honesty keywords: {note!r}"
-    )
+    assert any(kw in note for kw in keywords), f"note does not contain honesty keywords: {note!r}"
 
 
 def test_acceptance_metrics_has_tool_f1(tmp_path: Path) -> None:
@@ -366,29 +361,20 @@ def test_acceptance_metrics_has_tool_f1(tmp_path: Path) -> None:
 
 
 def test_acceptance_telemetry_zero_cost(tmp_path: Path) -> None:
-    """C1-H5: All gateway telemetry records have cost_usd==0.0 (no LLM calls)."""
-    from owcopilot.agent.offline import OfflineGoalAwareReActProvider
+    """C1-H5: All telemetry records have cost_usd==0.0 (no LLM calls, no token usage)."""
     from owcopilot.agent.react import ReActAgent
     from owcopilot.evaluation.acceptance import _build_gold_react_scenarios
-    from owcopilot.llm.cache import NoOpCache
-    from owcopilot.llm.gateway import LLMGateway
-    from owcopilot.llm.router import StaticRouter
     from owcopilot.llm.telemetry import TelemetryCollector
 
     scenarios = _build_gold_react_scenarios()
-    provider = OfflineGoalAwareReActProvider.from_scenarios(
+    model = OfflineGoalAwareChatModel.from_scenarios(
         [(s.goal, s.expected_actions) for s in scenarios[:1]]
     )
     telemetry = TelemetryCollector()
-    gw = LLMGateway(
-        providers={"react": provider},
-        router=StaticRouter(mapping={"agent_react": "react"}),
-        cache=NoOpCache(),
-        telemetry=telemetry,
-    )
     registry = _NullSkillRegistry()
-    agent = ReActAgent(gateway=gw, registry=registry, max_steps=5)  # type: ignore[arg-type]
+    agent = ReActAgent(model=model, registry=registry, max_steps=5, telemetry=telemetry)
     agent.run(scenarios[0].goal)
 
+    assert telemetry.records, "the run must record its model calls"
     for record in telemetry.records:
         assert record.cost_usd == 0.0, f"Unexpected cost: {record.cost_usd}"

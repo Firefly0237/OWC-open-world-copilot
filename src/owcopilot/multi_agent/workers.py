@@ -1,3 +1,4 @@
+# Worker：DiagWorker(诊断) 与 RepairWorker(修复提议)，各自只读/提议，不写 canon。
 """Worker agents — DiagWorker and RepairWorker.
 
 Each worker is an *independent* object with its own ``agent_id``, its own ``ReActAgent``
@@ -15,10 +16,8 @@ Architecture compliance (SUPERVISOR_rubric):
         message is the hand-off, not a Python return value).
 
 Offline / $0 operation:
-  Workers accept an ``LLMGateway``.  In tests, the gateway is built with MockProvider so
-  no real LLM calls happen.  The mock's canned output will NOT match the ReAct format
-  exactly, so the worker will hit max_steps and return a "max_steps" stop_reason — this
-  is expected and tested for.  The important things are:
+  Workers accept a LangChain chat model.  In tests, that is a deterministic fake (a routed
+  or static chat double), so no real LLM calls happen.  The important things are:
   (a) A WorkerAgent instance is created and has an independent transcript.
   (b) It writes a task_result message to the blackboard.
   (c) It never shares transcript with any other agent.
@@ -26,12 +25,18 @@ Offline / $0 operation:
 
 from __future__ import annotations
 
+import logging
+
+from langchain_core.language_models.chat_models import BaseChatModel
+
 from ..agent.react import AgentResult, ReActAgent
-from ..core.skills import SkillRegistry
-from ..llm.gateway import LLMGateway
+from ..llm.telemetry import TelemetryCollector
+from ..skills import SkillRegistry
 from .blackboard import AgentBlackboard
 from .messages import AgentMessage, TaskAssignPayload, TaskResultPayload
 from .skill_scope import scoped_registry
+
+logger = logging.getLogger(__name__)
 
 
 class WorkerAgent:
@@ -49,14 +54,16 @@ class WorkerAgent:
         self,
         *,
         agent_id: str,
-        gateway: LLMGateway,
+        model: BaseChatModel,
         registry: SkillRegistry,
         max_steps: int = 4,
+        telemetry: TelemetryCollector | None = None,
     ) -> None:
         self.agent_id = agent_id
-        self._gateway = gateway
+        self._model = model
         self._registry = registry
         self._max_steps = max_steps
+        self._telemetry = telemetry
         # The ReActAgent is created fresh per instance — its transcript list is private.
         # Creating it here (not inside run_task) lets tests inspect agent._transcript after
         # run_task to verify transcript isolation between two WorkerAgent instances.
@@ -68,23 +75,39 @@ class WorkerAgent:
         """Instantiate a fresh ReActAgent bound to this worker's settings.
 
         ``allowed_skills`` is enforced at BOTH layers:
-          - prompt: the manifest only shows the allowed tools (via ReActAgent.allowed_skills);
+          - schema: the model is bound only the allowed tools (via ReActAgent.allowed_skills);
           - execution: the registry is wrapped by ``scoped_registry`` so any out-of-scope
             skill is DENIED at ``run()`` time — a read-only worker physically cannot invoke
             ``propose_fix``, it only ever sees an is_error observation and self-corrects.
         """
         return ReActAgent(
-            gateway=self._gateway,
+            model=self._model,
             registry=scoped_registry(self._registry, allowed_skills),
             max_steps=max_steps if max_steps is not None else self._max_steps,
             task=f"worker_{self.agent_id}",
+            telemetry=self._telemetry,
             allowed_skills=allowed_skills,
+        )
+
+    def build_goal(self, assign: TaskAssignPayload) -> str:
+        """Compose the ReActAgent goal for a subtask — BOTH original_goal + subtask (P3-4).
+
+        Injecting the overall goal alongside the narrow subtask is the cascade-hallucination
+        guard.  This is the single source of truth for the goal string, reused by the T2
+        Reflexion retry driver so the Self-Reflection prompt and the retry actor see the exact
+        goal the initial attempt ran (no format drift between the two).
+        """
+        return (
+            f"Overall goal: {assign.original_goal}\n\n"
+            f"[Your specific subtask as {self.role}]:\n{assign.subtask}"
         )
 
     def run_task(
         self,
         task_msg: AgentMessage,
         blackboard: AgentBlackboard,
+        *,
+        reflections: list[str] | None = None,
     ) -> AgentMessage:
         """Execute the subtask and post a task_result message to the blackboard.
 
@@ -94,27 +117,58 @@ class WorkerAgent:
         - Runs the ReAct loop (may be offline mock — stop_reason can be "max_steps").
         - Posts a task_result message with the worker's answer.
         - Returns the posted task_result AgentMessage.
+
+        ``reflections`` is the T2 Reflexion (Shinn et al., 2023) episodic memory: verbal notes
+        distilled from a PRIOR failed attempt at this same subtask, forwarded verbatim to
+        ``ReActAgent.run`` so the retry actor conditions on what went wrong.  Default ``None`` ⇒
+        byte-identical to the pre-Reflexion behaviour (``ReActAgent.run`` renders no reflection
+        block, so the worker prompt and posted result are unchanged).
         """
         assign = TaskAssignPayload.from_dict(task_msg.payload)
 
         # CRITICAL: goal includes BOTH original_goal + subtask (P3-4 / cascade-hallucination guard)
-        goal = (
-            f"Overall goal: {assign.original_goal}\n\n"
-            f"[Your specific subtask as {self.role}]:\n{assign.subtask}"
-        )
+        goal = self.build_goal(assign)
 
-        # Build allowed skills set — merge defaults with what orchestrator specified
-        allowed: set[str] | None = None
-        task_skills = assign.allowed_skills or self.default_allowed_skills
-        if task_skills:
-            allowed = set(task_skills)
+        # Build the allowed-skill set by INTERSECTING the orchestrator's proposal with the role's
+        # default set — never by replacing it.  ``self.default_allowed_skills`` is the role's safe
+        # UPPER BOUND (a diagnosis worker may only ever reach read-only audit tools); the
+        # orchestrator's ``assign.allowed_skills`` comes straight from the decomposer LLM's JSON
+        # (orchestrator._parse_subtasks) and is therefore untrusted.  Letting that proposal REPLACE
+        # the default would let a hallucinated (or injection-steered) decomposition hand a read-only
+        # worker a PROPOSES_PATCH tool — Excessive Agency (OWASP LLM06:2025).  Intersection lets the
+        # LLM only NARROW the role's tool face, never widen it (least privilege).
+        allowed: set[str]
+        default_allowed = set(self.default_allowed_skills)
+        if assign.allowed_skills:
+            granted = {s for s in assign.allowed_skills if s in default_allowed}
+            dropped = [s for s in assign.allowed_skills if s not in default_allowed]
+            if dropped:
+                logger.warning(
+                    "worker %s (%s): dropped %d out-of-scope skill(s) %s proposed by the "
+                    "orchestrator; a worker's tool set may only narrow the role default %s, never "
+                    "expand it (least privilege). Remaining granted skills: %s.",
+                    self.agent_id,
+                    self.role,
+                    len(dropped),
+                    sorted(dropped),
+                    sorted(default_allowed),
+                    sorted(granted),
+                )
+            # Fail-safe: an empty intersection (the LLM proposed ONLY out-of-scope skills) yields an
+            # empty allowed set — the worker gets NO tools and must answer from context alone. We do
+            # NOT fall back to the broad default here, which would reward an out-of-bounds proposal
+            # with the role's full access. ``set()`` (not ``None``) keeps the execution gate active.
+            allowed = granted
+        else:
+            # No proposal → the role's full default set (unchanged pre-existing behaviour).
+            allowed = default_allowed
 
         # Re-instantiate agent with the per-task allowed_skills AND the per-task step budget
         # the orchestrator assigned (assign.max_steps) — the protocol knob is now live, not a
         # field the worker silently ignored.  Keeps transcript isolated.
         self.agent = self._make_agent(allowed_skills=allowed, max_steps=assign.max_steps)
 
-        result: AgentResult = self.agent.run(goal)
+        result: AgentResult = self.agent.run(goal, reflections=reflections)
 
         # The worker's "claimed open errors" is the REAL integer from its own audit_project
         # tool call (extracted from the ReAct transcript), NOT a substring count of its prose.
@@ -159,15 +213,17 @@ class DiagWorker(WorkerAgent):
         self,
         *,
         agent_id: str = "diag_01",
-        gateway: LLMGateway,
+        model: BaseChatModel,
         registry: SkillRegistry,
         max_steps: int = 4,
+        telemetry: TelemetryCollector | None = None,
     ) -> None:
         super().__init__(
             agent_id=agent_id,
-            gateway=gateway,
+            model=model,
             registry=registry,
             max_steps=max_steps,
+            telemetry=telemetry,
         )
 
 
@@ -185,15 +241,17 @@ class RepairWorker(WorkerAgent):
         self,
         *,
         agent_id: str = "repair_01",
-        gateway: LLMGateway,
+        model: BaseChatModel,
         registry: SkillRegistry,
         max_steps: int = 4,
+        telemetry: TelemetryCollector | None = None,
     ) -> None:
         super().__init__(
             agent_id=agent_id,
-            gateway=gateway,
+            model=model,
             registry=registry,
             max_steps=max_steps,
+            telemetry=telemetry,
         )
 
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from owcopilot.audit.context import AuditContext
 from owcopilot.audit.default_rules import build_default_rule_registry
 from owcopilot.audit.runner import AuditRunner
@@ -17,9 +19,11 @@ from owcopilot.content.models import (
     Term,
 )
 from owcopilot.llm.cache import NoOpCache
-from owcopilot.llm.gateway import LLMGateway
+from owcopilot.llm.gateway import LLMGateway, LLMProvider
 from owcopilot.llm.router import StaticRouter
 from owcopilot.patches import PatchSuggestService, deterministic_candidates, parse_patch_candidates
+from owcopilot.patches.search import applicable_repair_moves, plan_repairs
+from owcopilot.patches.suggest import _target_object
 
 
 def _bundle() -> ContentBundle:
@@ -81,6 +85,54 @@ def _gateway(payload: str) -> LLMGateway:
         router=StaticRouter(mapping={"patch_suggest": "cheap"}),
         cache=NoOpCache(),
     )
+
+
+class _RecordingProvider:
+    """Like _ScriptedProvider but also records every `user` prompt string it is asked to serve."""
+
+    def __init__(self, payload: str) -> None:
+        self.payload = payload
+        self.users: list[str] = []
+        self.calls = 0
+
+    def complete(self, *, system: str, user: str, model: str) -> tuple[str, int, int]:
+        self.calls += 1
+        self.users.append(user)
+        return self.payload, 10, 10
+
+
+def _gateway_with_provider(provider: LLMProvider) -> LLMGateway:
+    return LLMGateway(
+        providers={"cheap": provider},
+        router=StaticRouter(mapping={"patch_suggest": "cheap"}),
+        cache=NoOpCache(),
+    )
+
+
+# A valid LLM fix for the _bundle() UNKNOWN_ENTITY_REF issue: point the quest at the existing scout
+# (distinct from the deterministic fix, which simply removes the dangling giver_npc).
+_LLM_REPLACE_PAYLOAD = json.dumps(
+    {
+        "candidates": [
+            {
+                "ops": [
+                    {
+                        "op": "replace",
+                        "path": "/quests/quest_patrol/giver_npc",
+                        "value": "npc_mara",
+                    }
+                ],
+                "rationale": "Point the quest at the existing scout.",
+            }
+        ]
+    }
+)
+_LLM_REPLACE_OP = {"op": "replace", "path": "/quests/quest_patrol/giver_npc", "value": "npc_mara"}
+_DET_REMOVE_OP = {"op": "remove", "path": "/quests/quest_patrol/giver_npc", "value": None}
+
+
+def _op_dumps(candidate_or_move) -> list[dict]:
+    return [op.model_dump(mode="json") for op in candidate_or_move.ops]
 
 
 def test_deterministic_fixer_unknown_entity_ref() -> None:
@@ -281,3 +333,129 @@ def test_term_fixer_replaces_forbidden_term() -> None:
     op = result.candidates[0].candidate.ops[0]
     assert op.path == "/quests/quest_patrol/objective"
     assert "Border Fort" in str(op.value)
+
+
+# --------------------------------------------------------------------------------------------------
+# as_candidate_provider — the LLM proposer wired into the MCTS move set (LATS, arXiv:2310.04406).
+# --------------------------------------------------------------------------------------------------
+
+
+def test_provider_threads_call_time_bundle_not_self_bundle() -> None:
+    # The proposer prompt must be built from the bundle passed at CALL time (the MCTS node's state),
+    # not the construction-time self.bundle — otherwise every node would be scored against the root.
+    recorder = _RecordingProvider(_LLM_REPLACE_PAYLOAD)
+    a = _bundle()
+    issue = _issue_for(a, "UNKNOWN_ENTITY_REF")
+    b = a.model_copy(deep=True)
+    b.quests["quest_patrol"].objective = "A completely different objective."  # mutate target object
+
+    service = PatchSuggestService(
+        bundle=a, audit_runner=_runner(), gateway=_gateway_with_provider(recorder)
+    )
+    provider = service.as_candidate_provider(max_llm_calls=10)
+    provider(issue, a)
+    provider(issue, b)  # distinct (issue, state) key -> a second, distinct model call
+
+    assert len(recorder.users) == 2
+    assert json.loads(recorder.users[1])["target_object"] == _target_object(b, issue.target_ref)
+    assert json.loads(recorder.users[1])["target_object"] != _target_object(a, issue.target_ref)
+
+
+def test_llm_candidate_enters_validated_move_set() -> None:
+    bundle = _bundle()
+    runner = _runner()
+    service = PatchSuggestService(
+        bundle=bundle, audit_runner=runner, gateway=_gateway(_LLM_REPLACE_PAYLOAD)
+    )
+    provider = service.as_candidate_provider(max_llm_calls=10)
+
+    moves = applicable_repair_moves(bundle, runner, candidate_provider=provider)
+    move_ops = [_op_dumps(move) for move, _child, _errors in moves]
+    assert [_LLM_REPLACE_OP] in move_ops  # the model fix survived shadow-validation as a move
+    assert [_DET_REMOVE_OP] in move_ops  # the deterministic fixer is still there too (widened set)
+
+    plan = plan_repairs(bundle, runner, candidate_provider=provider, seed=0)
+    assert plan.final_open_errors == 0  # either validated move clears the target error
+
+
+def test_llm_candidate_that_worsens_is_pruned() -> None:
+    # An LLM op that blanks the objective introduces QUEST_MISSING_OBJECTIVE. The shared move
+    # generator's non-worsening prune must drop it — no new safety code on the model path.
+    worsening = json.dumps(
+        {
+            "candidates": [
+                {
+                    "ops": [
+                        {"op": "replace", "path": "/quests/quest_patrol/objective", "value": ""}
+                    ],
+                    "rationale": "blank the objective",
+                }
+            ]
+        }
+    )
+    bundle = _bundle()
+    runner = _runner()
+    service = PatchSuggestService(bundle=bundle, audit_runner=runner, gateway=_gateway(worsening))
+    provider = service.as_candidate_provider(max_llm_calls=10)
+
+    moves = applicable_repair_moves(bundle, runner, candidate_provider=provider)
+    for move, _child, _errors in moves:
+        assert "/quests/quest_patrol/objective" not in [op.path for op in move.ops]
+
+
+def test_max_llm_calls_hard_cap_falls_back_marked() -> None:
+    scripted = _ScriptedProvider(_LLM_REPLACE_PAYLOAD)
+    a = _bundle()
+    issue = _issue_for(a, "UNKNOWN_ENTITY_REF")
+    b = a.model_copy(deep=True)
+    b.quests["quest_patrol"].objective = "A completely different objective."
+
+    service = PatchSuggestService(
+        bundle=a, audit_runner=_runner(), gateway=_gateway_with_provider(scripted)
+    )
+    provider = service.as_candidate_provider(max_llm_calls=1)
+
+    first = provider(issue, a)  # spends the one allowed model call
+    second = provider(issue, b)  # budget exhausted -> deterministic fallback, marked
+
+    assert scripted.calls == 1  # the hard cap held; the second state made no model call
+    # First result: unmarked, and includes the model-proposed candidate.
+    assert [_LLM_REPLACE_OP] in [_op_dumps(c) for c in first]
+    assert all("budget-exhausted" not in c.rationale for c in first)
+    # Second result: exactly the deterministic candidates (ops), every rationale marked.
+    assert [_op_dumps(c) for c in second] == [
+        _op_dumps(c) for c in deterministic_candidates(issue, b)
+    ]
+    assert second and all("budget-exhausted" in c.rationale for c in second)
+
+
+def test_provider_caches_per_issue_and_state() -> None:
+    scripted = _ScriptedProvider(_LLM_REPLACE_PAYLOAD)
+    bundle = _bundle()
+    issue = _issue_for(bundle, "UNKNOWN_ENTITY_REF")
+    service = PatchSuggestService(
+        bundle=bundle, audit_runner=_runner(), gateway=_gateway_with_provider(scripted)
+    )
+    provider = service.as_candidate_provider(max_llm_calls=10)
+
+    first = provider(issue, bundle)
+    second = provider(issue, bundle)  # same (issue, state) -> cache hit, no second model call
+
+    assert scripted.calls == 1
+    assert [_op_dumps(c) for c in first] == [_op_dumps(c) for c in second]
+
+
+def test_as_candidate_provider_requires_gateway() -> None:
+    service = PatchSuggestService(bundle=_bundle(), audit_runner=_runner(), gateway=None)
+    with pytest.raises(ValueError, match="gateway"):
+        service.as_candidate_provider(max_llm_calls=1)
+
+
+def test_plan_repairs_default_provider_is_byte_identical() -> None:
+    # The opt-in provider default must be a pure no-op: the implicit default and an explicit
+    # deterministic_candidates provider must produce byte-identical plans.
+    bundle = _bundle()
+    runner = _runner()
+    implicit = plan_repairs(bundle, runner, seed=0)
+    explicit = plan_repairs(bundle, runner, seed=0, candidate_provider=deterministic_candidates)
+    assert implicit.model_dump() == explicit.model_dump()

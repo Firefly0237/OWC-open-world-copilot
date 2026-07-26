@@ -1,3 +1,4 @@
+# 灵感参考的检索：复用与项目 lore 相同的两阶段混合流水线。
 """Retrieval over inspiration references — the same two-stage hybrid pipeline as project lore.
 
 A whole book lives in the inspiration library as reference chunks, and it is retrieved to ground
@@ -32,6 +33,7 @@ class ReferenceContextBuilder:
                 embedder=embedder,
                 rows_loader=load_reference_rows,
                 vectors_table="reference_vectors",
+                auto_tier=True,
             )
             if embedder is not None
             else None

@@ -4,8 +4,17 @@ import json
 
 from openpyxl import Workbook
 
-from owcopilot.cli.main import main
-from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest
+from owcopilot.cli.main import build_parser, main
+from owcopilot.content.models import (
+    Branch,
+    ContentBundle,
+    Entity,
+    EntityType,
+    LocalizedText,
+    Quest,
+    QuestLogic,
+    QuestStage,
+)
 from owcopilot.content.store import ContentStore
 
 
@@ -390,6 +399,130 @@ def test_cli_export_writes_engine_scoped_bundle(tmp_path, capsys) -> None:
     assert body["cost_budget"]["used_usd"] == 0.0
 
 
+def test_cli_export_unity_localization_optin(tmp_path, capsys) -> None:
+    content_root = tmp_path / "content"
+    output_root = tmp_path / "exports"
+    ContentStore(content_root).save(
+        ContentBundle(
+            localized_texts={
+                "g_en": LocalizedText(id="g_en", text_key="greeting", locale="en", text="Hi"),
+            }
+        )
+    )
+
+    def _run(*extra: str) -> dict:
+        assert (
+            main(
+                [
+                    "export",
+                    "--content-root",
+                    str(content_root),
+                    "--output-dir",
+                    str(output_root),
+                    "--target-engine",
+                    "unity",
+                    *extra,
+                ]
+            )
+            == 0
+        )
+        return _read_json(capsys)
+
+    # Without the flag: no localization projection.
+    _run()
+    assert not (output_root / "unity" / "unity" / "localization").exists()
+
+    # With the flag: the official-format String Table CSV lands under unity/localization/.
+    body = _run("--unity-localization")
+    csv_path = output_root / "unity" / "unity" / "localization" / "owcopilot_strings.csv"
+    assert csv_path.exists()
+    assert csv_path.read_text(encoding="utf-8").splitlines()[0] == "Key,English(en)"
+    kinds = {f["kind"] for f in body["manifest"]["files"]}
+    assert {"unity_localization_csv", "unity_localization_readme"} <= kinds
+
+
+def _write_clean_unreal_project(content_root) -> None:
+    ContentStore(content_root).save(
+        ContentBundle(
+            entities={"npc_aldric": Entity(id="npc_aldric", name="Aldric", type=EntityType.NPC)},
+            quests={
+                "q1": Quest(
+                    id="q1",
+                    title="Q1",
+                    giver_npc="npc_aldric",
+                    objective="Help Aldric.",
+                    localization_keys=["quest.q1.objective"],
+                )
+            },
+        )
+    )
+
+
+def test_cli_export_row_struct_map_renames_columns(tmp_path, capsys) -> None:
+    """A1 (CLI entry): --row-struct-map threads a rename file to the UE projection — the renamed
+    column reaches Quests.json and the row header, proving the flag is wired end to end."""
+    content_root = tmp_path / "content"
+    output_root = tmp_path / "exports"
+    _write_clean_unreal_project(content_root)
+    mapping = tmp_path / "row_struct_map.json"
+    mapping.write_text(
+        json.dumps({"quests": {"DisplayName": "sDisplayName"}}), encoding="utf-8"
+    )
+
+    assert (
+        main(
+            [
+                "export",
+                "--content-root",
+                str(content_root),
+                "--output-dir",
+                str(output_root),
+                "--target-engine",
+                "unreal",
+                "--row-struct-map",
+                str(mapping),
+            ]
+        )
+        == 0
+    )
+    unreal_dir = output_root / "unreal" / "unreal"
+    quests = json.loads((unreal_dir / "Quests.json").read_text(encoding="utf-8"))
+    row = next(r for r in quests if r["Name"] == "q1")
+    assert "sDisplayName" in row and "DisplayName" not in row
+    header = (unreal_dir / "OWCopilotRows.h").read_text(encoding="utf-8")
+    assert "FText sDisplayName;" in header
+
+
+def test_cli_export_row_struct_map_rejects_malformed_file(tmp_path, capsys) -> None:
+    """A5 boundary: a row-struct-map file whose value is not a field->name object is refused with a
+    guided error (exit 2 + JSON on stderr), not a raw traceback or a silent default-name export."""
+    content_root = tmp_path / "content"
+    output_root = tmp_path / "exports"
+    _write_clean_unreal_project(content_root)
+    mapping = tmp_path / "bad_map.json"
+    mapping.write_text(json.dumps({"quests": "not-an-object"}), encoding="utf-8")
+
+    exit_code = main(
+        [
+            "export",
+            "--content-root",
+            str(content_root),
+            "--output-dir",
+            str(output_root),
+            "--target-engine",
+            "unreal",
+            "--row-struct-map",
+            str(mapping),
+        ]
+    )
+    assert exit_code == 2
+    err = _read_stderr_json(capsys)
+    assert err["type"] == "ValueError"
+    assert "row-struct-map" in err["error"]
+    # The malformed map must abort before any UE file is written (no silent default-name export).
+    assert not (output_root / "unreal" / "unreal" / "Quests.json").exists()
+
+
 def test_cli_ask_refuses_without_context(tmp_path, capsys) -> None:
     content_root = tmp_path / "content"
     ContentStore(content_root).save(ContentBundle())
@@ -430,3 +563,126 @@ def test_cli_eval_golden_runs_offline_report(tmp_path, capsys) -> None:
     assert body["passed"] is True
     assert output_path.exists()
     assert (workspace / "exports" / "generic" / "manifest.json").exists()
+
+
+def test_cli_repair_plan_llm_flags_parse() -> None:
+    # Defaults: LLM widening is off, the budget knob defaults to 32, and llm mode is offline.
+    args = build_parser().parse_args(["repair-plan", "--content-root", "."])
+    assert args.llm_candidates is False
+    assert args.max_llm_calls == 32
+    assert args.llm_mode == "offline"
+
+    opted_in = build_parser().parse_args(
+        [
+            "repair-plan",
+            "--content-root",
+            ".",
+            "--llm-candidates",
+            "--max-llm-calls",
+            "5",
+            "--llm-mode",
+            "real",
+        ]
+    )
+    assert opted_in.llm_candidates is True
+    assert opted_in.max_llm_calls == 5
+    assert opted_in.llm_mode == "real"
+
+
+def test_cli_repair_plan_deterministic_default(tmp_path, capsys) -> None:
+    content_root = tmp_path / "content"
+    ContentStore(content_root).save(
+        ContentBundle(quests={"q1": Quest(id="q1", title="Q1", giver_npc="npc_missing")})
+    )
+
+    assert main(["repair-plan", "--content-root", str(content_root)]) == 0
+    body = _read_json(capsys)
+    assert body["used_llm"] is False
+    assert body["llm_mode"] == "offline"
+    assert body["resolved_errors"] >= 1  # the dangling giver_npc is deterministically fixable
+    assert body["cost_budget"]["used_usd"] == 0.0
+
+
+def test_cli_repair_plan_llm_candidates_offline_is_noop(tmp_path, capsys) -> None:
+    # There is no offline double for patch_suggest (mirrors `suggest`): opting into --llm-candidates
+    # in offline mode stays on the deterministic $0 path rather than fabricating model output.
+    content_root = tmp_path / "content"
+    ContentStore(content_root).save(
+        ContentBundle(quests={"q1": Quest(id="q1", title="Q1", giver_npc="npc_missing")})
+    )
+
+    assert (
+        main(
+            [
+                "repair-plan",
+                "--content-root",
+                str(content_root),
+                "--llm-candidates",
+                "--llm-mode",
+                "offline",
+            ]
+        )
+        == 0
+    )
+    body = _read_json(capsys)
+    assert body["used_llm"] is False
+    assert body["cost_budget"]["used_usd"] == 0.0
+
+
+def test_cli_quest_explore_reports_outcomes_and_budget(tmp_path, capsys) -> None:
+    content_root = tmp_path / "content"
+    ContentStore(content_root).save(
+        ContentBundle(
+            quests={
+                "q": Quest(
+                    id="q",
+                    title="Q",
+                    stages=[QuestStage(id="s1", summary="a"), QuestStage(id="s2", summary="b")],
+                    logic=QuestLogic(
+                        branches=[
+                            Branch(id="b_end", from_stage="s1", condition="true", outcome="done"),
+                            Branch(id="b_go", from_stage="s1", to_stage="s2"),
+                        ]
+                    ),
+                )
+            }
+        )
+    )
+
+    assert main(["quest-explore", "--content-root", str(content_root), "q"]) == 0
+    body = _read_json(capsys)
+    assert body["quest_id"] == "q"
+    assert body["truncated"] is False
+    assert "done" in {o["outcome"] for o in body["outcomes"] if o["reachable"]}
+    assert body["cost_budget"]["used_usd"] == 0.0
+
+
+def test_cli_quest_explore_missing_id_is_guided_error(tmp_path, capsys) -> None:
+    content_root = tmp_path / "content"
+    ContentStore(content_root).save(ContentBundle())
+
+    assert main(["quest-explore", "--content-root", str(content_root), "ghost"]) == 2
+    body = _read_stderr_json(capsys)
+    assert body["type"] == "ValueError"
+    assert "任务" in body["error"] and "不存在" in body["error"]
+
+
+def test_output_encoding_survives_gbk_console_with_emoji(monkeypatch) -> None:
+    """Windows GBK 控制台回归：LLM 输出带 emoji（GBK 编码外字符）时，CLI 输出必须降级转义
+    而不是整条命令 UnicodeEncodeError 崩掉（曾以 exit 2 抛 raw error）。"""
+    import io
+    import sys
+
+    from owcopilot.cli.main import _configure_output_encoding
+
+    gbk_stdout = io.TextIOWrapper(io.BytesIO(), encoding="gbk", errors="strict")
+    monkeypatch.setattr(sys, "stdout", gbk_stdout)
+
+    _configure_output_encoding()
+
+    text = '{"answer": "修复完成 ✔️ ️"}'  # 中文可编码；emoji/变体选择符在 GBK 之外
+    print(text, file=sys.stdout)  # errors=strict 时这里会抛 UnicodeEncodeError
+    sys.stdout.flush()
+    raw = gbk_stdout.buffer.getvalue()
+    assert "修复完成".encode("gbk") in raw  # 中文照常
+    assert b"\ufe0f" in raw  # 编码外字符降级为转义而非崩溃

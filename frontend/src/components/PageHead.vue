@@ -48,18 +48,43 @@ const helpOpen = ref(false);
 
 <style scoped>
 .page-head {
+  position: relative;
   display: flex;
   align-items: flex-end;
   flex-wrap: wrap;
   gap: 0.3rem 0.9rem;
   margin: 0.2rem 0 1.1rem;
   padding-bottom: 0.7rem;
-  border-bottom: 1px solid var(--ow-gold-faint);
+}
+/* HSR masthead rule: a gilded line bright at the anchor that fades out, echoing the .section
+   divider — more authentic than a flat faint border that reads as generic SaaS. */
+.page-head::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, var(--ow-gold) 0, var(--ow-gold-soft) 12%, transparent 68%);
 }
 .ph-titles {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
+  padding-left: 0.72rem;
+}
+/* gilded beveled accent bar — HSR mastheads lead the title with a small angular gold tick */
+.ph-titles::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.12rem;
+  bottom: 0.12rem;
+  width: 3px;
+  background: linear-gradient(180deg, var(--ow-gold-bright), var(--ow-gold-deep));
+  clip-path: polygon(0 0, 100% 2px, 100% calc(100% - 2px), 0 100%);
+  box-shadow: 0 0 8px rgba(240, 210, 138, 0.35);
 }
 .ph-title {
   margin: 0;

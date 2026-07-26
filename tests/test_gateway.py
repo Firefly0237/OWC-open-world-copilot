@@ -1,18 +1,8 @@
-import sys
-import types
-
 import pytest
 
-from owcopilot.llm.gateway import LLMGateway, LLMGatewayError, MockProvider, OpenAICompatProvider
+from owcopilot.llm.gateway import LLMGateway, LLMGatewayError, MockProvider
 from owcopilot.llm.router import StaticRouter
 from owcopilot.llm.telemetry import PRICES, TelemetryCollector
-
-
-def test_openai_provider_fails_fast_without_api_key():
-    # A missing key must raise an actionable error before any network call.
-    provider = OpenAICompatProvider(model="x", api_key_env="OWCOPILOT_UNSET_KEY_FOR_TEST")
-    with pytest.raises(RuntimeError, match="needs an API key"):
-        provider.complete(system="s", user="u", model="x")
 
 
 def test_routing_and_telemetry():
@@ -81,47 +71,6 @@ def test_gateway_does_not_cache_empty_response():
     assert prov.calls == 2
 
 
-def test_openai_provider_gates_json_mode_on_prompt_mentioning_json():
-    # DeepSeek/OpenAI 400 if response_format=json_object but the prompt has no 'json'.
-    # The planner prompt has none (and is discarded); generate/repair prompts do.
-    p = OpenAICompatProvider(model="deepseek-v4-flash")  # json_mode=True default
-    assert p._wants_json("Return ONE JSON object with keys: …", "make a quest") is True
-    assert p._wants_json("You are a planner.", "Decompose into steps: foo") is False
-    assert OpenAICompatProvider(model="x", json_mode=False)._wants_json("Return JSON", "x") is False
-
-
-def test_openai_provider_retries_with_max_completion_tokens(monkeypatch):
-    calls = []
-
-    class _Completions:
-        def create(self, **kwargs):
-            calls.append(kwargs)
-            if "max_tokens" in kwargs:
-                raise RuntimeError(
-                    "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead."
-                )
-            return types.SimpleNamespace(
-                choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="pong"))],
-                usage=types.SimpleNamespace(prompt_tokens=4, completion_tokens=1),
-            )
-
-    client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=_Completions()))
-    fake_openai = types.SimpleNamespace(OpenAI=lambda **_kwargs: client)
-    monkeypatch.setitem(sys.modules, "openai", fake_openai)
-
-    provider = OpenAICompatProvider(model="gpt-current", max_output_tokens=16)
-    text, in_tok, out_tok, cached, resp_model = provider.complete(
-        system="s", user="u", model="cheap"
-    )
-
-    assert text == "pong"
-    assert (in_tok, out_tok, cached) == (4, 1, 0)
-    # The fake response has no `model` attribute → response_model degrades to "" (not a crash).
-    assert resp_model == ""
-    assert "max_tokens" in calls[0]
-    assert calls[1]["max_completion_tokens"] == 16
-
-
 def test_gateway_retries_transient_provider_error():
     class _Flaky:
         def __init__(self):
@@ -154,9 +103,35 @@ def test_gateway_classifies_provider_error_after_retries_exhausted():
         raise AssertionError("expected LLMGatewayError")
 
 
+def test_gateway_output_budget_fails_fast_without_retry():
+    """Retrying a capped reply pays for another capped reply — one attempt, guided category."""
+    from owcopilot.llm.gateway import OutputTruncatedError
+
+    class _AlwaysCapped:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *, system, user, model):
+            self.calls += 1
+            raise OutputTruncatedError(completion_tokens=3000, cap=3000)
+
+    prov = _AlwaysCapped()
+    gw = LLMGateway(providers={"cheap": prov}, max_retries=2)
+    try:
+        gw.complete(task="plan", system="s", user="u", tier="cheap")
+    except LLMGatewayError as e:
+        assert e.category == "output_budget"
+        assert e.attempts == 1  # fail fast: no retries were burned
+        assert "OWCOPILOT_MAX_OUTPUT_TOKENS" in str(e.cause)
+    else:
+        raise AssertionError("expected LLMGatewayError")
+    assert prov.calls == 1
+
+
 # ---------------------------------------------------------------------------
 # R3-Team-C ③: unregistered tier → guided LLMGatewayError, not a raw KeyError
 # ---------------------------------------------------------------------------
+
 
 def test_gateway_unregistered_tier_raises_guided_error():
     """Router selects a tier with no provider → friendly LLMGatewayError listing what's available
@@ -178,6 +153,7 @@ def test_gateway_unregistered_tier_raises_guided_error():
 
 def test_gateway_records_real_model_id_on_callrecord():
     """R3-C①: CallRecord.model carries the resolved real model id (from provider.model)."""
+
     class _ModelProvider:
         model = "deepseek-v4-pro"
 

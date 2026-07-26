@@ -1,3 +1,4 @@
+# 表达式语言的静态类型检查、求值与状态。
 """Static type checking, evaluation, and state for the quest logic expression language.
 
 Evaluation is explicit tree-walking over a parsed AST against a concrete state — there is no
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from ..errors import OWCopilotError
 from .expr import BoolLit, BoolOp, Compare, Expr, IntLit, Not, Ref, StrLit
 
 # ref -> declared type. quest-state refs (e.g. quest:q1.done) are treated as bool automatically.
@@ -17,7 +19,7 @@ _ORDER_OPS = {"<", ">", "<=", ">="}
 Value = bool | int | str
 
 
-class LogicEvalError(ValueError):
+class LogicEvalError(OWCopilotError, ValueError):
     """Raised when a parsed expression cannot be evaluated against a state (e.g. unknown ref)."""
 
 

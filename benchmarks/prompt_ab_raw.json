@@ -1,0 +1,123 @@
+{
+  "date": "2026-07-03",
+  "model": "deepseek-v4-flash",
+  "v1": {
+    "bridge_hit_rate": "0/0",
+    "cost_usd": 0.0025,
+    "per_question": [
+      {
+        "bridged": true,
+        "coverage": 0.7407,
+        "fallback_suspected": false,
+        "followups": [],
+        "q": "铁卫军团的盟友的领袖驻在哪里",
+        "rounds": 1,
+        "single_hit": true,
+        "target": "entity:npc_shen"
+      },
+      {
+        "bridged": true,
+        "coverage": 0.5161,
+        "fallback_suspected": false,
+        "followups": [
+          "黑沙帮据点",
+          "黑沙帮主要据点",
+          "黑沙帮总部",
+          "黑沙帮 基地 南漠"
+        ],
+        "q": "与铁卫军团敌对的势力的据点是哪里",
+        "rounds": 3,
+        "single_hit": true,
+        "target": "entity:loc_inn"
+      },
+      {
+        "bridged": true,
+        "coverage": 0.8065,
+        "fallback_suspected": false,
+        "followups": [],
+        "q": "雾隐盟领袖的驻地是个什么样的地方",
+        "rounds": 1,
+        "single_hit": true,
+        "target": "entity:loc_cliff"
+      },
+      {
+        "bridged": true,
+        "coverage": 0.2593,
+        "fallback_suspected": false,
+        "followups": [
+          "黑沙帮 据点 南漠",
+          "黑沙帮 老巢 用途",
+          "黑沙帮 基地 黄沙客栈",
+          "黑沙帮据点 位置",
+          "黑沙帮据点 用途",
+          "黄沙客栈 黑沙帮据点"
+        ],
+        "q": "黑沙帮的据点在什么位置有什么用途",
+        "rounds": 3,
+        "single_hit": true,
+        "target": "entity:loc_inn"
+      }
+    ]
+  },
+  "v2": {
+    "bridge_hit_rate": "0/0",
+    "cost_usd": 0.0047,
+    "per_question": [
+      {
+        "bridged": true,
+        "coverage": 0.7407,
+        "fallback_suspected": false,
+        "followups": [
+          "雾隐盟领袖驻地",
+          "听雾崖 位置"
+        ],
+        "q": "铁卫军团的盟友的领袖驻在哪里",
+        "rounds": 3,
+        "single_hit": true,
+        "target": "entity:npc_shen"
+      },
+      {
+        "bridged": true,
+        "coverage": 0.5161,
+        "fallback_suspected": false,
+        "followups": [
+          "黑沙帮 据点",
+          "黑沙帮 总部",
+          "南漠 黑沙帮 根据地",
+          "黑沙帮 据点 位置",
+          "黑沙帮 据点是哪里"
+        ],
+        "q": "与铁卫军团敌对的势力的据点是哪里",
+        "rounds": 3,
+        "single_hit": true,
+        "target": "entity:loc_inn"
+      },
+      {
+        "bridged": true,
+        "coverage": 0.8065,
+        "fallback_suspected": false,
+        "followups": [],
+        "q": "雾隐盟领袖的驻地是个什么样的地方",
+        "rounds": 1,
+        "single_hit": true,
+        "target": "entity:loc_cliff"
+      },
+      {
+        "bridged": true,
+        "coverage": 0.2593,
+        "fallback_suspected": false,
+        "followups": [
+          "黑沙帮的据点的位置",
+          "黑沙帮据点的用途",
+          "黑沙帮主要据点在哪里",
+          "黄沙客栈具体用途",
+          "黑沙帮还有哪些据点"
+        ],
+        "q": "黑沙帮的据点在什么位置有什么用途",
+        "rounds": 3,
+        "single_hit": true,
+        "target": "entity:loc_inn"
+      }
+    ]
+  }
+}

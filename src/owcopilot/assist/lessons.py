@@ -1,3 +1,4 @@
+# 跨会话教训档案：refine 循环的反思累积，前馈给后续生成。
 """Cross-session lesson archive for the refine loop.
 
 Lessons are extracted deterministically (no LLM) from calibration false-pass data and
@@ -13,12 +14,18 @@ Guards against pollution:
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 
 from pydantic import BaseModel
 
 from ..assist.calibration import CalibrationReport
 from ..storage.sqlite import SQLiteStore
+
+# T18: cap the episodic exemplars attached to one lesson. LangMem keeps a few-shot *collection*,
+# not the full history; a small deterministic cap keeps the injected prompt bounded and the DB
+# column from growing without limit.
+_MAX_EXEMPLARS = 3
 
 
 class LessonRecord(BaseModel):
@@ -39,7 +46,7 @@ def extract_lessons_from_report(
 ) -> int:
     """Extract lessons from a CalibrationReport and persist them.
 
-    IN-B1 M2: Groups by (item_type, dimension) so each failing dimension gets its own lesson,
+    Groups by (item_type, dimension) so each failing dimension gets its own lesson,
     rather than lumping all failures of a type into one generic lesson.
 
     For each (item_type, dimension) pair with >= min_false_pass false-pass items, writes (upserts)
@@ -51,6 +58,16 @@ def extract_lessons_from_report(
     counts: Counter[tuple[str, str]] = Counter(
         (item.item_type, item.dimension) for item in report.false_pass_items
     )
+    # T18: alongside the aggregate count, collect a few CONCRETE rejected instances per
+    # (item_type, dimension) as episodic exemplars. object_ref (not the opaque review-item
+    # item_id) is the content-level handle a human/model can look up. Insertion-ordered,
+    # de-duplicated, and capped at _MAX_EXEMPLARS — deterministic for a given report.
+    exemplars: dict[tuple[str, str], list[str]] = {}
+    for item in report.false_pass_items:
+        key = (item.item_type, item.dimension)
+        refs = exemplars.setdefault(key, [])
+        if len(refs) < _MAX_EXEMPLARS and item.object_ref not in refs:
+            refs.append(item.object_ref)
     written = 0
     for (item_type, dimension), count in counts.items():
         if count < min_false_pass:
@@ -66,9 +83,31 @@ def extract_lessons_from_report(
                 f"此类 {item_type} 内容历史上有 {count} 次被人审拒绝（critic 误判为通过）。"
                 "生成时请整体提高质量标准，不要依赖 critic 的宽松判断。"
             )
-        store.save_lesson(item_type, lesson_text, dimension=dimension)
+        store.save_lesson(
+            item_type,
+            lesson_text,
+            dimension=dimension,
+            exemplar_ids=exemplars.get((item_type, dimension)) or None,
+        )
         written += 1
     return written
+
+
+def _exemplar_refs(lesson: dict) -> list[str]:
+    """Parse the episodic exemplar object_refs attached to a lesson dict (T18).
+
+    ``exemplar_ids`` is a JSON array string (the SQLite TEXT column surfaced by
+    ``get_lessons_for_type``), or NULL/absent on legacy lessons written before T18. Returns []
+    when missing, so those lessons render byte-for-byte as they did before this change. An
+    already-decoded list is accepted too, for direct callers/tests.
+    """
+    raw = lesson.get("exemplar_ids")
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    decoded = json.loads(str(raw))
+    return [str(x) for x in decoded] if isinstance(decoded, list) else []
 
 
 def build_lesson_block(lessons: list[dict], *, inject_lessons: bool = True) -> str:
@@ -86,7 +125,11 @@ def build_lesson_block(lessons: list[dict], *, inject_lessons: bool = True) -> s
         "以下是此类内容历史系统性问题总结，生成时请特别注意：",
     ]
     for i, lesson in enumerate(items, 1):
-        lines.append(f"{i}. {lesson['lesson_text']}")
+        # T18: attach concrete rejected instances as episodic exemplars. Absent → "", so a
+        # lesson without exemplars renders exactly as before.
+        refs = _exemplar_refs(lesson)
+        suffix = f"（参见历史被拒实例：{'、'.join(refs)}）" if refs else ""
+        lines.append(f"{i}. {lesson['lesson_text']}{suffix}")
     return "\n".join(lines)
 
 
@@ -97,7 +140,7 @@ def build_critic_lesson_block(
 ) -> str:
     """Build a [critic-lesson-memory] block for critic prompt injection.
 
-    IN-B3 M1: A critic-specific lesson block, distinct from the generation-side [lesson-memory].
+    A critic-specific lesson block, distinct from the generation-side [lesson-memory].
     Returns "" when inject_lessons=False or lessons is empty.
     At most 3 lessons are injected (belt-and-suspenders cap).
 
@@ -126,6 +169,10 @@ def build_critic_lesson_block(
             .replace("生成时请整体提高", "评判时请整体核查")
         )
         dim_hint = f"（重点核查「{dim}」维度）" if dim != "general" else ""
-        lines.append(f"{i}. {text}{dim_hint}")
+        # T18: same episodic exemplars on the critic side — Reflexion's concrete failure detail
+        # (which specific rejected instances) to scrutinise, not just an aggregate count.
+        refs = _exemplar_refs(lesson)
+        exemplar_hint = f"（参见历史被拒实例：{'、'.join(refs)}）" if refs else ""
+        lines.append(f"{i}. {text}{dim_hint}{exemplar_hint}")
     lines.append("如发现上述历史薄弱维度有类似问题，请将 severity 提升为 blocker。")
     return "\n".join(lines)

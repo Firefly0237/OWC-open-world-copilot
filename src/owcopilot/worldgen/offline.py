@@ -1,3 +1,4 @@
+# 世界种子的离线确定性 provider。
 """Deterministic offline world-seed provider.
 
 Production builds a world in a *grounded chain* of calls — premise → factions → regions → cast →

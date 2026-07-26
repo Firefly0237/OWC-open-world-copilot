@@ -378,7 +378,7 @@ def test_bundle_from_payload_zero_quests_and_no_preset_filler() -> None:
         idea="x", faction_count=1, region_count=0, npc_count=0, quest_count=0, term_count=0
     )
     payload = {"factions": [{"name": "守夜会", "description": "看守灯塔。"}]}
-    bundle = _bundle_from_payload(
+    bundle, report = _bundle_from_payload(
         payload,
         draft_id="ws_test",
         brief=brief,
@@ -389,6 +389,97 @@ def test_bundle_from_payload_zero_quests_and_no_preset_filler() -> None:
     assert len(bundle.quests) == 0  # zero means zero, not a padded minimum
     assert len(bundle.pois) == 0  # locations follow regions: none requested, none invented
     assert [e.name for e in bundle.entities.values() if e.type is EntityType.FACTION] == ["守夜会"]
+    # Exactly one faction requested and one produced — nothing padded, nothing dropped.
+    assert report.is_clean
+
+
+def test_bundle_from_payload_shortfall_is_reported_not_padded() -> None:
+    """Category ① (占位补数量): a section that under-produces is no longer padded with placeholder
+    filler — the shortfall is recorded honestly and only the real items survive."""
+    brief = WorldSeedBrief(
+        idea="x", faction_count=3, region_count=0, npc_count=0, quest_count=0, term_count=0
+    )
+    payload = {"factions": [{"name": "守夜会", "description": "看守灯塔。"}]}  # 1 of 3
+    bundle, report = _bundle_from_payload(
+        payload,
+        draft_id="ws_short",
+        brief=brief,
+        existing=ContentBundle(),
+        inspiration_pack=_empty_pack(),
+        project_pack=_empty_pack(),
+    )
+    factions = [e for e in bundle.entities.values() if e.type is EntityType.FACTION]
+    assert len(factions) == 1  # only the real one; no "阵营2"/"阵营3" placeholders
+    assert not any("由一句话世界种子补全" in e.description for e in factions)
+    shortfalls = report.by_kind("shortfall")
+    assert len(shortfalls) == 1
+    assert shortfalls[0].ref == "阵营"
+    assert shortfalls[0].detail == "requested=3 produced=1"
+
+
+def test_bundle_from_payload_dangling_ref_kept_not_round_robined() -> None:
+    """Category ② (轮询改外键): an invalid foreign key is no longer silently swapped for some real
+    object. The original value is kept verbatim (so the deterministic audit flags it) and recorded
+    as a dangling ref."""
+    brief = WorldSeedBrief(
+        idea="x", faction_count=1, region_count=0, npc_count=0, quest_count=1, term_count=0
+    )
+    payload = {
+        "factions": [{"id": "fac_real", "name": "真实阵营"}],
+        # quest points its giver/location at ids that do not exist
+        "quests": [
+            {"title": "调查", "giver_npc": "npc_ghost", "location": "loc_phantom", "stages": ["一"]}
+        ],
+    }
+    bundle, report = _bundle_from_payload(
+        payload,
+        draft_id="ws_dangling",
+        brief=brief,
+        existing=ContentBundle(),
+        inspiration_pack=_empty_pack(),
+        project_pack=_empty_pack(),
+    )
+    quest = next(iter(bundle.quests.values()))
+    # Kept verbatim — NOT replaced with fac_real or any other real object.
+    assert quest.giver_npc == "npc_ghost"
+    assert quest.location == "loc_phantom"
+    dangling = {(n.ref, n.detail) for n in report.by_kind("dangling_ref")}
+    assert (f"quest:{quest.id}", "giver_npc=npc_ghost") in dangling
+    assert (f"quest:{quest.id}", "location=loc_phantom") in dangling
+
+    # The deterministic reference audit catches the kept dangling refs — the "discover→fix" path.
+    from owcopilot.audit.context import AuditContext
+    from owcopilot.audit.rules.reference_rules import MissingEntityReferenceRule
+
+    ctx = AuditContext.from_bundle(bundle)
+    codes = {issue.message for issue in MissingEntityReferenceRule().check(ctx)}
+    assert any("npc_ghost" in message for message in codes)
+    assert any("loc_phantom" in message for message in codes)
+
+
+def test_bundle_from_payload_dropped_relation_is_recorded() -> None:
+    """Category ③ (丢关系端点): a declared relation whose endpoint does not exist is still dropped,
+    but the loss is now recorded rather than silent."""
+    brief = WorldSeedBrief(
+        idea="x", faction_count=1, region_count=0, npc_count=0, quest_count=0, term_count=0
+    )
+    payload = {
+        "factions": [{"id": "fac_real", "name": "真实阵营"}],
+        "relations": [{"source": "fac_real", "target": "fac_missing", "kind": "enemy_of"}],
+    }
+    bundle, report = _bundle_from_payload(
+        payload,
+        draft_id="ws_dropped",
+        brief=brief,
+        existing=ContentBundle(),
+        inspiration_pack=_empty_pack(),
+        project_pack=_empty_pack(),
+    )
+    # The relation to the phantom endpoint is not materialised.
+    assert all(rel.target != "fac_missing" for rel in bundle.relations)
+    dropped = report.by_kind("dropped_relation")
+    assert len(dropped) == 1
+    assert dropped[0].detail == "missing=fac_missing"
 
 
 def test_bundle_from_payload_quest_fallbacks_carry_no_preset_text() -> None:
@@ -396,7 +487,7 @@ def test_bundle_from_payload_quest_fallbacks_carry_no_preset_text() -> None:
         idea="x", faction_count=0, region_count=0, npc_count=0, quest_count=1, term_count=0
     )
     payload = {"quests": [{"title": "归航"}]}  # neither objective nor stages provided
-    bundle = _bundle_from_payload(
+    bundle, report = _bundle_from_payload(
         payload,
         draft_id="ws_test2",
         brief=brief,
@@ -410,6 +501,10 @@ def test_bundle_from_payload_quest_fallbacks_carry_no_preset_text() -> None:
     forbidden_presets = ("确认线索", "作出选择", "阵营后果")
     for text in (quest.objective, *(s.summary for s in quest.stages)):
         assert not any(preset in text for preset in forbidden_presets)
+    # Category ④ (objective 派生 stage): behaviour unchanged (still derived), now recorded.
+    derived = report.by_kind("derived_stage")
+    assert len(derived) == 1
+    assert derived[0].ref == f"quest:{quest.id}"
 
 
 def _empty_pack():

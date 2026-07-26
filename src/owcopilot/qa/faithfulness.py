@@ -1,3 +1,4 @@
+# 忠实性(蕴含)校验：判答案是否被检索证据蕴含。opt-in，可 $0 跳过（离线替身兜底）。
 """Opt-in, $0-skippable LLM-judge *faithfulness* (entailment) verifier.
 
 This is the **separate, opt-in verifier** that ``qa/verify.py`` reserves room for in its module
@@ -26,15 +27,30 @@ verdict must not inflate the faithfulness score.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
-from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json_object
 from ..retrieval.models import ContextPack
 from .models import QAAnswer
 
 #: Router task label for the judge call, so telemetry / routing can target it explicitly.
 FAITHFULNESS_JUDGE_TASK = "faithfulness_judge"
+
+
+@runtime_checkable
+class FaithfulnessJudge(Protocol):
+    """Structural type for a claim-entailment judge.
+
+    Anything with a truthy ``providers`` and a ``complete(task, system, user)`` returning a
+    ``{"supported": bool, "reason": str}`` JSON string qualifies. Satisfied by both a real
+    :class:`~owcopilot.llm.gateway.LLMGateway` (live LLM judge) and the deterministic
+    :class:`~owcopilot.qa.offline_entailment.OfflineEntailmentJudge` (``$0`` stand-in).
+    """
+
+    providers: Any
+
+    def complete(self, *, task: str, system: str, user: str, tier: str | None = ...) -> str: ...
+
 
 _JUDGE_SYSTEM = (
     "You are a strict factual-entailment judge for a game-lore QA system. "
@@ -53,7 +69,7 @@ def judge_qa_faithfulness(
     answer: QAAnswer,
     *,
     pack: ContextPack,
-    judge: LLMGateway | None = None,
+    judge: FaithfulnessJudge | None = None,
 ) -> dict[str, Any]:
     """Judge whether each claim in ``answer`` is entailed by the retrieved evidence in ``pack``.
 
@@ -111,7 +127,7 @@ def judge_qa_faithfulness(
     }
 
 
-def _judge_available(judge: LLMGateway | None) -> bool:
+def _judge_available(judge: FaithfulnessJudge | None) -> bool:
     """A judge is usable only when it is supplied and has at least one registered provider.
 
     This intentionally does NOT inspect provider type: the offline/keyless decision is the
@@ -125,7 +141,7 @@ def _judge_available(judge: LLMGateway | None) -> bool:
 
 
 def _judge_claim(
-    judge: LLMGateway, *, question: str, claim: str, evidence: str
+    judge: FaithfulnessJudge, *, question: str, claim: str, evidence: str
 ) -> dict[str, Any]:
     """Ask the judge about one claim. Parse failures fail closed (unsupported + parse_error)."""
     user = (

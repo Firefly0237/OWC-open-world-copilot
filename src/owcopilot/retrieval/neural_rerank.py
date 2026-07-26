@@ -1,3 +1,4 @@
+# 神经交叉编码重排（bge-reranker-v2-m3，opt-in）：两阶段检索的精排半边，缺模型则跳过。
 """Neural cross-encoder reranker -- bge-reranker-v2-m3 (opt-in).
 
 This module provides ``NeuralReranker``: a true cross-encoder that scores each
@@ -51,6 +52,14 @@ from .rerank import rerank_hits as _lexical_rerank_hits
 logger = logging.getLogger(__name__)
 
 DEFAULT_NEURAL_MODEL = "BAAI/bge-reranker-v2-m3"
+
+#: The bounded top-K candidate window the cross-encoder re-ranks. The canonical
+#: Sentence-Transformers "Retrieve & Re-Rank" recipe uses "a set of e.g. 100 possible
+#: candidates which are then re-ranked by the Cross-Encoder" -- scoring the full fused
+#: list jointly would be "rather slow", so the reranker only ever sees this bounded window
+#: and the tail keeps its fused order.
+#: https://sbert.net/examples/sentence_transformer/applications/retrieve_rerank/README.html
+DEFAULT_RERANK_CANDIDATE_WINDOW = 100
 
 # Env knob: OWCOPILOT_RERANKER in {auto, neural, lexical, none}
 # auto  → use NeuralReranker if model importable, else lexical fallback
@@ -239,7 +248,27 @@ def resolve_reranker(mode: str | None = None) -> NeuralReranker | None:
     if mode == "neural":
         return NeuralReranker(model_name)
 
-    logger.warning(
-        "resolve_reranker: unknown mode %r; defaulting to lexical re-scorer.", mode
-    )
+    logger.warning("resolve_reranker: unknown mode %r; defaulting to lexical re-scorer.", mode)
     return None
+
+
+def reranker_for_corpus(corpus_size: int, mode: str | None = None) -> NeuralReranker | None:
+    """The sole production entry that turns the cross-encoder on -- both gates must pass.
+
+    Two independent gates guard the neural reranker; either one off keeps the default lexical
+    re-scorer (so the ``$0`` / CI / small-corpus path is byte-identical):
+
+    * SIZE gate -- ``RetrievalPolicy.for_corpus(corpus_size).recommends_neural_rerank``: a
+      cross-encoder pays for its latency only once the candidate pool is deep
+      (``RERANK_MIN_SIZE``). Below it this returns ``None``.
+    * ENV / availability gate -- delegated to :func:`resolve_reranker` (``OWCOPILOT_RERANKER``
+      in ``auto``/``neural``/``lexical``/``none``; unset defaults to lexical → ``None``, and
+      ``auto`` returns ``None`` when the model library is not importable).
+
+    Returns a :class:`NeuralReranker` only when both gates pass; otherwise ``None`` and the
+    caller keeps :func:`rerank_hits` (the lexical re-scorer)."""
+    from .policy import RetrievalPolicy  # noqa: PLC0415 — lazy: one-way dep, avoid import cycle
+
+    if not RetrievalPolicy.for_corpus(corpus_size).recommends_neural_rerank:
+        return None
+    return resolve_reranker(mode)

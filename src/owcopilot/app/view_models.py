@@ -1,3 +1,4 @@
+# UI 层的视图模型构建器：把领域对象整形成前端要的形状。
 """View-model builders for the UI layer.
 
 These functions import no UI framework: the FastAPI service exposes them to the Vue front-end,
@@ -212,7 +213,7 @@ def build_readiness_report(
     only_incomplete: bool = False,
     kind: str | None = None,
 ) -> dict[str, Any]:
-    """Score every content item against the production-ready standard (规范/标准化的策划管理).
+    """Score every content item against the completeness standard (规范/标准化的策划管理).
 
     Pure read, zero LLM cost. Completeness, not correctness — see the audit for the latter.
 

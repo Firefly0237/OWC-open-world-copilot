@@ -1,3 +1,4 @@
+# 识别用的离线确定性关系 provider（测试/CI）。
 """A deterministic, test/CI-only relation provider so the LLM-assist wiring can run offline.
 
 This is NOT a product mode — like the other offline doubles it is reachable only when the gateway is

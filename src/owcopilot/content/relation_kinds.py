@@ -1,3 +1,4 @@
+# 关系类型的策展目录（可扩展）。
 """A curated, extensible catalog of relationship kinds.
 
 ``Relation.kind`` has always been a free string, so the data model never forced a fixed

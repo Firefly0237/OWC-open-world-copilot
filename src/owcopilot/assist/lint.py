@@ -1,3 +1,4 @@
+# 确定性辅助 lint 检查。
 """Deterministic assist lint checks."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# 补丁包：建议 → 应用 → 回滚。
 """Patch suggestion, application and rollback package."""
 
 from .apply import AppliedPatch, apply_patch_to_store, rollback_patch_in_store

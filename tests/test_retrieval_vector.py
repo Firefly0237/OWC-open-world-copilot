@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
 from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest
 from owcopilot.llm.cache import HashingEmbedder
 from owcopilot.retrieval.embedding import SemanticEmbedder
@@ -85,6 +87,60 @@ def test_vector_retriever_reembeds_only_changed_rows() -> None:
 
         VectorRetriever(store, embedder=embedder)
         assert embedder.embedded == baseline + 1
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------- single/batch encode
+#
+# QueryBundle carrier (single-encode) + encode_queries (batch): a pre-encoded query must produce
+# bit-identical results to passing the raw text, and a batch encode must equal the per-text encodes.
+
+
+def test_query_bundle_search_is_bit_identical_to_text_path() -> None:
+    store = SQLiteStore()
+    try:
+        store.replace_content_index(_aldric_bundle())
+        retriever = VectorRetriever(store)
+
+        from_text = retriever.search("caravan routes")
+        from_bundle = retriever.search(retriever.encode_query("caravan routes"))
+
+        # RetrievalHit is a pydantic model: equality is field-wise (ref/score/order all identical).
+        assert from_bundle == from_text
+    finally:
+        store.close()
+
+
+def test_query_bundle_similarities_is_bit_identical_to_text_path() -> None:
+    store = SQLiteStore()
+    try:
+        store.replace_content_index(_aldric_bundle())
+        retriever = VectorRetriever(store)
+        refs = ["entity:npc_aldric", "quest:quest_siege"]
+
+        from_text = retriever.similarities("caravan routes", refs)
+        from_bundle = retriever.similarities(retriever.encode_query("caravan routes"), refs)
+
+        assert from_bundle == from_text
+    finally:
+        store.close()
+
+
+def test_encode_queries_batch_equals_per_query_encode() -> None:
+    store = SQLiteStore()
+    try:
+        store.replace_content_index(_aldric_bundle())
+        retriever = VectorRetriever(store)
+        texts = ["caravan routes", "siege of the northern wall", "who is Aldric"]
+
+        batch = retriever.encode_queries(texts)
+        singles = [retriever.encode_query(t) for t in texts]
+
+        assert [b.text for b in batch] == texts
+        # HashingEmbedder.embed_many is a per-item loop, so batched == per-query bit-for-bit.
+        for b, s in zip(batch, singles, strict=True):
+            assert np.array_equal(b.embedding, s.embedding)
     finally:
         store.close()
 

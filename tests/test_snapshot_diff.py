@@ -210,9 +210,7 @@ def test_load_snapshot_second_layer_blocks_escape_even_if_first_layer_bypassed(
     # Disable the friendly char layer so only the container assertion can catch the escape.
     # The final path is `<root>/.snapshots/<id>.json`, so an id needs `../../` to truly
     # leave the store root (`../` alone only climbs out of `.snapshots`, still inside root).
-    monkeypatch.setattr(
-        "owcopilot.content.snapshot._validate_id_chars", lambda value, **_: value
-    )
+    monkeypatch.setattr("owcopilot.content.snapshot._validate_id_chars", lambda value, **_: value)
     with pytest.raises(PathSecurityError) as exc:
         load_snapshot(store, "../../outside")
     assert "escapes allowed root" in str(exc.value)  # guided, never silent

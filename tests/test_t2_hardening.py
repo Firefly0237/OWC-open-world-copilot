@@ -2,7 +2,7 @@
 
 Items:
   1. parse_critique empty/missing verdict → parse_ok=False
-  2. gateway.py or→and (token-limit fallback)
+  2. gateway.py or→and (token-limit fallback) — retired with OpenAICompatProvider (T3)
   3. dimension enum whitelist in parse_critique
   4. Term.forbidden/aliases safety (security_rules + term_injection sanitisation)
   5. Injection scan Chinese/English variant patterns
@@ -14,7 +14,7 @@ Items:
 from __future__ import annotations
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -23,9 +23,9 @@ from owcopilot.audit.context import AuditContext
 from owcopilot.audit.rules.security_rules import PromptInjectionRule
 from owcopilot.content.injection import scan_for_injection
 from owcopilot.content.models import ContentBundle, Term
-from owcopilot.core.skills import CostTier, SideEffect, Skill, SkillError, SkillParameter
 from owcopilot.llm.gateway import lesson_injection_enabled
 from owcopilot.llm.telemetry import CallRecord
+from owcopilot.skills import CostTier, SideEffect, Skill, SkillError, SkillParameter
 from owcopilot.storage.sqlite import SQLiteStore
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -74,106 +74,6 @@ class TestParseCritiqueFailClosed:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Item 2: gateway or→and (only testable via the OpenAICompatProvider logic)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestGatewayOrAndFix:
-    def _make_provider(self):
-        """Return an OpenAICompatProvider configured with a fake API key."""
-        from owcopilot.llm.gateway import OpenAICompatProvider
-
-        p = OpenAICompatProvider(model="deepseek-v4-flash")
-        p.api_key = "sk-fake"
-        return p
-
-    def test_max_tokens_only_exception_does_not_raise(self) -> None:
-        """An exception containing only 'max_tokens' (not max_completion_tokens) must
-        trigger the fallback retry path, not re-raise.  The old 'or' logic would raise here.
-        """
-        provider = self._make_provider()
-
-        call_count = 0
-
-        def fake_create(**kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise ValueError("max_tokens value is not supported by this model")
-            # Second call (fallback) succeeds
-            choice = MagicMock()
-            choice.message.content = '{"verdict":"pass"}'
-            usage = MagicMock()
-            usage.prompt_tokens = 10
-            usage.completion_tokens = 5
-            usage.prompt_cache_hit_tokens = 0
-            resp = MagicMock()
-            resp.choices = [choice]
-            resp.usage = usage
-            resp.model = "gpt-current"
-            return resp
-
-        import openai
-
-        with patch.object(openai, "OpenAI") as mock_openai:
-            mock_client = MagicMock()
-            mock_openai.return_value = mock_client
-            mock_client.chat.completions.create.side_effect = fake_create
-            text, _in, _out, _cached, _model = provider.complete(
-                system="s", user="u", model="cheap"
-            )
-        assert call_count == 2
-        assert '{"verdict":"pass"}' in text
-
-    def test_max_completion_tokens_only_exception_does_not_raise(self) -> None:
-        """An exception containing only 'max_completion_tokens' must also fallback, not raise."""
-        provider = self._make_provider()
-
-        call_count = 0
-
-        def fake_create(**kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise ValueError("max_completion_tokens exceeded")
-            choice = MagicMock()
-            choice.message.content = "ok"
-            usage = MagicMock()
-            usage.prompt_tokens = 5
-            usage.completion_tokens = 2
-            usage.prompt_cache_hit_tokens = 0
-            resp = MagicMock()
-            resp.choices = [choice]
-            resp.usage = usage
-            resp.model = "gpt-current"
-            return resp
-
-        import openai
-
-        with patch.object(openai, "OpenAI") as mock_openai:
-            mock_client = MagicMock()
-            mock_openai.return_value = mock_client
-            mock_client.chat.completions.create.side_effect = fake_create
-            text, _in, _out, _cached, _model = provider.complete(
-                system="s", user="u", model="cheap"
-            )
-        assert call_count == 2
-
-    def test_unrelated_exception_still_raises(self) -> None:
-        """A network error (no token keyword) must still propagate."""
-        provider = self._make_provider()
-
-        import openai
-
-        with patch.object(openai, "OpenAI") as mock_openai:
-            mock_client = MagicMock()
-            mock_openai.return_value = mock_client
-            mock_client.chat.completions.create.side_effect = ConnectionError("connection refused")
-            with pytest.raises(ConnectionError, match="connection refused"):
-                provider.complete(system="s", user="u", model="cheap")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Item 3: dimension whitelist in parse_critique
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -190,9 +90,20 @@ class TestDimensionWhitelist:
 
     def test_valid_dimensions_are_preserved(self) -> None:
         """All declared rubric dimensions must pass through unchanged."""
-        valid = ["intent", "grounding", "completeness", "craft", "voice",
-                 "branching", "coherence", "function", "flavor", "style",
-                 "variety", "topic"]
+        valid = [
+            "intent",
+            "grounding",
+            "completeness",
+            "craft",
+            "voice",
+            "branching",
+            "coherence",
+            "function",
+            "flavor",
+            "style",
+            "variety",
+            "topic",
+        ]
         for dim in valid:
             res = parse_critique(
                 f'{{"verdict":"pass","score":0.9,"dimensions":[{{"dimension":"{dim}",'
@@ -215,8 +126,7 @@ class TestDimensionWhitelist:
     def test_dimension_case_normalised(self) -> None:
         """Dimension matching is case-insensitive (LLM may capitalise)."""
         res = parse_critique(
-            '{"verdict":"pass","score":0.9,"dimensions":['
-            '{"dimension":"CRAFT","severity":"ok"}]}'
+            '{"verdict":"pass","score":0.9,"dimensions":[{"dimension":"CRAFT","severity":"ok"}]}'
         )
         assert res.dimensions[0].dimension == "craft"
 

@@ -1,0 +1,124 @@
+{
+  "id": "hl_q1_rufu",
+  "title": "初入荣国府",
+  "giver_npc": null,
+  "location": null,
+  "objective": "黛玉下轿入府，穿堂过院，依次拜见邢夫人、王夫人，处处留心应对进退，而后转往贾母正房。（改编创作，非原文引用）",
+  "prerequisites": [],
+  "timeline_order": 1,
+  "stages": [
+    {
+      "id": "q1n010",
+      "summary": "黛玉下轿，踏入陌生的府门天地",
+      "location": null,
+      "required_entities": ["daiyu"]
+    },
+    {
+      "id": "q1n020",
+      "summary": "在正门与西角门之间，黛玉斟酌进退礼数",
+      "location": null,
+      "required_entities": ["daiyu"]
+    },
+    {
+      "id": "q1n030",
+      "summary": "穿堂过院，一路只见轩昂气象",
+      "location": null,
+      "required_entities": ["daiyu"]
+    },
+    {
+      "id": "q1n040",
+      "summary": "拜见邢夫人，婉辞或应下留饭",
+      "location": null,
+      "required_entities": ["daiyu", "xingfuren"]
+    },
+    {
+      "id": "q1n050",
+      "summary": "拜见王夫人，座次进退见分寸",
+      "location": null,
+      "required_entities": ["daiyu", "wangfuren"]
+    },
+    {
+      "id": "q1n060",
+      "summary": "辞别舅母，转往贾母正房",
+      "location": null,
+      "required_entities": ["daiyu"]
+    }
+  ],
+  "rewards": [],
+  "dialogue_refs": [],
+  "localization_keys": ["quest.hl_q1_rufu.objective"],
+  "tags": ["main", "chapter3", "demo", "q1"],
+  "metadata": {},
+  "origin": "human",
+  "review_status": "approved",
+  "logic": {
+    "variables": [
+      { "id": "etiquette", "name": "礼数得体", "type": "int", "default": 0, "enum_values": [] }
+    ],
+    "precondition": "",
+    "stage_logic": [],
+    "branches": [
+      {
+        "id": "b_q1n020_c1",
+        "from_stage": "q1n020",
+        "condition": "",
+        "to_stage": "q1n030",
+        "outcome": "",
+        "effects": [
+          { "var": "etiquette", "op": "inc", "value": 2 }
+        ]
+      },
+      {
+        "id": "b_q1n020_c2",
+        "from_stage": "q1n020",
+        "condition": "",
+        "to_stage": "q1n030",
+        "outcome": "",
+        "effects": [
+          { "var": "etiquette", "op": "dec", "value": 1 }
+        ]
+      },
+      {
+        "id": "b_q1n040_c1",
+        "from_stage": "q1n040",
+        "condition": "",
+        "to_stage": "q1n050",
+        "outcome": "",
+        "effects": [
+          { "var": "etiquette", "op": "inc", "value": 1 }
+        ]
+      },
+      {
+        "id": "b_q1n040_c2",
+        "from_stage": "q1n040",
+        "condition": "",
+        "to_stage": "q1n050",
+        "outcome": "",
+        "effects": [
+          { "var": "etiquette", "op": "dec", "value": 1 }
+        ]
+      },
+      {
+        "id": "b_q1n050_c1",
+        "from_stage": "q1n050",
+        "condition": "",
+        "to_stage": "q1n060",
+        "outcome": "",
+        "effects": [
+          { "var": "etiquette", "op": "inc", "value": 1 }
+        ]
+      },
+      {
+        "id": "b_q1n050_c2",
+        "from_stage": "q1n050",
+        "condition": "",
+        "to_stage": "q1n060",
+        "outcome": "",
+        "effects": [
+          { "var": "etiquette", "op": "dec", "value": 1 }
+        ]
+      }
+    ],
+    "unlocks": []
+  }
+}

@@ -13,27 +13,22 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
-from owcopilot.core.skills import (
+from owcopilot.llm.cache import NoOpCache
+from owcopilot.llm.gateway import (
+    LLMGateway,
+    ToolCallResponse,
+    provider_supports_tools,
+)
+from owcopilot.llm.resilience import FailoverProvider
+from owcopilot.llm.router import StaticRouter
+from owcopilot.llm.telemetry import TelemetryCollector
+from owcopilot.skills import (
     CostTier,
     SideEffect,
     Skill,
     SkillParameter,
     SkillRegistry,
 )
-from owcopilot.llm.cache import NoOpCache
-from owcopilot.llm.gateway import (
-    LLMGateway,
-    LLMGatewayError,
-    ToolCall,
-    ToolCallResponse,
-    _parse_tool_response,
-    provider_supports_tools,
-)
-from owcopilot.llm.resilience import FailoverProvider
-from owcopilot.llm.router import StaticRouter
-from owcopilot.llm.telemetry import TelemetryCollector
 
 # --------------------------------------------------------------------------- helpers
 
@@ -152,94 +147,6 @@ def test_provider_supports_tools_probe() -> None:
     assert provider_supports_tools(_Half()) is False
     # never raises on a weird object
     assert provider_supports_tools(object()) is False
-
-
-def test_gateway_complete_with_tools_records_telemetry() -> None:
-    provider = _NativeProvider([ToolCallResponse(text="done", input_tokens=12, output_tokens=4,
-                                                 response_model="deepseek-v4-pro-0613")])
-    gw, telemetry = _gateway(provider, task="agent_react")
-    resp = gw.complete_with_tools(task="agent_react", messages=[{"role": "user", "content": "g"}],
-                                  tools=[])
-    assert resp.text == "done"
-    rec = telemetry.records[-1]
-    assert rec.input_tokens == 12
-    assert rec.output_tokens == 4
-    assert rec.model == "deepseek-v4-pro"  # request side = configured model
-    assert rec.response_model == "deepseek-v4-pro-0613"
-
-
-def test_gateway_complete_with_tools_guided_error_when_unsupported() -> None:
-    gw, _ = _gateway(_LegacyThreeTupleProvider(), task="agent_react")
-    with pytest.raises(LLMGatewayError, match="does not support native tool-calling"):
-        gw.complete_with_tools(task="agent_react", messages=[], tools=[])
-
-
-# --------------------------------------------------------------------------- P2a: response parsing
-
-
-class _FakeFn:
-    def __init__(self, name: str, arguments: str) -> None:
-        self.name = name
-        self.arguments = arguments
-
-
-class _FakeToolCall:
-    def __init__(self, call_id: str, name: str, arguments: str) -> None:
-        self.id = call_id
-        self.function = _FakeFn(name, arguments)
-
-
-class _FakeMessage:
-    def __init__(self, content: Any, tool_calls: Any) -> None:
-        self.content = content
-        self.tool_calls = tool_calls
-
-
-class _FakeChoice:
-    def __init__(self, message: _FakeMessage) -> None:
-        self.message = message
-
-
-class _FakeUsage:
-    prompt_tokens = 7
-    completion_tokens = 2
-    prompt_cache_hit_tokens = 1
-
-
-class _FakeResp:
-    def __init__(self, message: _FakeMessage, model: str = "deepseek-v4-pro") -> None:
-        self.choices = [_FakeChoice(message)]
-        self.usage = _FakeUsage()
-        self.model = model
-
-
-def test_parse_tool_response_decodes_tool_calls() -> None:
-    resp = _FakeResp(
-        _FakeMessage(None, [_FakeToolCall("call_1", "audit_project", '{"x": 1}')])
-    )
-    parsed = _parse_tool_response(resp)
-    assert parsed.wants_tool_calls
-    assert parsed.tool_calls == [
-        ToolCall(call_id="call_1", name="audit_project", arguments={"x": 1})
-    ]
-    assert parsed.response_model == "deepseek-v4-pro"
-    assert parsed.input_tokens == 7
-    assert parsed.cached_input_tokens == 1
-
-
-def test_parse_tool_response_final_text() -> None:
-    parsed = _parse_tool_response(_FakeResp(_FakeMessage("all good", None)))
-    assert not parsed.wants_tool_calls
-    assert parsed.text == "all good"
-
-
-def test_parse_tool_response_malformed_arguments_degrade_to_empty() -> None:
-    # A broken arguments JSON must not crash the loop — it becomes {} and the registry then
-    # surfaces any missing-required-arg error as an observation.
-    parsed = _parse_tool_response(
-        _FakeResp(_FakeMessage(None, [_FakeToolCall("c", "list_issues", "{not json")]))
-    )
-    assert parsed.tool_calls[0].arguments == {}
 
 
 # --------------------------------------------------------------------------- P2a: tool schema

@@ -1,3 +1,4 @@
+# 世界分析：给作者的确定性生产力仪表盘。
 """WS-H · world analytics: a deterministic productivity dashboard for the writer.
 
 Counts, relationship density, under-developed factions, content gaps, and readiness coverage —

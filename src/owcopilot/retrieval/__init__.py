@@ -1,3 +1,4 @@
+# 检索包：把 BM25/向量/图/GraphRAG 融成一份 context pack。
 """Retrieval package for BM25/vector/graph context packs."""
 
 from .bm25 import BM25Retriever

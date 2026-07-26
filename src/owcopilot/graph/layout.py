@@ -1,3 +1,4 @@
+# 确定性图布局。
 """Deterministic graph layouts.
 
 The frontend has no graph library — it renders bare SVG from coordinates we compute here. Computing

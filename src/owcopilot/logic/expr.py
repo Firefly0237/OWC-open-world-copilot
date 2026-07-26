@@ -1,3 +1,5 @@
+# 任务逻辑用的小型安全布尔表达式语言：词法 + 递归下降解析。
+# 安全=不用 eval，自己解析求值，杜绝任意代码执行。
 """A small, safe boolean expression language for quest logic — tokenize + recursive-descent parse
 into an AST. NO ``eval``/``exec``: expressions are data, evaluated explicitly (see semantics.py), so
 a malformed or adversarial expression can only ever raise ``LogicSyntaxError``, never execute.
@@ -17,8 +19,10 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ..errors import OWCopilotError
 
-class LogicSyntaxError(ValueError):
+
+class LogicSyntaxError(OWCopilotError, ValueError):
     """Raised when an expression cannot be parsed. Never raised from evaluation of a parsed tree."""
 
 

@@ -1,3 +1,4 @@
+# 实体锚定的图扩展检索：从命中实体沿关系图扩邻域，补词法/向量漏掉的结构关联。
 """Entity-anchored graph expansion retriever."""
 
 from __future__ import annotations

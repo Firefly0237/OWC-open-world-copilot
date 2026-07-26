@@ -38,8 +38,7 @@ def test_estimate_tokens_bge_m3_accurate_when_available() -> None:
         expected = max(1, len(tok.encode(text, add_special_tokens=False)))
         actual = estimate_tokens(text)
         assert actual == expected, (
-            f"estimate_tokens({text!r}) = {actual}, "
-            f"but AutoTokenizer gives {expected}"
+            f"estimate_tokens({text!r}) = {actual}, but AutoTokenizer gives {expected}"
         )
 
 
@@ -49,6 +48,7 @@ def test_estimate_tokens_fallback_emits_warning_when_no_tokenizer(monkeypatch) -
 
     monkeypatch.setattr(budget_mod, "_FALLBACK_WARNED", False)
     monkeypatch.setattr(budget_mod._load_tokenizer, "cache_clear", lambda: None, raising=False)
+
     # Patch _load_tokenizer to return None to simulate missing transformers
     def patched_load():
         return None

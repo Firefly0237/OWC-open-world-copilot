@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 48" fill="none" stroke="currentColor">
+  <!-- 书签订（章节索引收起态）：切角顶 + 燕尾底 + 中脊线 -->
+  <path d="M5 2h22l3 3v35l-14 6-14-6V5z" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M16 6v30" stroke-width="0.75" opacity="0.55"/>
+  <path d="M16 12l2.4 3-2.4 3-2.4-3z" fill="currentColor" stroke="none"/>
+</svg>

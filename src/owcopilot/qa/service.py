@@ -1,6 +1,10 @@
+# Lore 问答服务：检索→作答→带引用/拒答；忠实性校验挂在后面。
 """Lore QA service."""
 
 from __future__ import annotations
+
+import os
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -9,8 +13,21 @@ from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json, extract_json_object
 from ..retrieval.context_pack import ContextPackBuilder
 from ..retrieval.models import ContextPack
-from .models import QAAnswer
+from .faithfulness import FaithfulnessJudge, judge_qa_faithfulness
+from .models import QAAnswer, QAFaithfulness
+from .offline_entailment import OfflineEntailmentJudge
 from .verify import verify_qa_answer
+
+#: Env var backstop for the faithfulness gate; a constructor argument always wins over it.
+QA_FAITHFULNESS_ENV = "OWCOPILOT_QA_FAITHFULNESS"
+_FAITHFULNESS_MODES = ("off", "offline", "llm")
+#: Default gate threshold — matches the acceptance gate, which fails an answer at faithfulness < 1.0
+#: (any unsupported claim trips it). Overridable per service via ``faithfulness_threshold``.
+_DEFAULT_FAITHFULNESS_THRESHOLD = 1.0
+_FAITHFULNESS_UNAVAILABLE_NOTE = (
+    "未能进行忠实性（蕴含级）校验：当前没有可用的模型判官（llm 模式需先接入模型 provider）。"
+    "答案已给出但未经蕴含校验，请人工核对。"
+)
 
 # Sentinel marking a query-expansion call so the deterministic offline provider returns no
 # variants (a no-op); real models use it to widen recall for phrasing-sensitive questions.
@@ -30,19 +47,44 @@ class LoreQAService:
         context_builder: ContextPackBuilder,
         bundle: ContentBundle,
         expand: bool = False,
+        agentic: bool = False,
+        faithfulness: str | None = None,
+        faithfulness_threshold: float | None = None,
     ) -> None:
         self.gateway = gateway
         self.context_builder = context_builder
         self.bundle = bundle
         self.expand = expand
+        # Opt-in agentic retrieval: a bounded retrieve→assess→re-query loop for multi-hop
+        # questions (retrieval/agentic.py). Off by default — single-pass behaviour unchanged.
+        self.agentic = agentic
+        # Opt-in, layered, default-off faithfulness (entailment) gate. ``off`` (default) leaves the
+        # answer path byte-for-byte unchanged; ``offline`` uses the deterministic $0 lexical judge;
+        # ``llm`` uses this service's gateway as a live judge. A constructor argument wins over the
+        # OWCOPILOT_QA_FAITHFULNESS env backstop. This annotates the answer — it never blocks it.
+        self.faithfulness_mode = _resolve_faithfulness_mode(faithfulness)
+        self.faithfulness_threshold = (
+            _DEFAULT_FAITHFULNESS_THRESHOLD
+            if faithfulness_threshold is None
+            else faithfulness_threshold
+        )
 
     def ask(self, query: str, *, budget_tokens: int = 800) -> QAAnswer:
-        variants = self._expand_query(query) if self.expand else []
-        pack = (
-            self.context_builder.build_expanded(query, variants, budget_tokens=budget_tokens)
-            if variants
-            else self.context_builder.build(query, budget_tokens=budget_tokens)
-        )
+        if self.agentic:
+            from ..retrieval.agentic import AgenticRetriever  # noqa: PLC0415 — opt-in path
+
+            pack = (
+                AgenticRetriever(self.context_builder, gateway=self.gateway)
+                .retrieve(query, budget_tokens=budget_tokens)
+                .pack
+            )
+        else:
+            variants = self._expand_query(query) if self.expand else []
+            pack = (
+                self.context_builder.build_expanded(query, variants, budget_tokens=budget_tokens)
+                if variants
+                else self.context_builder.build(query, budget_tokens=budget_tokens)
+            )
         if not pack.hits:
             return refusal_answer(
                 query,
@@ -83,7 +125,68 @@ class LoreQAService:
                 had_context=True,
                 verification_errors=verification.errors,
             )
-        return answer.model_copy(update={"grounded": True, "verification_errors": []})
+        # Citation-existence grounding passed; layer the opt-in entailment annotation on top. It is
+        # a signal only — it never flips ``grounded`` or converts the answer into a refusal.
+        faithfulness = self._faithfulness_annotation(answer, pack)
+        return answer.model_copy(
+            update={
+                "grounded": True,
+                "verification_errors": [],
+                "faithfulness": faithfulness,
+            }
+        )
+
+    def _faithfulness_annotation(
+        self, answer: QAAnswer, pack: ContextPack
+    ) -> QAFaithfulness | None:
+        """Run the opt-in faithfulness gate over a grounded answer; ``None`` when the gate is off.
+
+        ``offline`` always evaluates via the deterministic lexical judge. ``llm`` uses this
+        service's gateway; when that gateway has no usable provider, ``judge_qa_faithfulness``
+        skips and this reports ``judge="unavailable"`` rather than inventing a passing score.
+        """
+        if self.faithfulness_mode == "off":
+            return None
+        judge = self._faithfulness_judge()
+        result = judge_qa_faithfulness(answer, pack=pack, judge=judge)
+        return self._build_faithfulness(result)
+
+    def _faithfulness_judge(self) -> FaithfulnessJudge | None:
+        if self.faithfulness_mode == "offline":
+            return OfflineEntailmentJudge()
+        if self.faithfulness_mode == "llm":
+            return self.gateway
+        return None
+
+    def _build_faithfulness(self, result: dict[str, Any]) -> QAFaithfulness:
+        threshold = self.faithfulness_threshold
+        if result.get("skipped"):
+            # llm mode requested but no usable model judge — an honest non-verification, not a pass.
+            return QAFaithfulness(
+                judge="unavailable",
+                ok=False,
+                score=None,
+                threshold=threshold,
+                unsupported_claims=[],
+                note=_FAITHFULNESS_UNAVAILABLE_NOTE,
+            )
+        score = float(result.get("faithfulness", 0.0))
+        unsupported = [
+            claim
+            for item in result.get("unsupported", [])
+            if (claim := str(item.get("claim", "")).strip())
+        ]
+        ok = score >= threshold
+        return QAFaithfulness(
+            judge=self.faithfulness_mode,
+            ok=ok,
+            score=score,
+            threshold=threshold,
+            unsupported_claims=unsupported,
+            note=_faithfulness_note(
+                ok=ok, score=score, threshold=threshold, unsupported=unsupported
+            ),
+        )
 
     def _expand_query(self, query: str) -> list[str]:
         """Best-effort alternate phrasings to widen recall; failure just means no expansion.
@@ -101,6 +204,35 @@ class LoreQAService:
         return variants[:3]
 
 
+def _resolve_faithfulness_mode(explicit: str | None) -> str:
+    """Resolve the gate mode: explicit constructor argument wins, else the env backstop, else off.
+
+    Raises ``ValueError`` on an unknown value rather than silently defaulting to ``off`` — a typo'd
+    ``llm`` must surface, not quietly disable the gate the caller asked for.
+    """
+    raw = explicit if explicit is not None else os.getenv(QA_FAITHFULNESS_ENV, "off")
+    mode = raw.strip().lower()
+    if mode not in _FAITHFULNESS_MODES:
+        raise ValueError(
+            f"未知的忠实性校验模式 {raw!r}；可选值为 off / offline / llm"
+            f"（构造参数 faithfulness=... 或环境变量 {QA_FAITHFULNESS_ENV}）。"
+        )
+    return mode
+
+
+def _faithfulness_note(*, ok: bool, score: float, threshold: float, unsupported: list[str]) -> str:
+    if ok:
+        return f"忠实性校验通过：答案的全部论断均可由检索到的证据支持（faithfulness={score:.2f}）。"
+    joined = "；".join(unsupported) if unsupported else "（未能定位到具体论断）"
+    return (
+        f"忠实性校验未通过（faithfulness={score:.2f} < 阈值 {threshold:.2f}）："
+        f"以下论断未被检索到的证据支持，建议人工核对：{joined}。"
+    )
+
+
+# Kept off complete_structured: a text→answer alias coercion feeds a real model shape drift into the
+# single model, and the caller (``ask``) turns any parse/validation failure into a designed refusal
+# ("no source, no answer"), not a raise — both are load-bearing QA-contract behaviour.
 def parse_qa_answer(raw: str) -> QAAnswer:
     """Parse the model's answer JSON, tolerating markdown fences and surrounding prose.
 

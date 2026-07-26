@@ -10,7 +10,10 @@ Covers hard acceptance criteria:
 
 from __future__ import annotations
 
+import re
+
 from owcopilot.audit.context import AuditContext
+from owcopilot.audit.models import Issue
 from owcopilot.audit.rules.quest_reachability import QuestGlobalReachabilityRule
 from owcopilot.content.models import (
     ContentBundle,
@@ -23,8 +26,37 @@ from owcopilot.content.models import (
 )
 
 # ---------------------------------------------------------------------------
+# 可执行报告改造：消息中文化 + 建议动作实例化的验收（§15.9 六要素里的"原因"与"建议动作"）。
+# ---------------------------------------------------------------------------
+
+_CJK = re.compile(r"[一-鿿]")
+# 规则实现里真实用到的英文技术描述片段，策划面对的文本里不该出现这些代码/表达式黑话。
+_BANNED_IDENTIFIERS = [
+    "target_ref",
+    "quest_id",
+    "blocking_atom",
+    "is not globally reachable",
+    "permanently false",
+    "can never be true",
+    "reachable states",
+]
+
+
+def _assert_actionable(issue: Issue, *expected_values: str) -> None:
+    """消息是中文、建议含具体字段名或值、两处都不含代码标识符 —— 三条机械检查。"""
+    assert _CJK.search(issue.message), issue.message
+    assert issue.suggested_action, "建议动作不能为空"
+    assert _CJK.search(issue.suggested_action), issue.suggested_action
+    for banned in _BANNED_IDENTIFIERS:
+        assert banned not in issue.message, f"消息里混进了代码标识符 {banned!r}"
+        assert banned not in issue.suggested_action, f"建议动作里混进了代码标识符 {banned!r}"
+    for value in expected_values:
+        assert value in issue.suggested_action, f"建议动作里没有具体值 {value!r}"
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _bool_var(var_id: str, *, default: bool = False) -> LogicVar:
     return LogicVar(id=var_id, name=var_id, type=LogicVarType.BOOL, default=default)
@@ -79,6 +111,7 @@ def _rule_issues(ctx: AuditContext) -> list:
 # 干净世界: zero false positives
 # ---------------------------------------------------------------------------
 
+
 def test_clean_single_quest_no_issues() -> None:
     """[硬] Single quest with no prerequisites -> no issues."""
     ctx = _make_ctx([_make_quest("q1")])
@@ -88,23 +121,27 @@ def test_clean_single_quest_no_issues() -> None:
 
 def test_clean_linear_chain_no_issues() -> None:
     """[硬] Linear q1->q2->q3 (each requires prev) -> all reachable, no issues."""
-    ctx = _make_ctx([
-        _make_quest("q1"),
-        _make_quest("q2", prerequisites=["q1"]),
-        _make_quest("q3", prerequisites=["q2"]),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest("q1"),
+            _make_quest("q2", prerequisites=["q1"]),
+            _make_quest("q3", prerequisites=["q2"]),
+        ]
+    )
     issues = _rule_issues(ctx)
     assert issues == []
 
 
 def test_clean_diamond_chain_no_issues() -> None:
     """[硬] Diamond: q1 unlocks q2 and q3, q4 requires both. All reachable, no issues."""
-    ctx = _make_ctx([
-        _make_quest("q1"),
-        _make_quest("q2", prerequisites=["q1"]),
-        _make_quest("q3", prerequisites=["q1"]),
-        _make_quest("q4", prerequisites=["q2", "q3"]),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest("q1"),
+            _make_quest("q2", prerequisites=["q1"]),
+            _make_quest("q3", prerequisites=["q1"]),
+            _make_quest("q4", prerequisites=["q2", "q3"]),
+        ]
+    )
     issues = _rule_issues(ctx)
     assert issues == []
 
@@ -123,31 +160,35 @@ def test_clean_precondition_satisfiable_by_default() -> None:
     """
     # q1 sets bool var "hero_flag" to true on complete.
     # q2 requires precondition "hero_flag == true"
-    ctx = _make_ctx([
-        _make_quest(
-            "q1",
-            variables=[_bool_var("hero_flag")],
-            effects_on_complete=[Effect(var="hero_flag", op="set", value=True)],
-        ),
-        _make_quest(
-            "q2",
-            prerequisites=["q1"],
-            precondition="hero_flag == true",
-        ),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_bool_var("hero_flag")],
+                effects_on_complete=[Effect(var="hero_flag", op="set", value=True)],
+            ),
+            _make_quest(
+                "q2",
+                prerequisites=["q1"],
+                precondition="hero_flag == true",
+            ),
+        ]
+    )
     issues = _rule_issues(ctx)
     assert issues == []
 
 
 def test_clean_precondition_known_var_but_satisfiable() -> None:
     """[硬 保守性] Variable that CAN be true (seeded as True initially) -> no issue."""
-    ctx = _make_ctx([
-        _make_quest(
-            "q1",
-            variables=[_bool_var("already_true", default=True)],
-            precondition="already_true == true",  # satisfiable: default is True
-        ),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_bool_var("already_true", default=True)],
+                precondition="already_true == true",  # satisfiable: default is True
+            ),
+        ]
+    )
     issues = _rule_issues(ctx)
     assert issues == []
 
@@ -155,18 +196,22 @@ def test_clean_precondition_known_var_but_satisfiable() -> None:
 def test_clean_complex_precondition_not_flagged_when_uncertain() -> None:
     """[硬 保守性] Partial OR conditions -> conservative, no false positive."""
     # (a == True) or (b == True): even if a is permanently false, b might be true
-    ctx = _make_ctx([
-        _make_quest("q1", precondition="(a == True) or (b == True)"),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest("q1", precondition="(a == True) or (b == True)"),
+        ]
+    )
     issues = _rule_issues(ctx)
     assert issues == []
 
 
 def test_clean_parse_error_in_precondition_not_flagged() -> None:
     """[硬 保守性] Precondition parse error -> no issue (conservative)."""
-    ctx = _make_ctx([
-        _make_quest("q1", precondition="{{invalid syntax here}}"),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest("q1", precondition="{{invalid syntax here}}"),
+        ]
+    )
     issues = _rule_issues(ctx)
     assert issues == []
 
@@ -175,13 +220,16 @@ def test_clean_parse_error_in_precondition_not_flagged() -> None:
 # 断裂种子世界: real issues reported
 # ---------------------------------------------------------------------------
 
+
 def test_broken_missing_prerequisite_reported() -> None:
     """[硬] Quest requires a non-existent (unreachable) prerequisite -> issue reported."""
     # q2 requires q_nonexistent (which doesn't exist in bundle)
-    ctx = _make_ctx([
-        _make_quest("q1"),
-        _make_quest("q2", prerequisites=["q_nonexistent"]),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest("q1"),
+            _make_quest("q2", prerequisites=["q_nonexistent"]),
+        ]
+    )
     issues = _rule_issues(ctx)
     issue_targets = [i.target_ref for i in issues]
     assert "quest:q2" in issue_targets
@@ -192,14 +240,16 @@ def test_broken_unreachable_prerequisite_chain() -> None:
     # q1 has precondition "never_set == true" but this var never gets set to true
     # q1 itself is entry-level with a bool var whose default is False, never changed
     # Resulting in q1 unreachable, q2 (which requires q1) also unreachable
-    ctx = _make_ctx([
-        _make_quest(
-            "q1",
-            variables=[_bool_var("never_set")],
-            precondition="never_set == true",  # lowercase true = BoolLit(True)
-        ),
-        _make_quest("q2", prerequisites=["q1"]),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_bool_var("never_set")],
+                precondition="never_set == true",  # lowercase true = BoolLit(True)
+            ),
+            _make_quest("q2", prerequisites=["q1"]),
+        ]
+    )
     issues = _rule_issues(ctx)
     # At least one issue for q1 or q2
     assert len(issues) >= 1
@@ -213,13 +263,15 @@ def test_broken_permanently_false_bool_precondition() -> None:
 
     The logic parser uses lowercase 'true'/'false' literals (not Python's True/False).
     """
-    ctx = _make_ctx([
-        _make_quest(
-            "q1",
-            variables=[_bool_var("flag_x")],
-            precondition="flag_x == true",  # lowercase 'true' = BoolLit(True) in parser
-        ),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_bool_var("flag_x")],
+                precondition="flag_x == true",  # lowercase 'true' = BoolLit(True) in parser
+            ),
+        ]
+    )
     issues = _rule_issues(ctx)
     assert len(issues) >= 1
     assert issues[0].rule_code == "QUEST_GLOBAL_UNREACHABLE"
@@ -228,13 +280,15 @@ def test_broken_permanently_false_bool_precondition() -> None:
 
 def test_broken_blocking_atom_in_evidence() -> None:
     """[硬] Evidence contains quest_id and blocking_atom."""
-    ctx = _make_ctx([
-        _make_quest(
-            "q1",
-            variables=[_bool_var("bad_flag")],
-            precondition="bad_flag == true",  # lowercase true = BoolLit(True)
-        ),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_bool_var("bad_flag")],
+                precondition="bad_flag == true",  # lowercase true = BoolLit(True)
+            ),
+        ]
+    )
     issues = _rule_issues(ctx)
     assert len(issues) >= 1
     issue = issues[0]
@@ -249,42 +303,48 @@ def test_broken_blocking_atom_in_evidence() -> None:
 # Multi-hop fixpoint propagation
 # ---------------------------------------------------------------------------
 
+
 def test_fixpoint_propagation_3hops() -> None:
     """[软] 3-hop chain with variable effects propagates correctly."""
     # q1: sets "stage1_done" = True
     # q2: requires q1 AND precondition "stage1_done == true"
     # q3: requires q2
-    ctx = _make_ctx([
-        _make_quest(
-            "q1",
-            variables=[_bool_var("stage1_done")],
-            effects_on_complete=[Effect(var="stage1_done", op="set", value=True)],
-        ),
-        _make_quest(
-            "q2",
-            prerequisites=["q1"],
-            precondition="stage1_done == true",  # lowercase true = BoolLit(True)
-        ),
-        _make_quest("q3", prerequisites=["q2"]),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_bool_var("stage1_done")],
+                effects_on_complete=[Effect(var="stage1_done", op="set", value=True)],
+            ),
+            _make_quest(
+                "q2",
+                prerequisites=["q1"],
+                precondition="stage1_done == true",  # lowercase true = BoolLit(True)
+            ),
+            _make_quest("q3", prerequisites=["q2"]),
+        ]
+    )
     issues = _rule_issues(ctx)
     assert issues == []
 
 
 def test_fixpoint_incremented_numeric_is_conservative() -> None:
     """[硬 保守性] Numeric variable after inc is marked _MULTI (can be anything) -> no false pos."""
-    ctx = _make_ctx([
-        _make_quest(
-            "q1",
-            variables=[_int_var("counter")],
-            effects_on_complete=[Effect(var="counter", op="inc")],
-        ),
-        _make_quest(
-            "q2",
-            prerequisites=["q1"],
-            precondition="counter == 5",  # counter is _MULTI after inc -> conservative, satisfiable
-        ),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_int_var("counter")],
+                effects_on_complete=[Effect(var="counter", op="inc")],
+            ),
+            _make_quest(
+                "q2",
+                prerequisites=["q1"],
+                # counter is _MULTI after inc -> conservative, satisfiable
+                precondition="counter == 5",
+            ),
+        ]
+    )
     issues = _rule_issues(ctx)
     assert issues == []
 
@@ -293,16 +353,20 @@ def test_fixpoint_incremented_numeric_is_conservative() -> None:
 # Rule code and severity
 # ---------------------------------------------------------------------------
 
+
 def test_rule_code_and_severity() -> None:
     """Rule emits QUEST_GLOBAL_UNREACHABLE with WARNING severity."""
     from owcopilot.audit.models import Severity
-    ctx = _make_ctx([
-        _make_quest(
-            "q1",
-            variables=[_bool_var("x")],
-            precondition="x == true",  # lowercase true = BoolLit(True)
-        ),
-    ])
+
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_bool_var("x")],
+                precondition="x == true",  # lowercase true = BoolLit(True)
+            ),
+        ]
+    )
     issues = _rule_issues(ctx)
     assert len(issues) >= 1
     assert issues[0].rule_code == "QUEST_GLOBAL_UNREACHABLE"
@@ -313,6 +377,7 @@ def test_rule_code_and_severity() -> None:
 # Non-overlap: cycles vs reachability are orthogonal
 # ---------------------------------------------------------------------------
 
+
 def test_reachable_cyclic_quests_not_flagged() -> None:
     """[硬] Quests in a cycle that are still reachable (entry points) are NOT flagged here.
 
@@ -322,27 +387,119 @@ def test_reachable_cyclic_quests_not_flagged() -> None:
     """
     # q1 has no prerequisites -> reachable entry point
     # q2 requires q1; q1 and q2 form no cycle, both reachable
-    ctx = _make_ctx([
-        _make_quest("q1"),
-        _make_quest("q2", prerequisites=["q1"]),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest("q1"),
+            _make_quest("q2", prerequisites=["q1"]),
+        ]
+    )
     issues = _rule_issues(ctx)
     assert issues == []
 
 
 def test_unreachable_but_not_cyclic() -> None:
     """[软] An orphaned quest (no prereqs, just a permanently-false precondition) is detected."""
-    ctx = _make_ctx([
-        _make_quest("q1"),  # reachable entry
-        _make_quest(
-            "q_orphan",
-            # No prerequisites, but precondition is permanently false
-            variables=[_bool_var("impossible")],
-            precondition="impossible == true",  # lowercase true = BoolLit(True)
-        ),
-    ])
+    ctx = _make_ctx(
+        [
+            _make_quest("q1"),  # reachable entry
+            _make_quest(
+                "q_orphan",
+                # No prerequisites, but precondition is permanently false
+                variables=[_bool_var("impossible")],
+                precondition="impossible == true",  # lowercase true = BoolLit(True)
+            ),
+        ]
+    )
     issues = _rule_issues(ctx)
     targets = [i.target_ref for i in issues]
     assert "quest:q_orphan" in targets
     # q1 should NOT be flagged
     assert "quest:q1" not in targets
+
+
+# ---------------------------------------------------------------------------
+# 消息中文化 + 建议动作实例化
+# ---------------------------------------------------------------------------
+
+
+def test_missing_prerequisite_message_and_suggestion_are_actionable() -> None:
+    """[硬] 前置任务本身达不成：消息与建议都要点名具体的任务 id。"""
+    ctx = _make_ctx(
+        [
+            _make_quest("q1"),
+            _make_quest("q2", prerequisites=["q_nonexistent"]),
+        ]
+    )
+    issue = next(i for i in _rule_issues(ctx) if i.target_ref == "quest:q2")
+    _assert_actionable(issue, "q_nonexistent", "q2")
+
+
+def test_permanently_false_bool_precondition_message_and_suggestion_are_actionable() -> None:
+    """[硬] 布尔变量永远达不到 true：消息与建议要点名具体的变量名和任务 id。"""
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_bool_var("flag_x")],
+                precondition="flag_x == true",
+            ),
+        ]
+    )
+    issues = _rule_issues(ctx)
+    assert len(issues) == 1
+    issue = issues[0]
+    _assert_actionable(issue, "flag_x", "q1")
+    assert "flag_x == true" in issue.message  # 原样引用触发条件，方便策划对照文件核实
+
+
+def test_permanently_false_int_compare_precondition_message_and_suggestion() -> None:
+    """[硬] 数值变量永远取不到目标值：消息与建议要点名具体的目标值。"""
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_int_var("score")],  # default 0，从未被任何效果改动
+                precondition="score == 5",
+            ),
+        ]
+    )
+    issues = _rule_issues(ctx)
+    assert len(issues) == 1
+    issue = issues[0]
+    _assert_actionable(issue, "score", "5")
+
+
+def test_permanently_true_not_precondition_message_and_suggestion() -> None:
+    """[硬] not(恒真变量) 永远为假：消息要说清是内层恒真导致取反恒假。"""
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_bool_var("always_true", default=True)],
+                precondition="not (always_true)",
+            ),
+        ]
+    )
+    issues = _rule_issues(ctx)
+    assert len(issues) == 1
+    issue = issues[0]
+    _assert_actionable(issue, "always_true")
+    assert "恒为真" in issue.message
+
+
+def test_or_both_branches_false_precondition_message_and_suggestion() -> None:
+    """[硬] or 的两个分支都永远不成立才报告；消息与建议要覆盖两个分支各自的原因。"""
+    ctx = _make_ctx(
+        [
+            _make_quest(
+                "q1",
+                variables=[_bool_var("bad1"), _bool_var("bad2")],
+                precondition="(bad1 == true) or (bad2 == true)",
+            ),
+        ]
+    )
+    issues = _rule_issues(ctx)
+    assert len(issues) == 1
+    issue = issues[0]
+    _assert_actionable(issue, "bad1", "bad2")
+    assert "两个分支都恒为假" in issue.message

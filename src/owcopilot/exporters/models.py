@@ -9,9 +9,16 @@ from pydantic import BaseModel, Field
 
 
 class EngineTarget(str, Enum):
-    # An engine-agnostic data + localization handoff (content_bundle.json + XLIFF/CSV), not a
-    # per-engine code generator — GENERIC is the only target. Kept as an enum for the manifest.
+    # GENERIC = the engine-agnostic data + localization handoff (content_bundle.json + XLIFF/CSV).
+    # UNREAL additionally emits UE DataTable row-array JSON + StringTable CSVs + a row-struct header
+    # under an ``unreal/`` subdir (a superset of GENERIC — the generic bundle is still written).
+    # UNITY additionally emits ``unity/unity_import_manifest.json`` (bundle-relative path + per-
+    # category content counts + schema version), also a superset of GENERIC: the
+    # com.owcopilot.content-import UPM importer reads the SAME generic content_bundle.json, and the
+    # sidecar manifest is what that importer and a human reviewer cross-check the import against.
     GENERIC = "generic"
+    UNREAL = "unreal"
+    UNITY = "unity"
 
 
 class ExportedFile(BaseModel):

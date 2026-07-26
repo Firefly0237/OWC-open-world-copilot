@@ -25,7 +25,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install -e ".[serve,dev,redis,app]"
+        # 'app' is not a real extra in pyproject.toml (no [project.optional-dependencies].app);
+        # the release gate needs the same "deployable API + dev tooling" combo CI uses, plus redis.
+        run: pip install -e ".[serve,dev,redis]"
       - name: Lint
         run: |
           ruff check .

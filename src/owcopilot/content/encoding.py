@@ -1,3 +1,4 @@
+# 导入文件的容错字节解码。
 """Tolerant byte decoding for imported files.
 
 Planners hand us files saved by whatever tool they use: a UTF-8 manuscript, a BOM-prefixed
@@ -29,8 +30,8 @@ _DECODE_LADDER = ("utf-8-sig", "utf-8", "gb18030", "cp1252")
 _BOM_MAP: tuple[tuple[bytes, str], ...] = (
     (b"\xff\xfe\x00\x00", "utf-32-le"),  # must come before utf-16 LE (4-byte prefix)
     (b"\x00\x00\xfe\xff", "utf-32-be"),
-    (b"\xff\xfe", "utf-16"),   # utf-16 auto-strips BOM; covers both LE (0xff 0xfe)
-    (b"\xfe\xff", "utf-16"),   # and BE (0xfe 0xff)
+    (b"\xff\xfe", "utf-16"),  # utf-16 auto-strips BOM; covers both LE (0xff 0xfe)
+    (b"\xfe\xff", "utf-16"),  # and BE (0xfe 0xff)
     (b"\xef\xbb\xbf", "utf-8-sig"),  # handled by ladder, listed here for completeness
 )
 

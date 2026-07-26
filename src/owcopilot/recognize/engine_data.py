@@ -1,3 +1,4 @@
+# 从引擎数据识别实体 + 关系：UE DataTable / Unity ScriptableObject JSON。
 """Recognize entities + relations from engine data: UE DataTable / Unity ScriptableObject JSON.
 
 Both are "tables of structs/assets", so the core is the same value-domain foreign-key idea as the

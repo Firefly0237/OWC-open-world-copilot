@@ -1,3 +1,4 @@
+# 人可编辑的识别结果：落库前给人修订的清晰中间格式。
 """The human-editable recognition result — the *clear format* a person revises before it lands.
 
 A recognition run over a foreign game-project file (a spreadsheet, an articy export, …) produces an
@@ -40,6 +41,11 @@ class ProposedRelation(BaseModel):
     target: str  # entity id
     kind: str
     evidence: str = ""  # the source text span (LLM) or structural origin (deterministic)
+    # A boolean guard on this edge, already translated into the logic DSL (logic/expr.py). Empty =
+    # unconditional (the default, so every non-guarded relation serializes exactly as before). An
+    # ink choice guard that the DSL cannot express is NOT silently coerced here: it is left empty
+    # and its raw source is surfaced as a warning, so nothing is lost.
+    condition: str = ""
     source_ref: SourceRef | None = None
     confidence: float = 1.0
     method: Method = "deterministic"

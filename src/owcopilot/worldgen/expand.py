@@ -1,3 +1,4 @@
+# 世界扩展：在现有世界上长出更多接地内容（引用既有 canon，不另起炉灶）。
 """World EXPANSION: grow more grounded content on an EXISTING world.
 
 A single creation is a *seed* — a dozen entities, a handful of quests. To reach the volume a
@@ -51,6 +52,7 @@ from .critic import (
     run_quest_refine_loop,
 )
 from .models import (
+    ConversionReport,
     DensitySignal,
     ExpandGrounding,
     WorldExpandBrief,
@@ -208,7 +210,7 @@ class WorldExpandService:
             "world_expand_"
             + hashlib.sha256(f"{brief.focus_ref}\n{serialized}".encode()).hexdigest()[:12]
         )
-        bundle, grounding = _expand_bundle_from_payload(
+        bundle, grounding, conversion_report = _expand_bundle_from_payload(
             payload,
             draft_id=draft_id,
             brief=brief,
@@ -231,6 +233,7 @@ class WorldExpandService:
             inspiration_context_refs=inspiration_pack.refs,
             refine_trail=outcome.trail,
             auto_review_incomplete=outcome.auto_review_incomplete,
+            conversion_report=conversion_report,
         )
 
     def _stage(self, stage: str, system: str, user: str) -> dict[str, Any]:
@@ -614,13 +617,24 @@ def _expand_bundle_from_payload(
     existing: ContentBundle,
     inspiration_pack: ContextPack,
     project_pack: ContextPack,
-) -> tuple[ContentBundle, ExpandGrounding]:
+) -> tuple[ContentBundle, ExpandGrounding, ConversionReport]:
     """Normalise the new-content payload into a bundle of ONLY new objects, wiring their references
-    to canon ∪ this-batch ids. Like creation's normaliser the assembled bundle is always buildable
-    (a reference that fails to resolve falls back to the focus anchor / a new sibling), but the
-    *grounding ledger* is measured on the raw payload — the honest count of how many references the
-    model actually pointed at a real id, and which ones dangled."""
+    to canon ∪ this-batch ids. A dangling reference (non-empty, resolves to nothing real) is kept
+    VERBATIM rather than rescued onto a real sibling — same stance as genesis's ``_grounded_ref``
+    (worldgen/service.py): the deterministic reference audit (UNKNOWN_ENTITY_REF /
+    MISSING_RELATION_ENDPOINT) is the arbiter, not a silent guess. A blank/omitted reference is
+    different — that is not a wrong guess, just silence — so it is still auto-anchored to the focus
+    (or a new sibling) to keep the bundle buildable; either way the *grounding ledger*
+    (``ExpandGrounding``) is measured on the raw payload — the honest count of how many references
+    the model actually pointed at a real id, which ones dangled, and which were left blank.
+
+    The returned :class:`ConversionReport` mirrors genesis's normalisation ledger for the ONE other
+    silent-completion this assembly does: a quest with no ``stages`` has one derived from its own
+    ``objective`` (never a preset placeholder beat) — recorded via ``record_derived_stage`` so the
+    reviewer knows the arc is a single content-derived beat, not a model-authored multi-stage plan.
+    """
     bundle = ContentBundle()
+    conversion_report = ConversionReport()
     id_map: dict[str, str] = {}
     canon = _canon_id_sets(existing)
     used_entities = set(existing.entities) | set(existing.pois) | set(existing.regions)
@@ -750,7 +764,13 @@ def _expand_bundle_from_payload(
         )
         title = str(raw.get("title") or raw.get("name") or quest_id)
         objective = str(raw.get("objective") or raw.get("description") or title)
-        raw_stages = _list(raw.get("stages")) or [objective]
+        # When the model omits stages, derive ONE stage from the quest's own objective — never a
+        # preset placeholder beat. Recorded (not silent) so the reviewer knows the arc is a single
+        # content-derived beat, mirroring genesis's identical derivation in _bundle_from_payload.
+        raw_stage_items = _list(raw.get("stages"))
+        if not raw_stage_items:
+            conversion_report.record_derived_stage(f"quest:{quest_id}", objective)
+        raw_stages = raw_stage_items or [objective]
         quest_stages = [
             QuestStage(
                 id=f"{quest_id}_stage_{stage_index + 1}",
@@ -801,20 +821,25 @@ def _expand_bundle_from_payload(
             bundle.relations.append(_relation(source, target, kind, common_meta))
     bundle.relations = _dedupe_relations(bundle.relations)
     grounding.canon_ids_referenced = sorted(ledger.referenced)
-    return bundle, grounding
+    return bundle, grounding, conversion_report
 
 
 class _GroundingLedger:
-    """Resolve one reference and record honestly which of three buckets it falls in. ``land`` always
-    returns a *buildable* id (resolved → focus anchor → fallback sibling) so the bundle is never
-    broken, but the ledger never hides what the model actually did:
-      * the model's value resolved to a real id  → ``grounded_refs += 1`` (a genuine grounding);
-      * a non-empty value resolved to nothing     → ``dangling_refs`` (the model invented an id);
-      * the value was empty/blank                 → ``unspecified_refs`` (the model omitted it; the
-        assembly auto-anchored it to the focus, but that is a gap to fill, not a silent success).
-    ``referenced`` is the distinct set of CANON ids the batch ends up touching (incl. auto-anchors)
-    — that is deliberately a different notion from ``grounded_refs`` (a count of the model's own
-    hits) and powers the canon-anchor ratio, not the trustworthiness gate."""
+    """Resolve one reference and record honestly which of three buckets it falls in — and, unlike
+    the old anchor-everything design, only ONE of those buckets is silently rescued:
+      * the model's value resolved to a real id  → ``grounded_refs += 1`` (a genuine grounding),
+        returned as-is;
+      * a non-empty value resolved to nothing     → ``dangling_refs`` (the model invented an id).
+        Kept VERBATIM, never round-robined onto the focus anchor or a fallback sibling — same
+        stance as genesis's ``_grounded_ref`` (worldgen/service.py): the deterministic reference
+        audit (UNKNOWN_ENTITY_REF / MISSING_RELATION_ENDPOINT) is where a wrong reference should be
+        adjudicated, not a silent guess here;
+      * the value was empty/blank                 → ``unspecified_refs`` (the model omitted it — not
+        a wrong guess, just silence). This is the one case still auto-anchored to the focus (or a
+        new sibling) so the bundle stays buildable; it remains a gap to fill, not a silent success.
+    ``referenced`` is the distinct set of CANON ids the batch ends up touching (incl. auto-anchors
+    for the blank case) — that is deliberately a different notion from ``grounded_refs`` (a count of
+    the model's own hits) and powers the canon-anchor ratio, not the trustworthiness gate."""
 
     def __init__(self, grounding: ExpandGrounding, canon: dict[str, set[str]]) -> None:
         self.grounding = grounding
@@ -839,12 +864,15 @@ class _GroundingLedger:
             if resolved in self.canon.get(kind, set()):
                 self.referenced.add(resolved)
             return resolved
-        # Not a real reference the model made: classify it honestly (invented vs omitted), then keep
-        # the bundle buildable by anchoring to the focus or a new sibling.
         if raw_value:
+            # A non-empty value that resolves to nothing real: keep the model's own value verbatim
+            # (never invent a substitute) so the deterministic reference audit can flag it into the
+            # review flow, exactly where a wrong reference should be adjudicated.
             self.grounding.dangling_refs.append(f"{kind}:{raw_value}")
-        else:
-            self.grounding.unspecified_refs.append(kind)
+            return resolved
+        # Truly blank: the model omitted the reference. Auto-anchor to the focus or a new sibling so
+        # the bundle stays buildable — this is still a gap to fill, so it is recorded separately.
+        self.grounding.unspecified_refs.append(kind)
         if anchor:
             if anchor in self.canon.get(kind, set()):
                 self.referenced.add(anchor)

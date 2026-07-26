@@ -1,3 +1,4 @@
+# 内容图上的社区检测：GraphRAG 索引的底座。
 """Community detection over the content graph — the GraphRAG indexing substrate.
 
 Line-level retrieval cannot answer macro/holistic questions ("what are the main powers and how do
@@ -29,6 +30,16 @@ connectivity-violation problem).  It is available as an opt-in by setting
 At the 50–300 node scale of current worlds, CNM and Leiden produce equivalent clusters
 in practice; Leiden is the better choice for larger or denser graphs.
 
+**Hierarchical (multi-level) detection.** ``detect_hierarchical_communities`` is a faithful
+re-implementation of graspologic's ``hierarchical_leiden`` — the algorithm Microsoft GraphRAG's
+``cluster_graph`` calls (Edge et al. 2024, *From Local to Global*, arXiv:2404.16130). It runs the
+base partition on the whole graph (level 0), then isolates any community larger than
+``max_cluster_size`` into its induced sub-graph and re-runs the SAME primitive, one level deeper,
+recursing until nothing is oversized or a community can no longer be subdivided. This yields the
+multi-granularity community hierarchy GraphRAG generates a report per level for. It is strictly
+opt-in and only produces level ≥ 1 layers once a single level-0 community exceeds the threshold —
+i.e. at the hundreds-of-thousands-of-items narrative scale, not the current acceptance scale.
+
 Only the per-community *prose* is written by an LLM later; the structural partition is
 machine-decided and testable, keeping the "stable / auditable" north star intact.
 """
@@ -37,6 +48,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 
 import networkx as nx
 from pydantic import BaseModel, Field
@@ -55,6 +67,19 @@ _SUBSTANTIVE = {"entity", "poi", "region", "quest"}
 # leiden requires: pip install python-igraph leidenalg
 _COMMUNITY_MODE_ENV = "OWCOPILOT_COMMUNITY"
 
+# Env knob: the hierarchical subdivision threshold. A level-0 community with more members than this
+# is isolated and re-partitioned one level deeper. Default 1000 matches graspologic's
+# ``hierarchical_leiden`` signature default (``max_cluster_size=1000``). NOTE: Microsoft GraphRAG's
+# own pipeline config defaults far finer (``ClusterGraphDefaults.max_cluster_size = 10`` — it pays
+# an LLM summarisation call per community, so it wants tiny clusters); we summarise only final
+# clusters and gate the hierarchy on corpus size, so the graspologic default is the honest match.
+# Boundary difference vs graspologic (deliberate): graspologic isolates clusters with size
+# ``>= max_cluster_size``; we keep ``len(members) <= max_cluster_size`` as leaves, i.e. subdivide
+# only strictly-greater. The off-by-one matters only for a cluster of exactly the threshold size,
+# where we take the cheaper "don't split" side.
+_MAX_CLUSTER_SIZE_ENV = "OWCOPILOT_COMMUNITY_MAX_CLUSTER_SIZE"
+DEFAULT_MAX_CLUSTER_SIZE = 1000
+
 
 class CommunityRelation(BaseModel):
     source: str
@@ -72,6 +97,13 @@ class Community(BaseModel):
     id: str
     member_refs: list[str] = Field(default_factory=list)
     relations: list[CommunityRelation] = Field(default_factory=list)
+
+    # Hierarchical GraphRAG (opt-in, large corpora): the level this community was resolved at
+    # (0 = the coarsest whole-graph partition) and the id of the parent community it was subdivided
+    # from (None at level 0). Flat single-level detection leaves both at their defaults, so existing
+    # construction sites and ``fingerprint_basis()`` are byte-for-byte unchanged.
+    hier_level: int = 0
+    parent_id: str | None = None
 
     def fingerprint_basis(self) -> list[str]:
         """The id-level basis for a cache key: members + intra-community edges (content hashed
@@ -98,13 +130,7 @@ def detect_communities(bundle: ContentBundle) -> list[Community]:
     if projection.number_of_nodes() == 0:
         return []
 
-    mode = os.getenv(_COMMUNITY_MODE_ENV, "cnm").strip().lower()
-    if mode == "leiden":
-        raw_groups = _leiden_partition(projection)
-    else:
-        raw = nx.community.greedy_modularity_communities(projection, weight="weight")
-        raw_groups = [list(group) for group in raw]
-    groups = sorted((sorted(group) for group in raw_groups), key=lambda g: (-len(g), g[0]))
+    groups = _sorted_partition(projection, _partition_projection)
 
     member_to_community: dict[str, int] = {}
     for index, members in enumerate(groups):
@@ -116,6 +142,107 @@ def detect_communities(bundle: ContentBundle) -> list[Community]:
     ]
     _attach_intra_relations(graph, communities, member_to_community)
     return communities
+
+
+def resolve_max_cluster_size() -> int:
+    """The hierarchical subdivision threshold from ``OWCOPILOT_COMMUNITY_MAX_CLUSTER_SIZE`` (default
+    1000 — graspologic ``hierarchical_leiden``'s signature default, NOT Microsoft GraphRAG's
+    pipeline-config default of 10; see the env-knob comment for why). A malformed or non-positive
+    value falls back to the default."""
+    raw = os.getenv(_MAX_CLUSTER_SIZE_ENV, "").strip()
+    if not raw:
+        return DEFAULT_MAX_CLUSTER_SIZE
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_CLUSTER_SIZE
+    return value if value > 0 else DEFAULT_MAX_CLUSTER_SIZE
+
+
+def detect_hierarchical_communities(
+    bundle: ContentBundle,
+    *,
+    max_cluster_size: int,
+    partition: Callable[[nx.Graph], list[list[str]]] | None = None,
+) -> list[Community]:
+    """Multi-level community detection — a faithful re-implementation of graspologic's
+    ``hierarchical_leiden`` (the algorithm Microsoft GraphRAG's ``cluster_graph`` calls; Edge et al.
+    2024, arXiv:2404.16130).
+
+    Level 0 is the base partition of the whole projection (ids ``c0``, ``c1``, … exactly as
+    :func:`detect_communities` orders them). Any community whose member count exceeds
+    ``max_cluster_size`` is isolated into its induced sub-graph and re-partitioned with the SAME
+    base primitive; its groups become children one level deeper (``parent_id`` links them, ids
+    extend as ``{parent}.{k}``). This recurses until no community is oversized or one can no longer
+    be subdivided (its isolated re-partition yields a single group — graspologic's
+    ``is_final_cluster``). A coarser (lower-level) community therefore contains its finer
+    descendants, and its ``member_refs`` is exactly the union of them.
+
+    ``partition`` is the base community-detection primitive re-run at every level (dependency
+    injection): the product hierarchical path injects Leiden (GraphRAG's canonical choice); ``None``
+    falls back to the ``OWCOPILOT_COMMUNITY``-selected backend. The returned list holds every
+    community at every level (parents and leaves); only leaves carry intra-community relations —
+    a parent's report is synthesised from its children's reports, not from raw ties.
+    """
+    graph = build_content_graph(bundle)
+    projection = _projection(graph)
+    if projection.number_of_nodes() == 0:
+        return []
+    run_partition = partition if partition is not None else _partition_projection
+
+    communities: list[Community] = []
+    leaf_ids: set[str] = set()
+
+    def _emit(members: list[str], community_id: str, level: int, parent_id: str | None) -> None:
+        communities.append(
+            Community(id=community_id, member_refs=members, hier_level=level, parent_id=parent_id)
+        )
+        if len(members) <= max_cluster_size:
+            leaf_ids.add(community_id)
+            return
+        child_groups = _sorted_partition(projection.subgraph(members).copy(), run_partition)
+        if len(child_groups) <= 1:
+            # Oversized but indivisible: re-partitioning the isolated sub-graph can't split it, so
+            # it stays a leaf (graspologic's ``is_final_cluster``). Recursion also terminates here
+            # because every deeper level operates on a strictly smaller node set.
+            leaf_ids.add(community_id)
+            return
+        for index, child_members in enumerate(child_groups):
+            _emit(child_members, f"{community_id}.{index}", level + 1, community_id)
+
+    for index, members in enumerate(_sorted_partition(projection, run_partition)):
+        _emit(members, f"c{index}", 0, None)
+
+    # Attach intra-community relations to the LEAF communities only: every projection node lands in
+    # exactly one leaf, so mapping each ref to its leaf's index buckets the ties correctly and
+    # leaves every parent's bucket empty (a parent's report synthesises its children, not raw ties).
+    leaf_index_by_ref: dict[str, int] = {}
+    for idx, community in enumerate(communities):
+        if community.id in leaf_ids:
+            for ref in community.member_refs:
+                leaf_index_by_ref[ref] = idx
+    _attach_intra_relations(graph, communities, leaf_index_by_ref)
+    return communities
+
+
+def _partition_projection(projection: nx.Graph) -> list[list[str]]:
+    """Run the ``OWCOPILOT_COMMUNITY``-selected base backend on a projection, returning raw
+    (unsorted) member-ref groups. This is the single base primitive both the flat and the
+    hierarchical detector run — the latter re-runs it on each oversized sub-network (mirroring
+    graspologic's ``hierarchical_leiden``, which re-runs the Leiden primitive per sub-network)."""
+    mode = os.getenv(_COMMUNITY_MODE_ENV, "cnm").strip().lower()
+    if mode == "leiden":
+        return _leiden_partition(projection)
+    raw = nx.community.greedy_modularity_communities(projection, weight="weight")
+    return [list(group) for group in raw]
+
+
+def _sorted_partition(
+    projection: nx.Graph, partition: Callable[[nx.Graph], list[list[str]]]
+) -> list[list[str]]:
+    """Partition ``projection`` and apply the stable ordering (members sorted; groups by desc size
+    then lowest member ref) that makes the ``c{index}`` ids stable for the same graph structure."""
+    return sorted((sorted(group) for group in partition(projection)), key=lambda g: (-len(g), g[0]))
 
 
 def cross_community_relations(

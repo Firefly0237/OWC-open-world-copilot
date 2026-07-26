@@ -300,6 +300,9 @@ def test_registered_project_context_pack_and_ask_use_project_context(
 
 
 def test_registered_project_ask_uses_qa_overview_reports(tmp_path, monkeypatch) -> None:
+    # This exercises the GraphRAG community feature on a tiny fixture world; the RetrievalPolicy
+    # size-gate would omit it at that scale, so open the gate to test the feature in isolation.
+    monkeypatch.setattr("owcopilot.retrieval.policy.GRAPHRAG_MIN_SIZE", 0)
     content_root = tmp_path / "content"
     _write_project(content_root, _overview_bundle())
     _register_project(monkeypatch, "demo", content_root)

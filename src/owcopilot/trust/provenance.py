@@ -1,3 +1,4 @@
+# v2 内容包的溯源与信任摘要。
 """Provenance and trust summaries for v2 content bundles."""
 
 from __future__ import annotations

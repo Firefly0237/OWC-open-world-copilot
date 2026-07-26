@@ -1,3 +1,4 @@
+# 字段加权的词法重打分：两阶段检索的精排半边（轻量、无模型）。
 """Field-weighted lexical re-scoring -- the precision half of two-stage retrieval.
 
 This module implements **LexicalReScorer**: a deterministic, field-weighted lexical
@@ -83,6 +84,7 @@ class LexicalReScorer:
     ) -> list[RetrievalHit]:
         """Re-score and reorder ``hits`` by field-weighted lexical relevance."""
         return rerank_hits(query, hits, semantic_scores=semantic_scores)
+
 
 # Field weights: a query term landing in the title is a far stronger relevance signal than
 # the same term buried in the body; the ref (which embeds the object id) is the weakest.

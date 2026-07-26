@@ -1,3 +1,4 @@
+# 固定工作流各阶段入口。
 """Fixed workflow stage entrypoints."""
 
 from __future__ import annotations

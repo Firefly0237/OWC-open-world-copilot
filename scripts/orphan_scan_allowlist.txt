@@ -1,0 +1,17 @@
+# 零调用能力扫描白名单 —— scripts/scan_orphan_capabilities.py 读取
+#
+# 用途：抑制“静态看不出被调用、但实际经反射/注册表动态派发，或明确对外声明的接口”这类误报。
+# 只登记“确有生产用途、只是静态匹配抓不到”的符号；不要用它掩盖真正没接进产品的孤儿。
+#
+# 语法（每行其一）：
+#   owcopilot.<module>::<qualname>   # 理由      —— 精确豁免单个符号（qualname 如 ContentStore.save_scoped）
+#   owcopilot.<module>::*            # 理由      —— 整模块豁免（谨慎使用）
+# 以 # 开头或空行忽略；行内 # 后为理由（会显示在报告里）。
+#
+# 说明：模块自身 __all__ 里的符号已由脚本自动归入“声明为库 API”informational 档，无需在此重复登记。
+#
+# ── 反射 / 注册表动态派发 ────────────────────────────────────────────────
+# 目前内置技能的 handler 在 skills/builtin.py 里以 `tools.<fn>` 形式按引用注册（属于 Attribute 引用，
+# 扫描器已能识别为“被引用”），因此暂无需在此登记 skills 派发目标。此处保留分节，日后若出现
+# 纯字符串 getattr(module, name) 式派发，再按下例登记：
+#   owcopilot.<module>::<handler>   # 经 registry.run(name) 字符串派发，静态不可见

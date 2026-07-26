@@ -1,3 +1,4 @@
+# voice card 组装（短文本受约束生成用）。
 """Voice card assembly for constrained short-text generation."""
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ class VoiceCard(BaseModel):
     tags: list[str] = Field(default_factory=list)
     tone: str | None = None
     taboo: list[str] = Field(default_factory=list)
-    # C4: voice style description from entity.metadata["profile"]["voice"].
+    # Voice style description from entity.metadata["profile"]["voice"].
     # Empty string when the field is absent — backward-compatible default.
     profile_voice: str = ""
 
@@ -26,7 +27,7 @@ def build_voice_card(entity: Entity, bundle: ContentBundle) -> VoiceCard:
         for relation in bundle.relations
         if relation.source == entity.id and relation.kind == "member_of"
     ]
-    # C4: read voice style description from nested profile dict.
+    # Read voice style description from nested profile dict.
     # Falls back to "" if "profile" key is absent, "voice" key is absent,
     # or the value is None/empty — guards against KeyError and None.
     profile = entity.metadata.get("profile")

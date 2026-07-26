@@ -25,6 +25,33 @@ class Citation(BaseModel):
         return text
 
 
+class QAFaithfulness(BaseModel):
+    """RAGAS-style entailment annotation attached to a grounded answer (annotate, not block).
+
+    Populated only when the opt-in faithfulness gate runs (``LoreQAService(faithfulness=...)`` is
+    ``offline`` or ``llm``); it is ``None`` on the default ``off`` path, so it never changes
+    existing behaviour. It carries a *signal*, not a verdict that overrides the answer: a low score
+    never rewrites or suppresses the answer — it only flags that some claims lack evidence support,
+    so a human reviewer can check them (review stays the authority).
+
+    * ``judge`` — which judge produced this: ``"offline"`` (deterministic lexical stand-in),
+      ``"llm"`` (live model judge), or ``"unavailable"`` (``llm`` was requested but no usable model
+      provider — an honest non-verification, never a faked pass).
+    * ``ok`` — whether the answer cleared ``threshold``. ``False`` for ``"unavailable"`` too:
+      an unverified answer is not asserted faithful (fail-closed).
+    * ``score`` — ``supported_claims / total_claims`` in ``[0, 1]``; ``None`` when unavailable.
+    * ``unsupported_claims`` — the claim texts the evidence did not support.
+    * ``note`` — reviewer-facing Chinese guidance describing what was (not) supported.
+    """
+
+    judge: str
+    ok: bool
+    score: float | None = None
+    threshold: float
+    unsupported_claims: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
 class QAAnswer(BaseModel):
     answer: str
     citations: list[Citation] = Field(default_factory=list)
@@ -34,6 +61,9 @@ class QAAnswer(BaseModel):
     refused: bool = False
     grounded: bool = False
     verification_errors: list[str] = Field(default_factory=list)
+    # Additive, default None: the opt-in faithfulness (entailment) annotation. Present only when the
+    # gate ran; None keeps the default off-path byte-compatible for existing consumers.
+    faithfulness: QAFaithfulness | None = None
 
     @field_validator("answer", mode="before")
     @classmethod

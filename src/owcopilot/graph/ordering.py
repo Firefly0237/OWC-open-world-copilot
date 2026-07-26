@@ -1,3 +1,4 @@
+# 对象在世界时间线上的位置。
 """Where an object sits on the world timeline.
 
 A quest carries ``timeline_order`` as a first-class field, but events are entities and stash their

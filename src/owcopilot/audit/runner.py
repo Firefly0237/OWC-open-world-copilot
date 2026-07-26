@@ -1,3 +1,4 @@
+# 审计执行器：跑规则集、汇总 findings。
 """Audit runner."""
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from .baseline import AuditBaseline, apply_baseline
 from .context import AuditContext
 from .models import AuditRun, Issue, IssueStatus, Severity
 from .registry import RuleConfig, RuleRegistry
+from .source_location import annotate_issues
 
 
 @dataclass
@@ -51,6 +53,12 @@ class AuditRunner:
                     }
                 )
                 issues.append(apply_baseline(prepared, self.baseline))
+
+        # 六要素里的"文件 + 行号 + 节点 id"在这里统一补上，而不是让每个出口自己去补：审计的每一
+        # 条出口（命令行 / 接口 / 桌面动作 / MCP / agent 技能 / Markdown 报告）都经过这里，补在
+        # 这一层才不会漏掉某个出口。指纹只由规则码、目标与证据算出，所以补完不影响基线比对。
+        if ctx.content_root is not None:
+            issues = annotate_issues(issues, ctx.content_root)
 
         run = AuditRun(
             id=run_id,

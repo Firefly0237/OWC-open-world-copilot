@@ -1,9 +1,12 @@
+# 修复序列的 MCTS 搜索：修一个审计问题会改变别的问题的可修性（有先后依赖），故"选一串编辑"
+#   是搜索（预算内较优解、非全局最优）。UCB1 选/扩/模拟/回传，奖励=消解的错误数（确定性审计，$0）。
 """Monte Carlo Tree Search over repair sequences.
 
 Fixing one audit issue can change which fixes are valid for another (drop a dangling reference and
-a downstream rule clears too; the order can matter), so picking the best *sequence* of edits is a
+a downstream rule clears too; the order can matter), so picking a good *sequence* of edits is a
 search problem, not a one-shot choice. This plans that sequence with textbook MCTS — selection
-(UCB1) → expansion → simulation → backpropagation.
+(UCB1) → expansion → simulation → backpropagation — returning a high-scoring plan under the search
+budget, not a proven global optimum.
 
 The reason MCTS is practical here, when it usually is not for LLM agents, is the reward: the
 consistency **audit is deterministic and fast**, so a rollout's value (how many errors a sequence
@@ -58,7 +61,14 @@ class RepairPlan(BaseModel):
     initial_open_errors: int
     final_open_errors: int
     resolved_errors: int
-    iterations: int
+    iterations: int = Field(
+        ...,
+        description=(
+            "MCTS iterations actually executed (may be < max_iterations when stop_on_clean "
+            "early-terminates on a fully-resolving plan; == max_iterations when the budget is "
+            "exhausted; 0 for a clean root)."
+        ),
+    )
 
 
 @dataclass
@@ -81,6 +91,7 @@ def plan_repairs(
     *,
     max_iterations: int = 200,
     max_depth: int | None = None,
+    stop_on_clean: bool = True,
     seed: int = 0,
     exploration: float = _EXPLORATION,
     candidate_provider: CandidateProvider = deterministic_candidates,
@@ -91,12 +102,19 @@ def plan_repairs(
     never resolve N errors in fewer than N moves, so a fixed cap would make the search underperform
     greedy on a large world). ``candidate_provider`` defaults to the deterministic fixers (so the
     whole search is $0 and reproducible); pass a model-backed provider to widen the move set.
+
+    Anytime early-stop (Koh et al. 2024, Alg. 1 l.14-15): once a fully-resolving plan (best
+    open_errors==0) is found the search stops, since further search can only shorten the sequence,
+    not lower the error count; the budget is still an explicit knob (max_iterations). Pass
+    ``stop_on_clean=False`` to exhaust the budget and let the search keep hunting for a shorter
+    equal-error plan.
     """
     return _RepairSearch(
         bundle,
         audit_runner,
         max_iterations=max(0, max_iterations),
         max_depth=max_depth,
+        stop_on_clean=stop_on_clean,
         exploration=exploration,
         seed=seed,
         candidate_provider=candidate_provider,
@@ -111,12 +129,14 @@ class _RepairSearch:
         *,
         max_iterations: int,
         max_depth: int | None,
+        stop_on_clean: bool,
         exploration: float,
         seed: int,
         candidate_provider: CandidateProvider,
     ) -> None:
         self.runner = audit_runner
         self.max_iterations = max_iterations
+        self.stop_on_clean = stop_on_clean
         self.c = exploration
         self.rng = Random(seed)
         self.candidate_provider = candidate_provider
@@ -132,19 +152,25 @@ class _RepairSearch:
         self._best: tuple[int, int, list[RepairMove]] = (self.root.open_errors, 0, [])
 
     def run(self) -> RepairPlan:
+        iterations = 0
         if self.root.open_errors > 0:
             for _ in range(self.max_iterations):
                 node = self._select(self.root)
                 child = self._expand(node)
                 reward = self._simulate(child)
                 self._backpropagate(child, reward)
+                iterations += 1
+                # Anytime stop (Koh et al. 2024, Alg. 1 l.14-15): a fully-resolving plan exists;
+                # more search can only shorten it, not resolve more errors — stop by default.
+                if self.stop_on_clean and self._best[0] == 0:
+                    break
         final_errors, _length, moves = self._best
         return RepairPlan(
             moves=moves,
             initial_open_errors=self.root.open_errors,
             final_open_errors=final_errors,
             resolved_errors=self.root.open_errors - final_errors,
-            iterations=self.max_iterations if self.root.open_errors > 0 else 0,
+            iterations=iterations,
         )
 
     # --- MCTS phases -------------------------------------------------------------------------

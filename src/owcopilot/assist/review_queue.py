@@ -1,3 +1,4 @@
+# 审阅队列：AI 草稿与补丁候选在此等人审。这是唯一写 canon 的入口。
 """Review queue for AI drafts and patch candidates.
 
 By default the queue is in-memory (tests, ad-hoc scripts). Pass a `SQLiteStore` to make items
@@ -40,7 +41,7 @@ class ReviewItem(BaseModel):
     # calibration can pair it with the human decision. None for single-shot / lint-only kinds.
     critic_verdict: str | None = None
     critic_score: float | None = None
-    # IN-B1 M2: primary failing dimension from the last critique round (used by calibration).
+    # Primary failing dimension from the last critique round (used by calibration).
     # None when no critic ran or dimension was not captured. Default "general" on deserialization.
     critic_primary_dim: str | None = None
 
@@ -62,7 +63,7 @@ class ReviewQueue:
                     "status": item.status,
                     "critic_verdict": item.critic_verdict,
                     "critic_score": item.critic_score,
-                    "critic_primary_dim": item.critic_primary_dim,  # IN-B1 M2
+                    "critic_primary_dim": item.critic_primary_dim,
                 }
             )
         self._items.append(item)
@@ -75,7 +76,7 @@ class ReviewQueue:
         issue_refs: list[str] | None = None,
         critic_verdict: str | None = None,
         critic_score: float | None = None,
-        critic_primary_dim: str | None = None,  # IN-B1 M2
+        critic_primary_dim: str | None = None,
     ) -> ReviewItem:
         quest_id = str(payload.get("id") or "unknown")
         return self.add(
@@ -86,7 +87,7 @@ class ReviewQueue:
                 issue_refs=issue_refs or [],
                 critic_verdict=critic_verdict,
                 critic_score=critic_score,
-                critic_primary_dim=critic_primary_dim,  # IN-B1 M2
+                critic_primary_dim=critic_primary_dim,
             )
         )
 
@@ -97,7 +98,7 @@ class ReviewQueue:
         issue_refs: list[str] | None = None,
         critic_verdict: str | None = None,
         critic_score: float | None = None,
-        critic_primary_dim: str | None = None,  # IN-B1 M2
+        critic_primary_dim: str | None = None,
     ) -> ReviewItem:
         """B7: a logic layer drafted for an EXISTING quest. payload = {quest_id, quest_title,
         logic}. On accept it applies ONLY the logic to that quest (it does not create a quest)."""
@@ -110,7 +111,7 @@ class ReviewQueue:
                 issue_refs=issue_refs or [],
                 critic_verdict=critic_verdict,
                 critic_score=critic_score,
-                critic_primary_dim=critic_primary_dim,  # IN-B1 M2
+                critic_primary_dim=critic_primary_dim,
             )
         )
 
@@ -121,7 +122,7 @@ class ReviewQueue:
         issue_refs: list[str] | None = None,
         critic_verdict: str | None = None,
         critic_score: float | None = None,
-        critic_primary_dim: str | None = None,  # IN-B1 M2
+        critic_primary_dim: str | None = None,
     ) -> ReviewItem:
         seed_id = str(payload.get("id") or "unknown")
         return self.add(
@@ -132,7 +133,7 @@ class ReviewQueue:
                 issue_refs=issue_refs or [],
                 critic_verdict=critic_verdict,
                 critic_score=critic_score,
-                critic_primary_dim=critic_primary_dim,  # IN-B1 M2
+                critic_primary_dim=critic_primary_dim,
             )
         )
 
@@ -156,7 +157,7 @@ class ReviewQueue:
         issue_refs: list[str] | None = None,
         critic_verdict: str | None = None,
         critic_score: float | None = None,
-        critic_primary_dim: str | None = None,  # IN-B1 M2
+        critic_primary_dim: str | None = None,
     ) -> ReviewItem:
         tree_id = str(payload.get("id") or "unknown")
         return self.add(
@@ -167,7 +168,7 @@ class ReviewQueue:
                 issue_refs=issue_refs or [],
                 critic_verdict=critic_verdict,
                 critic_score=critic_score,
-                critic_primary_dim=critic_primary_dim,  # IN-B1 M2
+                critic_primary_dim=critic_primary_dim,
             )
         )
 
@@ -178,7 +179,7 @@ class ReviewQueue:
         issue_refs: list[str] | None = None,
         critic_verdict: str | None = None,
         critic_score: float | None = None,
-        critic_primary_dim: str | None = None,  # IN-B1 M2
+        critic_primary_dim: str | None = None,
     ) -> ReviewItem:
         entity_id = str((payload.get("entity") or {}).get("id") or "unknown")
         return self.add(
@@ -189,7 +190,7 @@ class ReviewQueue:
                 issue_refs=issue_refs or [],
                 critic_verdict=critic_verdict,
                 critic_score=critic_score,
-                critic_primary_dim=critic_primary_dim,  # IN-B1 M2
+                critic_primary_dim=critic_primary_dim,
             )
         )
 
@@ -281,5 +282,5 @@ def _item_from_dict(stored: dict[str, Any]) -> ReviewItem:
         status=str(stored["status"]),
         critic_verdict=stored.get("critic_verdict"),
         critic_score=float(score) if score is not None else None,
-        critic_primary_dim=stored.get("critic_primary_dim"),  # IN-B1 M2
+        critic_primary_dim=stored.get("critic_primary_dim"),
     )

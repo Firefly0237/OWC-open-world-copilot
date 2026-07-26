@@ -1,3 +1,4 @@
+# 基于图的影响面分析：改一个对象会波及哪些（纯图遍历，零成本）。
 """Graph-based impact analysis."""
 
 from __future__ import annotations

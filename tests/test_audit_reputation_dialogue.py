@@ -50,7 +50,7 @@ def test_reputation_ref_to_real_faction_is_clean() -> None:
         quests={"q_choice": _quest_with_rep("fac_iron")},
     )
     issues = list(QuestLogicRule().check(AuditContext.from_bundle(bundle)))
-    assert not any("reputation reference" in i.message for i in issues)
+    assert not any("阵营声望" in i.message for i in issues)
 
 
 def test_reputation_ref_to_unknown_faction_is_flagged() -> None:
@@ -59,7 +59,7 @@ def test_reputation_ref_to_unknown_faction_is_flagged() -> None:
         quests={"q_choice": _quest_with_rep("fac_ghost")},  # not a real faction
     )
     issues = list(QuestLogicRule().check(AuditContext.from_bundle(bundle)))
-    rep_issues = [i for i in issues if "reputation reference 'rep:fac_ghost'" in i.message]
+    rep_issues = [i for i in issues if "阵营声望 'rep:fac_ghost'" in i.message]
     assert len(rep_issues) == 1
     assert rep_issues[0].rule_code == "QUEST_LOGIC"
 

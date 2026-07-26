@@ -2,8 +2,16 @@
 import { ref, toRef, toRefs } from "vue";
 import StepperProgress from "../components/StepperProgress.vue";
 import PageHead from "../components/PageHead.vue";
-import { llmConfig, llmParams } from "../api";
+import {
+  apiPost,
+  currentOperator,
+  currentProject,
+  llmConfig,
+  llmParams,
+  setCurrentOperator,
+} from "../api";
 import { getJobChannel, startJob } from "../jobs";
+import { notifyError, notifyOk, pushToast } from "../toast";
 import { example } from "../examples";
 
 const phTheme = example("sweepTheme");
@@ -29,6 +37,9 @@ interface Finding {
   layer: string;
   evidence: string;
   verdict: string;
+  // sentence-level location within the object; stable dismissal key
+  locator: string;
+  finding_id: string;
 }
 
 interface SweepResult {
@@ -40,12 +51,18 @@ interface SweepResult {
   judge_skipped: number;
   hits: Finding[];
   review_suggested: Finding[];
+  dismissed_count: number;
   markdown: string;
 }
 
 const theme = ref("");
 const terms = ref("");
 const useJudge = ref(llmConfig().ready);
+const operator = ref(currentOperator());
+// findings the reviewer excluded this session (逐一排除); counted on top of the server's
+// dismissed_count so the honesty line stays accurate before the next re-run.
+const dismissedNow = ref(0);
+const dismissing = ref<Record<string, boolean>>({});
 
 const job = getJobChannel<SweepResult>("theme_sweep", STAGES);
 const { running, stageIndex, elapsed, result } = toRefs(job);
@@ -54,6 +71,7 @@ const lastCost = toRef(job, "cost");
 
 async function run(): Promise<void> {
   if (!theme.value.trim() || running.value) return;
+  dismissedNow.value = 0;
   await startJob<SweepResult>("theme_sweep", {
     kind: "theme_sweep",
     stages: STAGES,
@@ -84,6 +102,42 @@ function downloadWorkOrder(): void {
   link.download = `sweep-${theme.value.trim().slice(0, 20)}.md`;
   link.click();
   URL.revokeObjectURL(link.href);
+}
+
+// 逐一排除: mark ONE finding a false positive. Signed (operator) + persisted server-side, so the
+// next sweep of the SAME theme suppresses it. We optimistically drop it from the list here.
+async function dismiss(finding: Finding): Promise<void> {
+  if (!operator.value.trim()) {
+    pushToast("先填上你的名字（用于记录谁排除了这条）。", "error");
+    return;
+  }
+  if (dismissing.value[finding.finding_id]) return;
+  setCurrentOperator(operator.value.trim());
+  dismissing.value = { ...dismissing.value, [finding.finding_id]: true };
+  try {
+    await apiPost(`/projects/${currentProject()}/sweeps:dismiss`, {
+      theme: theme.value.trim(),
+      finding_id: finding.finding_id,
+      ref: finding.ref,
+      locator: finding.locator,
+      layer: finding.layer,
+      operator: operator.value.trim(),
+    });
+    if (result.value) {
+      result.value.hits = result.value.hits.filter((f) => f.finding_id !== finding.finding_id);
+      result.value.review_suggested = result.value.review_suggested.filter(
+        (f) => f.finding_id !== finding.finding_id,
+      );
+    }
+    dismissedNow.value += 1;
+    notifyOk("已排除，下次清查同一主题不再出现。");
+  } catch (e) {
+    notifyError(e);
+  } finally {
+    const next = { ...dismissing.value };
+    delete next[finding.finding_id];
+    dismissing.value = next;
+  }
 }
 </script>
 
@@ -137,22 +191,40 @@ function downloadWorkOrder(): void {
       <p v-if="result.judge_skipped" class="muted small">
         有 {{ result.judge_skipped }} 个对象超出单次判定上限，清单中已注明。
       </p>
+      <p v-if="(result.dismissed_count || 0) + dismissedNow > 0" class="muted small">
+        已排除 {{ (result.dismissed_count || 0) + dismissedNow }} 条误报——同一主题再清查时不再出现。
+      </p>
       <p v-if="!result.hits.length && !result.review_suggested.length" class="ok-text">
         全库扫描完毕，未发现相关内容。
       </p>
-      <TransitionGroup v-else name="list" tag="div" class="findings">
-        <div
-          v-for="finding in [...result.hits, ...result.review_suggested]"
-          :key="finding.ref"
-          class="finding"
-          :class="{ review: finding.verdict === 'review' }"
-        >
-          <span class="badge">{{ finding.verdict === "hit" ? "待处理" : "建议复查" }}</span>
-          <b>{{ finding.name }}</b>
-          <span class="mono">{{ finding.ref }}</span>
-          <span class="muted evidence">{{ finding.evidence }}</span>
-        </div>
-      </TransitionGroup>
+      <template v-else>
+        <label class="op-field">
+          <span class="label">你的名字</span>
+          <input v-model="operator" maxlength="80" placeholder="排除误报时记录谁做的决定" />
+        </label>
+        <TransitionGroup name="list" tag="div" class="findings">
+          <div
+            v-for="finding in [...result.hits, ...result.review_suggested]"
+            :key="finding.finding_id || finding.ref"
+            class="finding"
+            :class="{ review: finding.verdict === 'review' }"
+          >
+            <span class="badge">{{ finding.verdict === "hit" ? "待处理" : "建议复查" }}</span>
+            <b>{{ finding.name }}</b>
+            <span class="mono ref-cell">{{ finding.ref }}</span>
+            <button
+              class="dismiss"
+              :disabled="dismissing[finding.finding_id]"
+              title="标记为误报，下次清查同一主题不再出现"
+              @click="dismiss(finding)"
+            >
+              {{ dismissing[finding.finding_id] ? "排除中…" : "排除" }}
+            </button>
+            <span v-if="finding.locator" class="locator mono">定位：{{ finding.locator }}</span>
+            <span class="muted evidence">{{ finding.evidence }}</span>
+          </div>
+        </TransitionGroup>
+      </template>
       <button class="ghost" @click="downloadWorkOrder">导出清单 (.md)</button>
     </div>
   </section>
@@ -297,7 +369,7 @@ button.ghost {
 
 .finding {
   display: grid;
-  grid-template-columns: auto auto 1fr;
+  grid-template-columns: auto auto 1fr auto;
   gap: 0.3rem 0.7rem;
   align-items: baseline;
   border: 1px solid var(--ow-line);
@@ -309,6 +381,63 @@ button.ghost {
 
 .finding b {
   color: var(--ow-gold-bright);
+}
+
+.ref-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dismiss {
+  align-self: center;
+  background: transparent;
+  border: 1px solid var(--ow-line);
+  border-radius: 3px;
+  clip-path: polygon(
+    var(--ow-chip-nip) 0, 100% 0, 100% calc(100% - var(--ow-chip-nip)),
+    calc(100% - var(--ow-chip-nip)) 100%, 0 100%, 0 var(--ow-chip-nip)
+  );
+  color: var(--ow-muted);
+  font: inherit;
+  font-size: 0.74rem;
+  padding: 0.14rem 0.6rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.dismiss:hover:not(:disabled) {
+  border-color: rgba(224, 133, 133, 0.5);
+  color: #e89a9a;
+}
+
+.dismiss:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.locator {
+  grid-column: 1 / -1;
+  font-size: 0.74rem;
+  color: var(--ow-gold-bright);
+  opacity: 0.85;
+}
+
+.op-field {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+}
+
+.op-field .label {
+  white-space: nowrap;
+}
+
+.op-field input {
+  flex: 1;
+  max-width: 22rem;
 }
 
 .finding.review .badge {

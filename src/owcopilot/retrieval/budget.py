@@ -1,3 +1,4 @@
+# 上下文预算裁剪：用 bge-m3 tokenizer 精确估 token 后按预算裁候选（非按字符粗估）。
 """Context budget trimming -- accurate token estimation via bge-m3 tokenizer.
 
 Token counting uses the bge-m3 AutoTokenizer (transformers) when available.  This gives

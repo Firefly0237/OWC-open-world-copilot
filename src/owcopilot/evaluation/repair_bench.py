@@ -1,3 +1,4 @@
+# 基准：MCTS 修复规划 vs 贪心基线，同一 move space 上对比。
 """Benchmark: the MCTS repair planner vs a greedy baseline, over the SAME move space.
 
 Honest finding (run ``owcopilot eval-repair``): on the deterministic fixers, repairs are largely

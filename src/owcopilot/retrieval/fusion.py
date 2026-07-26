@@ -1,3 +1,4 @@
+# 排名融合小工具（RRF 等）。
 """Rank fusion helpers."""
 
 from __future__ import annotations

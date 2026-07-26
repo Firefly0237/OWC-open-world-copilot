@@ -78,6 +78,7 @@ def _brief() -> WorldSeedBrief:
 
 # --------------------------------------------------------------------------- _vocab_block unit
 
+
 def test_vocab_block_empty_for_no_terms() -> None:
     assert _vocab_block(None) == ""
     assert _vocab_block([]) == ""
@@ -97,6 +98,7 @@ def test_vocab_block_renders_constraints() -> None:
 
 
 # --------------------------------------------------------------------------- per-suffix injection
+
 
 def test_each_suffix_injects_term_block_when_terms_present() -> None:
     """[硬] Each of the 4 suffixes emits the vocabulary block when terms are supplied."""
@@ -141,6 +143,7 @@ def test_vocab_block_precedes_grounding_block() -> None:
 
 
 # --------------------------------------------------------------------------- end-to-end (offline)
+
 
 class _CapturingProvider:
     """Wraps the offline double; records the system prompt of each stage by stage name."""

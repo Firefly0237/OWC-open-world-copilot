@@ -1,3 +1,4 @@
+# 零依赖的语言/文字系统检测（摄取用）。
 """Dependency-free language / script detection for content ingestion.
 
 The product takes raw creator input — a pasted novel chapter, an uploaded design doc, a

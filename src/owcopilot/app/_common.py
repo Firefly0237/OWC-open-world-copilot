@@ -1,3 +1,4 @@
+# app 动作层与视图模型层共享的助手。
 """Helpers shared by the app's action and view-model layers.
 
 Both layers open a project the same way and surface the same deterministic ($0) cost stub; these

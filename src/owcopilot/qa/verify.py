@@ -1,3 +1,4 @@
+# QA 事后确定性检查（引用有效性/拒答合理性等）。
 """Deterministic QA post-checks.
 
 **Grounding scope — citation *existence*, NOT entailment (honest limitation).**

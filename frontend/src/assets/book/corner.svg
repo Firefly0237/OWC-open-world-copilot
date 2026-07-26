@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none" stroke="currentColor">
+  <!-- 四角金饰（左上角一枚，四角旋转复用）：双折线 45° 斜切 + 肘部菱饰 -->
+  <g stroke-width="1.5" stroke-linecap="square">
+    <path d="M4 30V12L12 4h18"/>
+    <path d="M9 26V15l6-6h11" stroke-width="0.75" opacity="0.6"/>
+  </g>
+  <!-- 臂端收束点 -->
+  <path d="M30 4l5 2.5L30 9z" fill="currentColor" stroke="none"/>
+  <path d="M4 30l2.5 5L9 30z" fill="currentColor" stroke="none"/>
+  <!-- 肘部菱饰 -->
+  <path d="M12 12l3.2-3.2 3.2 3.2-3.2 3.2z" fill="currentColor" stroke="none" transform="translate(-3.2 -3.2)"/>
+</svg>

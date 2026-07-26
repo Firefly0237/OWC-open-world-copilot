@@ -1,3 +1,4 @@
+# 审计基线支持（与历史审计结果对比）。
 """Audit baseline support.
 
 The baseline is a set of accepted issue fingerprints. Runner output keeps those issues but marks

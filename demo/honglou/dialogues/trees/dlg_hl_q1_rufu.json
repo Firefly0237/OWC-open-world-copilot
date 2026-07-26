@@ -1,0 +1,116 @@
+{
+  "id": "dlg_hl_q1_rufu",
+  "title": "初入荣国府",
+  "quest_id": "hl_q1_rufu",
+  "participants": ["daiyu", "xingfuren", "wangfuren"],
+  "root_node": "q1n010",
+  "tags": ["main", "chapter3"],
+  "metadata": {},
+  "origin": "human",
+  "review_status": "approved",
+  "nodes": {
+    "q1n010": {
+      "id": "q1n010",
+      "speaker_id": "daiyu",
+      "text": "轿子稳稳落地，黛玉扶着婆子的手下轿，只见门前一色青衣仆从肃立两旁，气象森严。她心中一凛：外祖母千叮万嘱，凡事都要多加留心才是。",
+      "next_node": "q1n020",
+      "choices": []
+    },
+    "q1n020": {
+      "id": "q1n020",
+      "speaker_id": "daiyu",
+      "text": "引路的婆子躬身请示道：姑娘是从正门鸣锣接引，还是随奴才们从西角门进去？黛玉心中一动，细细思量起来。",
+      "text_key": "hl_q1_n020_text",
+      "next_node": null,
+      "choices": [
+        {
+          "text": "只随你们从西角门进去便是，不必声张。",
+          "text_key": "hl_q1_n020_c1",
+          "next_node": "q1n030",
+          "condition": "",
+          "effects": [
+            { "var": "etiquette", "op": "inc", "value": 2 }
+          ]
+        },
+        {
+          "text": "既是舅家门第，从正门堂堂正正进去也无妨。",
+          "text_key": "hl_q1_n020_c2",
+          "next_node": "q1n030",
+          "condition": "",
+          "effects": [
+            { "var": "etiquette", "op": "dec", "value": 1 }
+          ]
+        }
+      ]
+    },
+    "q1n030": {
+      "id": "q1n030",
+      "speaker_id": "daiyu",
+      "text": "一路穿堂过院，只见廊庑曲折、雕梁画栋，处处透着森严富贵的气派，黛玉不敢多问，只低头随众人缓步而行。",
+      "next_node": "q1n040",
+      "choices": []
+    },
+    "q1n040": {
+      "id": "q1n040",
+      "speaker_id": "xingfuren",
+      "text": "邢夫人拉着黛玉的手笑道：你舅舅今日斋戒未回，不能过来看你。这里离你舅舅家远，若日日来往不便，不如就在这里用了饭再去罢。",
+      "text_key": "hl_q1_n040_text",
+      "next_node": null,
+      "choices": [
+        {
+          "text": "多谢舅母美意，只是还要去拜见舅母王夫人与外祖母，恐失了先后，还是不叨扰的好。",
+          "text_key": "hl_q1_n040_c1",
+          "next_node": "q1n050",
+          "condition": "",
+          "effects": [
+            { "var": "etiquette", "op": "inc", "value": 1 }
+          ]
+        },
+        {
+          "text": "舅母既这么说，那便叨扰了。",
+          "text_key": "hl_q1_n040_c2",
+          "next_node": "q1n050",
+          "condition": "",
+          "effects": [
+            { "var": "etiquette", "op": "dec", "value": 1 }
+          ]
+        }
+      ]
+    },
+    "q1n050": {
+      "id": "q1n050",
+      "speaker_id": "wangfuren",
+      "text": "王夫人命丫鬟挪了椅子，又指着炕上一张笑道：你舅舅今日尚未散值，你且过来，炕上坐罢。",
+      "text_key": "hl_q1_n050_text",
+      "next_node": null,
+      "choices": [
+        {
+          "text": "黛玉忙谦谢，只在挨炕的一张椅子上告坐。",
+          "text_key": "hl_q1_n050_c1",
+          "next_node": "q1n060",
+          "condition": "",
+          "effects": [
+            { "var": "etiquette", "op": "inc", "value": 1 }
+          ]
+        },
+        {
+          "text": "依言便就着炕沿坐下。",
+          "text_key": "hl_q1_n050_c2",
+          "next_node": "q1n060",
+          "condition": "",
+          "effects": [
+            { "var": "etiquette", "op": "dec", "value": 1 }
+          ]
+        }
+      ]
+    },
+    "q1n060": {
+      "id": "q1n060",
+      "speaker_id": "daiyu",
+      "text": "又略坐片刻，便有丫鬟来回：老太太那边差人来请了。黛玉忙起身告退，随着丫鬟穿廊过户，径往贾母正房去了。",
+      "text_key": "hl_q1_n060_text",
+      "next_node": null,
+      "choices": []
+    }
+  }
+}

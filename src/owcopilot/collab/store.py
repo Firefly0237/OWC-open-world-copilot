@@ -1,3 +1,4 @@
+# 协作状态的按世界 JSON 账本（指派/评论/锁）。
 """Per-world JSON ledger for collaboration state (assignments / comments / locks).
 
 Sits under ``<root>/.collab/collab.json`` beside the world — zero canon pollution, exportable

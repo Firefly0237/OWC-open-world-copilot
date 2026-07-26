@@ -17,6 +17,7 @@ from __future__ import annotations
 # BE-1: e2e integration — calibration -> lesson write -> draft prompt injection
 # ---------------------------------------------------------------------------
 
+
 def _make_store_and_queue():
     from owcopilot.assist.review_queue import ReviewQueue
     from owcopilot.storage.sqlite import SQLiteStore
@@ -28,6 +29,7 @@ def _make_store_and_queue():
 
 def _add_resolved(queue, *, verdict: str, human: str, n: int = 1) -> None:
     from owcopilot.assist.review_queue import ReviewItem, ReviewItemType
+
     for i in range(n):
         item = queue.add(
             ReviewItem(
@@ -72,6 +74,7 @@ def test_be1_draft_prompt_contains_lesson_when_lessons_present() -> None:
 
     # Directly test _system_prompt with a lesson
     from owcopilot.retrieval.models import ContextPack
+
     pack = ContextPack(hits=[], query="test", budget_tokens=800)
     lessons = [
         {"lesson_text": "此类 quest_draft 内容历史有 3 次被拒。", "dimension": "completeness"}
@@ -143,6 +146,7 @@ def test_be1_e2e_calibration_to_draft_injection(tmp_path) -> None:
 # BE-2: worldgen/critic.py term injection
 # ---------------------------------------------------------------------------
 
+
 def test_be2_worldgen_critic_system_prompt_contains_term_block() -> None:
     """[BE-2 硬] _critic_system_prompt in worldgen/critic.py injects term constraints."""
     from owcopilot.content.models import Term
@@ -188,8 +192,11 @@ def test_be2_run_quest_refine_loop_passes_terms_to_critique() -> None:
             captured_terms.extend(kwargs.get("terms") or [])
             # Return immediate pass so loop exits in round 0
             from owcopilot.assist.critic import CritiqueResult
+
             return CritiqueResult(
-                verdict="pass", score=1.0, summary="ok",
+                verdict="pass",
+                score=1.0,
+                summary="ok",
                 raw='{"verdict":"pass","score":1.0,"summary":"ok","dimensions":[]}',
                 parse_ok=True,
             )
@@ -198,8 +205,15 @@ def test_be2_run_quest_refine_loop_passes_terms_to_critique() -> None:
     run_quest_refine_loop(
         critic=_SpyCritic(),  # type: ignore[arg-type]
         max_rounds=1,
-        quests=[{"title": "q", "objective": "o", "stages": ["s1", "s2"],
-                 "giver_npc": "npc_a", "location": "loc_a"}],
+        quests=[
+            {
+                "title": "q",
+                "objective": "o",
+                "stages": ["s1", "s2"],
+                "giver_npc": "npc_a",
+                "location": "loc_a",
+            }
+        ],
         relations=[],
         reference_rows=[],
         npc_refs={"npc_a"},
@@ -217,6 +231,7 @@ def test_be2_run_quest_refine_loop_passes_terms_to_critique() -> None:
 # ---------------------------------------------------------------------------
 # BE-3: _system_prompt ordering — quality_bar -> lesson -> term
 # ---------------------------------------------------------------------------
+
 
 def test_be3_prompt_ordering_quality_bar_before_lesson_before_term() -> None:
     """[BE-3 硬] In _system_prompt: quality_bar comes before lesson_section, lesson before term."""
@@ -249,6 +264,7 @@ def test_be3_prompt_ordering_quality_bar_before_lesson_before_term() -> None:
 # ---------------------------------------------------------------------------
 # BE-4: build_critic_lesson_block rewrites "生成时请" to "评判时请"
 # ---------------------------------------------------------------------------
+
 
 def test_be4_critic_lesson_block_rewrites_wording() -> None:
     """[BE-4 硬] Critic lesson block rewrites generation-side wording to eval-side wording."""
@@ -309,6 +325,7 @@ def test_be4_generation_lesson_block_keeps_original_wording() -> None:
 # BE-5: build_term_block >20 terms includes forbidden-word hits
 # ---------------------------------------------------------------------------
 
+
 def test_be5_build_term_block_includes_forbidden_hit_terms() -> None:
     """[BE-5 硬] When >20 terms and a forbidden word in context_hits, the term is included."""
     from owcopilot.assist.term_injection import build_term_block
@@ -343,8 +360,7 @@ def test_be5_no_hits_filters_all_terms_above_20() -> None:
     from owcopilot.content.models import Term
 
     terms = [
-        Term(id=f"t_{i}", canonical=f"c_{i}", forbidden=[f"f_{i}"], aliases=[])
-        for i in range(25)
+        Term(id=f"t_{i}", canonical=f"c_{i}", forbidden=[f"f_{i}"], aliases=[]) for i in range(25)
     ]
     block = build_term_block(terms, context_hits=["unrelated_ref"], inject_terms=True)
     # "unrelated_ref" doesn't match any id, canonical, alias, or forbidden word
@@ -354,6 +370,7 @@ def test_be5_no_hits_filters_all_terms_above_20() -> None:
 # ---------------------------------------------------------------------------
 # BE-6: worldgen _vocab_block uses seed_hits for >20 terms
 # ---------------------------------------------------------------------------
+
 
 def test_be6_vocab_block_includes_all_terms_when_over_20() -> None:
     """[BE-6 硬] _vocab_block with >20 terms injects all terms (seed_hits = term.id + canonical)."""
@@ -377,6 +394,7 @@ def test_be6_vocab_block_includes_all_terms_when_over_20() -> None:
 def test_be6_vocab_block_empty_for_no_terms() -> None:
     """[BE-6] No terms still returns empty string."""
     from owcopilot.worldgen.service import _vocab_block
+
     assert _vocab_block(None) == ""
     assert _vocab_block([]) == ""
 
@@ -384,6 +402,7 @@ def test_be6_vocab_block_empty_for_no_terms() -> None:
 # ---------------------------------------------------------------------------
 # BE-7: AcceptanceCheck.details has eval_type and is_sanity_gate
 # ---------------------------------------------------------------------------
+
 
 def test_be7_acceptance_check_has_eval_type_field() -> None:
     """[BE-7 硬] tool_selection_accuracy_gate check has eval_type and is_sanity_gate in details."""
@@ -409,9 +428,7 @@ def test_be7_acceptance_check_eval_type_present_in_real_run(tmp_path) -> None:
     from owcopilot.evaluation.acceptance import run_acceptance_evaluation
 
     report = run_acceptance_evaluation(tmp_path)
-    gate = next(
-        (c for c in report.checks if c.name == "tool_selection_accuracy_gate"), None
-    )
+    gate = next((c for c in report.checks if c.name == "tool_selection_accuracy_gate"), None)
     assert gate is not None, "tool_selection_accuracy_gate check must exist"
     assert gate.details.get("eval_type") == "offline_pipeline_sanity", (
         "eval_type must be 'offline_pipeline_sanity'"
@@ -422,6 +439,7 @@ def test_be7_acceptance_check_eval_type_present_in_real_run(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 # BE-8: save_lesson ON CONFLICT updates lesson_text
 # ---------------------------------------------------------------------------
+
 
 def test_be8_save_lesson_updates_lesson_text_on_conflict() -> None:
     """[BE-8 硬] On conflict, save_lesson updates lesson_text (not just false_pass_count)."""
@@ -449,7 +467,10 @@ def test_be8_lesson_text_not_stale_after_extract() -> None:
     store = SQLiteStore(":memory:")
     items_3 = [
         FalsePassItem(
-            item_id=f"item_{i}", item_type="quest_draft", object_ref=f"r_{i}", critic_score=0.6,
+            item_id=f"item_{i}",
+            item_type="quest_draft",
+            object_ref=f"r_{i}",
+            critic_score=0.6,
             dimension="grounding",
         )
         for i in range(3)
@@ -463,7 +484,10 @@ def test_be8_lesson_text_not_stale_after_extract() -> None:
     # Second calibration with 5 false-passes for same dimension -> lesson_text should update
     items_5 = [
         FalsePassItem(
-            item_id=f"item2_{i}", item_type="quest_draft", object_ref=f"r2_{i}", critic_score=0.6,
+            item_id=f"item2_{i}",
+            item_type="quest_draft",
+            object_ref=f"r2_{i}",
+            critic_score=0.6,
             dimension="grounding",
         )
         for i in range(5)
@@ -482,14 +506,23 @@ def test_be8_lesson_text_not_stale_after_extract() -> None:
 # BE-9: CLI --skills wires into ReActAgent.allowed_skills
 # ---------------------------------------------------------------------------
 
+
 def test_be9_cli_parses_skills_argument() -> None:
     """[BE-9 硬] CLI agent subparser accepts --skills argument."""
     from owcopilot.cli.main import build_parser
 
     parser = build_parser()
     args = parser.parse_args(
-        ["agent", "--goal", "test goal", "--skills", "audit_project", "list_issues",
-         "--content-root", "."]
+        [
+            "agent",
+            "--goal",
+            "test goal",
+            "--skills",
+            "audit_project",
+            "list_issues",
+            "--content-root",
+            ".",
+        ]
     )
     assert args.skills == ["audit_project", "list_issues"]
 
@@ -503,43 +536,126 @@ def test_be9_cli_skills_none_when_not_provided() -> None:
     assert args.skills is None
 
 
-def test_be9_react_agent_allowed_skills_filters_manifest() -> None:
-    """[BE-9 集成] ReActAgent stores allowed_skills and passes them to registry.manifest."""
-    from owcopilot.agent.offline import OfflineReactProvider
+def test_be9_react_agent_allowed_skills_filters_tool_schema() -> None:
+    """[BE-9 集成] ReActAgent passes allowed_skills to the schema layer: the model is bound only
+    the filtered tools (the manifest's post-migration equivalent — the tool list travels in the
+    tools schema)."""
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+    from pydantic import Field
+
     from owcopilot.agent.react import ReActAgent
-    from owcopilot.llm.cache import NoOpCache
-    from owcopilot.llm.gateway import LLMGateway
-    from owcopilot.llm.router import StaticRouter
+    from owcopilot.skills import default_skill_registry
 
-    gateway = LLMGateway(
-        providers={"react": OfflineReactProvider()},
-        router=StaticRouter(mapping={"agent_react": "react"}),
-        cache=NoOpCache(),
-    )
+    class _ToolRecordingModel(GenericFakeChatModel):
+        bound: list[list[str]] = Field(default_factory=list)
 
-    captured: list[set[str] | None] = []
+        def bind_tools(self, tools, **kwargs):
+            self.bound.append([t.name for t in tools])
+            return self
 
-    class _MockRegistry:
-        def manifest(self, allowed: set[str] | None = None) -> str:
-            captured.append(allowed)
-            if allowed is None:
-                return "- audit_project()\n- list_issues()\n- quality_harness()"
-            return "\n".join(f"- {s}()" for s in sorted(allowed))
-
-        def run(self, name: str, args: dict) -> dict:
-            return {"status": "ok"}
-
-    registry = _MockRegistry()
+    model = _ToolRecordingModel(messages=iter([AIMessage(content="done")]))
+    registry = default_skill_registry(content_root=".")
     agent = ReActAgent(
-        gateway=gateway,
-        registry=registry,  # type: ignore[arg-type]
+        model=model,
+        registry=registry,
         max_steps=1,
         allowed_skills={"audit_project", "list_issues"},
     )
-    # Run the agent — it will call registry.manifest(allowed=self.allowed_skills) in run()
     agent.run("test goal")
 
-    # Verify manifest was called with the restricted skill set
+    # The model only ever saw the restricted tool face.
+    assert model.bound, "the agent must bind its tools onto the model"
+    assert set(model.bound[-1]) == {"audit_project", "list_issues"}
+
+
+# ---------------------------------------------------------------------------
+# W1-1 (SECURITY): --skills must gate EXECUTION, not just what the model sees.
+#
+# The gap: the CLI agent bound `--skills` only to the schema layer
+# (ReActAgent.allowed_skills). The execution-layer fallback dispatch
+# (_RegistryFallbackMiddleware) held the FULL registry, so a model that emitted
+# an out-of-scope skill call (a name never bound as a tool) had it dispatched
+# through `registry.run` and REALLY EXECUTED. The fix converges the permission
+# to one place: the CLI hands ReActAgent a `scoped_registry(...)`, so both the
+# schema layer and the execution layer share the same scope.
+# ---------------------------------------------------------------------------
+
+
+def _dirty_world(content_root) -> None:
+    """A minimal world with one dangling quest ref, so audit_project reports a real error."""
+    from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest
+    from owcopilot.content.store import ContentStore
+
+    ContentStore(content_root).save(
+        ContentBundle(
+            entities={
+                "npc_aldric": Entity(
+                    id="npc_aldric",
+                    name="Aldric",
+                    type=EntityType.NPC,
+                    description="Caravan master",
+                )
+            },
+            quests={"q1": Quest(id="q1", title="Q1", giver_npc="npc_missing")},
+        )
+    )
+
+
+def test_w1_1_cli_skills_gates_execution_not_just_schema(tmp_path, capsys, monkeypatch) -> None:
+    """[W1-1 复现] Only audit_project is whitelisted, but the model directly calls the
+    filtered-out propose_fix (a PROPOSES_PATCH skill). The allowlist must reject it at the
+    EXECUTION layer (SkillError observation, handler never runs), and the emitted `skills`
+    manifest must reflect the ACTUAL allow-set — not the full registry."""
+    import json
+
+    import owcopilot.cli.main as cli_main
+    from owcopilot.fakes import scripted_chat_model
+
+    content_root = tmp_path / "content"
+    _dirty_world(content_root)
+
+    # The model tries the out-of-scope skill first, then the allowed one, then reports.
+    model = scripted_chat_model(
+        [("propose_fix", {"issue_id": "q1"}), ("audit_project", {}), "reported"]
+    )
+    monkeypatch.setattr(cli_main, "_agent_chat_model", lambda args: model)
+
+    code = cli_main.main(
+        [
+            "agent",
+            "--content-root",
+            str(content_root),
+            "--sqlite-path",
+            ":memory:",
+            "--goal",
+            "diagnose only",
+            "--skills",
+            "audit_project",
+            "--max-steps",
+            "5",
+            "--no-recall",
+            "--llm-mode",
+            "offline",
+        ]
+    )
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    steps = payload["steps"]
+
+    # 1) The out-of-scope skill was DENIED at execution — its handler never ran.
+    propose_steps = [s for s in steps if s["action"] == "propose_fix"]
+    assert propose_steps, "expected the model's propose_fix attempt to be recorded as a step"
+    assert all(s["is_error"] for s in propose_steps), (
+        "out-of-scope propose_fix must be rejected, not executed"
+    )
     assert any(
-        a == {"audit_project", "list_issues"} for a in captured
-    ), f"manifest must be called with allowed_skills set; captured={captured}"
+        "not in this agent's allowed tool set" in s["observation"] for s in propose_steps
+    ), "the denial must be the scoped registry's own SkillError, fed back as a recoverable obs"
+
+    # 2) The in-scope skill still runs normally.
+    audit_steps = [s for s in steps if s["action"] == "audit_project"]
+    assert audit_steps and not any(s["is_error"] for s in audit_steps)
+
+    # 3) The emitted skills manifest reflects the ACTUAL allow-set (no lying log).
+    assert payload["skills"] == ["audit_project"]

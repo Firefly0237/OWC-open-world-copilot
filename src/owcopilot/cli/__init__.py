@@ -1,3 +1,4 @@
+# 命令行接口包。
 """Command-line interface package."""
 
 from collections.abc import Sequence

@@ -1,3 +1,4 @@
+# 基于逆向 JSON Patch 操作的回滚。
 """Patch rollback helpers based on inverse JSON Patch operations."""
 
 from __future__ import annotations

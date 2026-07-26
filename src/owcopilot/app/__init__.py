@@ -1,3 +1,4 @@
+# UI 无关的工作台助手。
 """UI-agnostic workbench helpers.
 
 Only view-models and actions are exported. The FastAPI service (`service/api.py`) and the CLI

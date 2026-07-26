@@ -1,3 +1,4 @@
+# 角色卡生成：接地于现有世界（引用真实实体，不凭空造）。
 """Detailed character-sheet generation, grounded in the existing world.
 
 The brief mirrors what narrative designers actually fill in for a character document
@@ -153,6 +154,7 @@ class CharacterProfileService:
         context_builder: ContextPackBuilder,
         critic: CharacterCritic | None = None,
         max_refine_rounds: int = 0,
+        lessons: list[dict] | None = None,  # cross-session lesson archive (get_lessons_for_type)
     ) -> None:
         self.gateway = gateway
         self.bundle = bundle
@@ -160,6 +162,10 @@ class CharacterProfileService:
         # Opt-in critique→refine loop: without a critic the service is the original single shot.
         self.critic = critic
         self.max_refine_rounds = max_refine_rounds if critic is not None else 0
+        # Lessons injected into BOTH the generation prompt and the critic prompt (same pattern as
+        # the quest draft path). None when injection is disabled or the archive is empty → prompts
+        # render byte-for-byte unchanged.
+        self.lessons = lessons
 
     def generate(self, brief: CharacterBrief, *, budget_tokens: int = 1200) -> CharacterDraft:
         query = " ".join(
@@ -190,6 +196,9 @@ class CharacterProfileService:
                 summary=d.entity.description,
                 context_lines=context_lines,
                 missing_sections=missing,
+                # Same archive the generator sees; inject guard mirrors the quest draft path.
+                lessons=self.lessons,
+                inject_lessons=self.lessons is not None,
             )
             return missing, critique
 
@@ -241,9 +250,18 @@ class CharacterProfileService:
         prior: CharacterDraft | None = None,
         feedback: list[str] | None = None,
     ) -> CharacterDraft:
+        # Lesson memory block after the rubric/quality bar, before the world-facts context. Empty
+        # when no lessons → the system prompt is byte-for-byte unchanged from before this hook.
+        lesson_section = ""
+        if self.lessons:
+            from .lessons import build_lesson_block
+
+            lb = build_lesson_block(self.lessons, inject_lessons=True)
+            lesson_section = f"\n\n{lb}" if lb else ""
         raw = self.gateway.complete(
             task="character_profile",
             system=_SYSTEM_PROMPT
+            + lesson_section
             + "\n\nWorld facts context:\n"
             + ("\n".join(context_lines) if context_lines else "(none)"),
             user=_brief_user_message(brief, prior=prior, feedback=feedback),
@@ -318,6 +336,9 @@ class CharacterProfileService:
         )
 
 
+# Kept off complete_structured: this returns a loose dict from which _draft_from_payload CONSTRUCTS
+# a CharacterDraft (entity id minting, relationship resolution against known ids), not a single
+# validated model shape.
 def _parse_payload(raw: str) -> dict[str, Any]:
     return extract_json_object(raw)
 

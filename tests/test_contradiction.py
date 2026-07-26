@@ -54,6 +54,59 @@ def test_offline_judge_confirms_the_antonym_pair() -> None:
     assert c.verdict == "contradiction" and c.subjects == ["fac_a", "fac_b"]
 
 
+def _two_pair_world() -> ContentBundle:
+    """Two conflicting relation pairs: one the offline judge confirms (盟友↔死敌) and one it does
+    NOT (盟友↔附庸 is not an antonym). Lets a test watch the unconfirmed pair's fate."""
+    return ContentBundle(
+        entities={
+            "fac_a": Entity(id="fac_a", name="A", type=EntityType.FACTION),
+            "fac_b": Entity(id="fac_b", name="B", type=EntityType.FACTION),
+            "fac_c": Entity(id="fac_c", name="C", type=EntityType.FACTION),
+            "fac_d": Entity(id="fac_d", name="D", type=EntityType.FACTION),
+        },
+        relations=[
+            Relation(source="fac_a", target="fac_b", kind="盟友"),
+            Relation(source="fac_a", target="fac_b", kind="死敌"),  # antonym -> judge confirms
+            Relation(source="fac_c", target="fac_d", kind="盟友"),
+            Relation(source="fac_c", target="fac_d", kind="附庸"),  # not antonym -> judge silent
+        ],
+    )
+
+
+def test_judge_does_not_reduce_recall() -> None:
+    # Regression for the recall inversion: turning the judge ON must never surface FEWER candidates
+    # than leaving it off. The judge only stamps a subset as confirmed contradictions; the pair it
+    # does not confirm must stay "review", not vanish.
+    world = _two_pair_world()
+    no_judge = ContradictionDetector(bundle=world).detect(use_llm=False)
+    with_judge = ContradictionDetector(
+        bundle=_two_pair_world(), gateway=_Gateway(OfflineContradictionJudge())
+    ).detect(use_llm=True)
+    assert with_judge.candidate_count == no_judge.candidate_count == 2
+    # every candidate is still surfaced with the judge on (recall preserved), not just the confirmed
+    assert len(with_judge.findings) == len(no_judge.findings)
+    # the judge ADDS precision: one pair confirmed, the other still queued for a human
+    assert len(with_judge.contradictions) == 1
+    assert len(with_judge.review_suggested) == 1
+    assert {"fac_a", "fac_b"} == set(with_judge.contradictions[0].subjects)
+    assert {"fac_c", "fac_d"} == set(with_judge.review_suggested[0].subjects)
+
+
+def test_max_judge_cap_keeps_unjudged_candidates_as_review() -> None:
+    # The judge cap bounds LLM cost, it must not drop recall: candidates past ``max_judge`` are
+    # surfaced for review (counted in judge_skipped), never silently dropped.
+    world = _two_pair_world()
+    report = ContradictionDetector(
+        bundle=world, gateway=_Gateway(OfflineContradictionJudge())
+    ).detect(use_llm=True, max_judge=1)
+    assert report.candidate_count == 2
+    assert report.judged_count == 1
+    assert report.judge_skipped == 1
+    # both candidates still surfaced: 1 judged, 1 kept as review — nothing dropped
+    assert len(report.findings) == 2
+    assert len(report.review_suggested) >= 1
+
+
 def test_clean_world_has_no_candidates() -> None:
     bundle = ContentBundle(
         entities={"fac_a": Entity(id="fac_a", name="铁律盟", type=EntityType.FACTION)},

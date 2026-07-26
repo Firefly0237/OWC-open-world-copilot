@@ -1,0 +1,178 @@
+{
+  "id": "hl_q3_xifeng",
+  "title": "凤姐登场",
+  "giver_npc": "xifeng",
+  "location": null,
+  "objective": "黛玉在贾母房中初见凤姐，应对夸赞、垂询与馈礼，冷眼看凤姐当众理事。（改编创作，非原文引用）",
+  "prerequisites": [],
+  "timeline_order": 3,
+  "stages": [
+    {
+      "id": "q3n010",
+      "summary": "未见其人先闻其声",
+      "location": null,
+      "required_entities": ["daiyu", "xifeng"]
+    },
+    {
+      "id": "q3n020",
+      "summary": "凤姐夸赞黛玉容貌",
+      "location": null,
+      "required_entities": ["daiyu", "xifeng"]
+    },
+    {
+      "id": "q3n030",
+      "summary": "凤姐问年纪来历",
+      "location": null,
+      "required_entities": ["daiyu", "xifeng"]
+    },
+    {
+      "id": "q3n040",
+      "summary": "凤姐问读书",
+      "location": null,
+      "required_entities": ["daiyu", "xifeng"]
+    },
+    {
+      "id": "q3n050",
+      "summary": "凤姐问吃药",
+      "location": null,
+      "required_entities": ["daiyu", "xifeng"]
+    },
+    {
+      "id": "q3n060",
+      "summary": "送表礼",
+      "location": null,
+      "required_entities": ["daiyu", "xifeng"]
+    },
+    {
+      "id": "q3n070",
+      "summary": "凤姐当众理事",
+      "location": null,
+      "required_entities": ["daiyu", "xifeng"]
+    },
+    {
+      "id": "q3n080",
+      "summary": "黛玉冷眼旁观，收束",
+      "location": null,
+      "required_entities": ["daiyu", "xifeng"]
+    }
+  ],
+  "rewards": [],
+  "dialogue_refs": [],
+  "localization_keys": ["quest.hl_q3_xifeng.objective"],
+  "tags": ["main", "chapter3", "demo"],
+  "metadata": {},
+  "origin": "human",
+  "review_status": "approved",
+  "logic": {
+    "variables": [
+      { "id": "xifeng_favor", "name": "凤姐印象", "type": "int", "default": 0, "enum_values": [] },
+      { "id": "careful", "name": "步步留心", "type": "bool", "default": false, "enum_values": [] },
+      { "id": "said_read_books", "name": "自称读过书", "type": "bool", "default": false, "enum_values": [] }
+    ],
+    "precondition": "",
+    "stage_logic": [],
+    "branches": [
+      {
+        "id": "b_q3n020_c1",
+        "from_stage": "q3n020",
+        "condition": "",
+        "to_stage": "q3n030",
+        "outcome": "",
+        "effects": [
+          { "var": "xifeng_favor", "op": "inc", "value": 1 }
+        ]
+      },
+      {
+        "id": "b_q3n020_c2",
+        "from_stage": "q3n020",
+        "condition": "",
+        "to_stage": "q3n030",
+        "outcome": "",
+        "effects": [
+          { "var": "careful", "op": "set", "value": true }
+        ]
+      },
+      {
+        "id": "b_q3n030_c1",
+        "from_stage": "q3n030",
+        "condition": "",
+        "to_stage": "q3n040",
+        "outcome": "",
+        "effects": [
+          { "var": "xifeng_favor", "op": "inc", "value": 1 }
+        ]
+      },
+      {
+        "id": "b_q3n030_c2",
+        "from_stage": "q3n030",
+        "condition": "",
+        "to_stage": "q3n040",
+        "outcome": "",
+        "effects": [
+          { "var": "careful", "op": "set", "value": true }
+        ]
+      },
+      {
+        "id": "b_q3n040_c1",
+        "from_stage": "q3n040",
+        "condition": "said_read_books == true",
+        "to_stage": "q3n050",
+        "outcome": "",
+        "effects": [
+          { "var": "xifeng_favor", "op": "inc", "value": 1 }
+        ]
+      },
+      {
+        "id": "b_q3n040_c2",
+        "from_stage": "q3n040",
+        "condition": "",
+        "to_stage": "q3n050",
+        "outcome": "",
+        "effects": [
+          { "var": "careful", "op": "set", "value": true }
+        ]
+      },
+      {
+        "id": "b_q3n050_c1",
+        "from_stage": "q3n050",
+        "condition": "",
+        "to_stage": "q3n060",
+        "outcome": "",
+        "effects": [
+          { "var": "xifeng_favor", "op": "inc", "value": 1 }
+        ]
+      },
+      {
+        "id": "b_q3n050_c2",
+        "from_stage": "q3n050",
+        "condition": "",
+        "to_stage": "q3n060",
+        "outcome": "",
+        "effects": [
+          { "var": "careful", "op": "set", "value": true }
+        ]
+      },
+      {
+        "id": "b_q3n060_c1",
+        "from_stage": "q3n060",
+        "condition": "",
+        "to_stage": "q3n070",
+        "outcome": "",
+        "effects": [
+          { "var": "xifeng_favor", "op": "inc", "value": 1 }
+        ]
+      },
+      {
+        "id": "b_q3n060_c2",
+        "from_stage": "q3n060",
+        "condition": "",
+        "to_stage": "q3n070",
+        "outcome": "",
+        "effects": [
+          { "var": "careful", "op": "set", "value": true }
+        ]
+      }
+    ],
+    "unlocks": []
+  }
+}

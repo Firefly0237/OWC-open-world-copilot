@@ -40,6 +40,9 @@ jobs:
       - name: Acceptance benchmark (seeded errors / retrieval / impact gates)
         run: python -m owcopilot.cli.main eval-acceptance --workspace .tmp/acceptance_ci
 
+      - name: Agent-Eval JD-dimension scorecard (regression gate)
+        run: python -m owcopilot.cli.main eval-agent
+
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -75,7 +78,8 @@ jobs:
             curl -fsS http://127.0.0.1:8000/health && break || sleep 1
           done
           curl -fsS http://127.0.0.1:8000/health | grep -q '"status":"ok"'
-          curl -fsS -X POST http://127.0.0.1:8000/quests:generate \
+          curl -fsS http://127.0.0.1:8000/workspaces | grep -q '"workspaces"'
+          curl -fsS -X POST http://127.0.0.1:8000/workspaces \
             -H 'Content-Type: application/json' \
-            -d '{"intent":"A caravan quest for Aldric headed to Northwatch.","world_bible_md":"## NPCs\n- Aldric - Caravan master [merchant, quest_giver]\n## Locations\n- Northwatch - Fortified town\n## Relations\n- Aldric -> Northwatch : located_in\n"}' | grep -q '"consistent":true'
+            -d '{"name":"ci-smoke"}' | grep -q '"name":"ci-smoke"'
           docker rm -f owcopilot

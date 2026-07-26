@@ -1,3 +1,4 @@
+# 批量 bark 生成：确定性过滤 + 进审阅队列。
 """Batch bark generation with deterministic filtering and review queue insertion."""
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ class BarkBatchService:
         review_queue: ReviewQueue | None = None,
         critic: BarkCritic | None = None,
         max_refine_rounds: int = 0,
+        lessons: list[dict] | None = None,  # cross-session lesson archive (get_lessons_for_type)
     ) -> None:
         self.gateway = gateway
         self.bundle = bundle
@@ -54,6 +56,10 @@ class BarkBatchService:
         # the loop to barks was just supplying assess/regenerate around the existing draft call.
         self.critic = critic
         self.max_refine_rounds = max_refine_rounds if critic is not None else 0
+        # Lessons fetched from the archive by the caller and injected into BOTH the generation
+        # prompt and the critic prompt (the same pattern the quest draft path uses). None when no
+        # lessons were fetched (injection disabled or empty archive) → the prompts render unchanged.
+        self.lessons = lessons
 
     def generate(
         self,
@@ -126,7 +132,7 @@ class BarkBatchService:
             user += "\n[REFINE] Address this reviewer feedback:\n" + "\n".join(feedback)
         raw = self.gateway.complete(
             task="barks_batch",
-            system=_system_prompt(voice_card, max_chars=max_chars),
+            system=_system_prompt(voice_card, max_chars=max_chars, lessons=self.lessons),
             user=user,
         )
         return parse_bark_texts(raw)[:count]
@@ -150,6 +156,10 @@ class BarkBatchService:
                 voice_card_json=voice_card.model_dump_json(),
                 variants=current,
                 lint_problems=problems,
+                # Same archive the generator sees: a dimension humans keep rejecting makes the
+                # critic stricter on it too. inject guard mirrors the quest draft path.
+                lessons=self.lessons,
+                inject_lessons=self.lessons is not None,
             )
             return problems, critique
 
@@ -177,6 +187,8 @@ class BarkBatchService:
         return problems
 
 
+# Kept off complete_structured: the output is a list[str] accepted in two shapes (a bare array or
+# {"variants": [...]}), not a single BaseModel.
 def parse_bark_texts(raw: str) -> list[str]:
     data = extract_json(raw)
     if isinstance(data, dict):
@@ -186,11 +198,23 @@ def parse_bark_texts(raw: str) -> list[str]:
     return [str(item) for item in data]
 
 
-def _system_prompt(voice_card: VoiceCard, *, max_chars: int) -> str:
+def _system_prompt(
+    voice_card: VoiceCard, *, max_chars: int, lessons: list[dict] | None = None
+) -> str:
+    # Lesson memory block: injected after the rubric, before the voice card (same relative slot as
+    # the quest draft prompt). Empty string when lessons is None/empty → the prompt is byte-for-byte
+    # unchanged from before this hook existed.
+    lesson_section = ""
+    if lessons:
+        from .lessons import build_lesson_block
+
+        lb = build_lesson_block(lessons, inject_lessons=True)
+        lesson_section = f"{lb}\n" if lb else ""
     return (
         "Generate short NPC bark variants as JSON. Return {'variants': [text, ...]}. "
         f"Each variant must be <= {max_chars} characters. Stay within this voice card:\n"
         + industry_source_block(*BARK_RUBRIC_SOURCES)
         + "\n"
-        f"{voice_card.model_dump_json()}"
+        + lesson_section
+        + f"{voice_card.model_dump_json()}"
     )

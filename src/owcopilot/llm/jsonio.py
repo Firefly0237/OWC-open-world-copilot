@@ -1,3 +1,4 @@
+# 从模型回复里容错抽取 JSON。
 """Tolerant extraction of JSON from model replies.
 
 Real models wrap their JSON in prose ("Here is the world: { … }") or markdown fences, or add a
@@ -10,7 +11,11 @@ pull the first balanced object/array out of the reply instead. A genuinely unpar
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, TypeVar
+
+from pydantic import BaseModel, ValidationError
+
+M = TypeVar("M", bound=BaseModel)
 
 
 def extract_json_object(raw: str) -> dict[str, Any]:
@@ -21,6 +26,25 @@ def extract_json_object(raw: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("model reply did not contain a JSON object")
     return value
+
+
+def extract_validated(raw: str, model_cls: type[M]) -> M:
+    """Extract JSON from ``raw`` and validate it against ``model_cls``.
+
+    The deterministic client-side half of structured output (OWASP LLM01 #2: validate expected
+    formats in code, not by trusting the model). On a schema violation raises a ``ValueError`` that
+    NAMES the offending field(s) — a specific, quotable error a repair prompt can act on, unlike a
+    generic "could not be parsed". Absent/invalid JSON raises via
+    :func:`extract_json_object`."""
+    obj = extract_json_object(raw)
+    try:
+        return model_cls.model_validate(obj)
+    except ValidationError as exc:
+        fields = "; ".join(
+            f"{'.'.join(str(p) for p in err['loc']) or '<root>'}: {err['msg']}"
+            for err in exc.errors()
+        )
+        raise ValueError(f"{model_cls.__name__} validation failed: {fields}") from exc
 
 
 def extract_json(raw: str) -> Any:

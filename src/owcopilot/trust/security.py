@@ -1,11 +1,14 @@
+# 文件系统路径安全助手（路径守卫，防越界）。
 """Filesystem path safety helpers."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from ..errors import OWCopilotError
 
-class PathSecurityError(ValueError):
+
+class PathSecurityError(OWCopilotError, ValueError):
     """Raised when a requested path escapes an allowed root."""
 
 

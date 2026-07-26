@@ -1,3 +1,4 @@
+# OpenTelemetry GenAI 语义约定的 span 树（agent 可观测性）。
 """OpenTelemetry GenAI semantic-convention span tree for OWCopilot agents.
 
 Architecture overview
@@ -162,25 +163,25 @@ class SqliteSpanExporter:
             trace_id_hex = format(ctx.trace_id, "032x") if ctx else ""
             span_id_hex = format(ctx.span_id, "016x") if ctx else ""
             parent_ctx = span.parent
-            parent_span_id_hex = (
-                format(parent_ctx.span_id, "016x") if parent_ctx else ""
-            )
+            parent_span_id_hex = format(parent_ctx.span_id, "016x") if parent_ctx else ""
             run_id = trace_id_hex  # run_id == trace_id for single-process runs
             attrs = dict(span.attributes or {})
             step_idx = int(attrs.get("agent.step_idx", -1))
             status_code = span.status.status_code.name if span.status else "UNSET"
-            rows.append((
-                trace_id_hex,
-                span_id_hex,
-                parent_span_id_hex,
-                run_id,
-                span.name,
-                span.start_time or 0,
-                span.end_time or 0,
-                status_code,
-                json.dumps(attrs, ensure_ascii=False),
-                step_idx,
-            ))
+            rows.append(
+                (
+                    trace_id_hex,
+                    span_id_hex,
+                    parent_span_id_hex,
+                    run_id,
+                    span.name,
+                    span.start_time or 0,
+                    span.end_time or 0,
+                    status_code,
+                    json.dumps(attrs, ensure_ascii=False),
+                    step_idx,
+                )
+            )
         try:
             conn.executemany(_INSERT_SPAN_SQL, rows)
             conn.commit()
@@ -281,6 +282,7 @@ def get_tracer(service_name: str | None = None) -> Any:
 # In-memory exporter (for unit tests — no SQLite, no network)
 # ---------------------------------------------------------------------------
 
+
 class InMemoryExporter:
     """Minimal OTEL SpanExporter that collects finished spans in a list (test helper).
 
@@ -346,6 +348,7 @@ def build_test_tracer(exporter: InMemoryExporter | None = None) -> tuple[Any, In
 # Span-tree context managers for react.py instrumentation
 # ---------------------------------------------------------------------------
 
+
 @contextlib.contextmanager
 def invoke_agent_span(
     tracer: Any,
@@ -408,6 +411,39 @@ def gen_ai_chat_span(
 
 
 @contextlib.contextmanager
+def gen_ai_compact_span(
+    tracer: Any,
+    *,
+    model: str = "",
+) -> Generator[Any, None, None]:
+    """Child span for one context-compaction (transcript-summary) LLM call.
+
+    The compaction summariser call is a distinct chat call the compressor makes WHILE building a
+    planning turn's read-time view, so this span is opened around that ``model.invoke`` and nests
+    under the planning ``gen_ai.chat`` span that triggered it. Nesting it as a child (rather than a
+    sibling) is deliberate: a trace tool's "self time" for the planning span is its duration minus
+    its children's, so a child compact span makes the planning span's self time exclude the
+    compaction cost — the whole point of giving compaction its own span instead of folding it into
+    the planning call. Marked ``gen_ai.owc.task="compact"`` to set it apart from the step-indexed
+    planning spans.
+
+    Attributes:
+    - ``gen_ai.operation.name`` = "chat"
+    - ``gen_ai.request.model``  = model (``"(unknown)"`` when the model reports none)
+    - ``gen_ai.owc.task``       = "compact"
+    """
+    with tracer.start_as_current_span(
+        "gen_ai.chat",
+        attributes={
+            "gen_ai.operation.name": "chat",
+            "gen_ai.request.model": model or "(unknown)",
+            "gen_ai.owc.task": "compact",
+        },
+    ) as span:
+        yield span
+
+
+@contextlib.contextmanager
 def execute_tool_span(
     tracer: Any,
     *,
@@ -436,6 +472,7 @@ def execute_tool_span(
 # Query interface — replay / debugging (P4B-3)
 # ---------------------------------------------------------------------------
 
+
 def query_by_run_id(run_id: str, db_path: str | None = None) -> list[dict[str, Any]]:
     """Return all spans for *run_id* from the SQLite trace store, ordered by start time.
 
@@ -449,11 +486,7 @@ def query_by_run_id(run_id: str, db_path: str | None = None) -> list[dict[str, A
         for s in spans:
             print(s["name"], s["attributes"].get("gen_ai.tool.name"))
     """
-    path_str: str = (
-        db_path
-        or os.getenv(_OTEL_SQLITE_PATH_ENV)
-        or _default_sqlite_path()
-    )
+    path_str: str = db_path or os.getenv(_OTEL_SQLITE_PATH_ENV) or _default_sqlite_path()
     if not os.path.exists(path_str):
         return []
 
@@ -471,18 +504,20 @@ def query_by_run_id(run_id: str, db_path: str | None = None) -> list[dict[str, A
                 attrs = json.loads(row[8])
             except (ValueError, TypeError):
                 attrs = {}
-            rows.append({
-                "trace_id": row[0],
-                "span_id": row[1],
-                "parent_span_id": row[2],
-                "run_id": row[3],
-                "name": row[4],
-                "start_time_ns": row[5],
-                "end_time_ns": row[6],
-                "status_code": row[7],
-                "attributes": attrs,
-                "step_idx": row[9],
-            })
+            rows.append(
+                {
+                    "trace_id": row[0],
+                    "span_id": row[1],
+                    "parent_span_id": row[2],
+                    "run_id": row[3],
+                    "name": row[4],
+                    "start_time_ns": row[5],
+                    "end_time_ns": row[6],
+                    "status_code": row[7],
+                    "attributes": attrs,
+                    "step_idx": row[9],
+                }
+            )
         return rows
     finally:
         conn.close()
@@ -521,6 +556,7 @@ def _extract_trace_id_from_tracer(tracer: Any) -> str:
 # No-op shims — returned when OTEL is disabled so call sites need no if-guards
 # ---------------------------------------------------------------------------
 
+
 class _NoOpSpan:
     """A span that does nothing, used when OTEL is disabled."""
 
@@ -546,9 +582,7 @@ class _NoOpTracer:
     """A tracer that returns no-op spans, used when OTEL is disabled."""
 
     @contextlib.contextmanager
-    def start_as_current_span(
-        self, name: str, **kwargs: Any
-    ) -> Generator[_NoOpSpan, None, None]:  # noqa: ARG002
+    def start_as_current_span(self, name: str, **kwargs: Any) -> Generator[_NoOpSpan, None, None]:  # noqa: ARG002
         yield _NoOpSpan()
 
 

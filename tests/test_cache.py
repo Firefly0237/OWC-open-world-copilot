@@ -194,7 +194,7 @@ def test_build_cache_backend_supports_redis_plus_semantic():
 
 # ----------------------------------------------------- cache key captures model + project scope
 class _ModelProvider:
-    """Fake real-provider stand-in that carries a `.model` id (like OpenAICompatProvider) and
+    """Fake real-provider stand-in that carries a `.model` id (like ChatModelProvider) and
     returns a model-specific completion, so we can prove the cache distinguishes models."""
 
     def __init__(self, model: str) -> None:

@@ -42,6 +42,47 @@ def test_linear_quest_completes_and_applies_effects() -> None:
     assert run.final_state["flag"] is True  # effect applied during the walk
 
 
+def test_quest_precondition_false_is_unavailable_not_completed() -> None:
+    # Regression for the P0 gap: a quest-level precondition that is never satisfiable must make the
+    # quest `unavailable` (no stage entered), NOT walk to `completed`. Before the fix the quest ran
+    # to completion because only stage-level preconditions were evaluated.
+    run = simulate_quest(
+        _quest(
+            QuestLogic(
+                variables=[LogicVar(id="has_writ", type=LogicVarType.BOOL, default=False)],
+                precondition="has_writ",  # false in the seeded state, no initial override
+            )
+        )
+    )
+    assert run.status == "unavailable"
+    assert run.path == [] and run.steps == []  # never entered a stage
+    assert "has_writ" in run.message  # carries the gate expression for narration
+    assert run.final_state == {"has_writ": False}  # the seeded state that failed the gate
+
+
+def test_quest_precondition_satisfied_by_initial_state_completes() -> None:
+    # The same gate, satisfied by the initial state, behaves exactly as before (state-dependent).
+    run = simulate_quest(
+        _quest(
+            QuestLogic(
+                variables=[LogicVar(id="has_writ", type=LogicVarType.BOOL, default=False)],
+                precondition="has_writ",
+            )
+        ),
+        initial_state={"has_writ": True},
+    )
+    assert run.status == "completed"
+    assert run.path == ["s1", "s2", "s3"]
+
+
+def test_empty_quest_precondition_never_gates() -> None:
+    # Regression sentinel: an empty quest precondition ("" = always enterable) must not gate.
+    run = simulate_quest(
+        _quest(QuestLogic(precondition="", stage_logic=[StageLogic(stage_id="s1")]))
+    )
+    assert run.status == "completed"
+
+
 def test_blocked_when_precondition_false() -> None:
     run = simulate_quest(
         _quest(

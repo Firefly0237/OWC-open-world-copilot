@@ -1,3 +1,4 @@
+# CLI/REST/MCP 共用的补丁工作流（建议→审阅→应用的编排层）。
 """Patch workflows shared by the CLI, REST and MCP entry points.
 
 The heavy lifting lives in `patches.*` services; this module owns the project-level glue —
