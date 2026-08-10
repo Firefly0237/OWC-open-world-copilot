@@ -15,8 +15,9 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import wraps
+from importlib import import_module
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar, cast
 
 _LOCKS_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, threading.RLock] = {}
@@ -24,6 +25,21 @@ _THREAD_STATE = threading.local()
 _WINDOWS_LOCK_RETRY_SECONDS = 0.05
 _WINDOWS_LOCK_BUSY_ERRNOS = {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
 ReturnT = TypeVar("ReturnT")
+
+
+class _WindowsLockingAPI(Protocol):
+    """Typed boundary for the Windows-only subset of :mod:`msvcrt` used here."""
+
+    LK_NBLCK: int
+    LK_UNLCK: int
+
+    def locking(self, descriptor: int, mode: int, byte_count: int, /) -> None: ...
+
+
+def _windows_locking_api() -> _WindowsLockingAPI:
+    """Load ``msvcrt`` lazily so non-Windows type checking and imports remain valid."""
+
+    return cast(_WindowsLockingAPI, import_module("msvcrt"))
 
 
 def _held_lock_keys() -> set[str]:
@@ -37,10 +53,17 @@ def _held_lock_keys() -> set[str]:
 def _try_windows_lock(descriptor: int) -> None:
     """Attempt the one-byte Windows lock once without msvcrt's fixed retry budget."""
 
-    import msvcrt
-
+    windows_lock = _windows_locking_api()
     os.lseek(descriptor, 0, os.SEEK_SET)
-    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+    windows_lock.locking(descriptor, windows_lock.LK_NBLCK, 1)
+
+
+def _release_windows_lock(descriptor: int) -> None:
+    """Release the one-byte Windows lock through the typed platform boundary."""
+
+    windows_lock = _windows_locking_api()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    windows_lock.locking(descriptor, windows_lock.LK_UNLCK, 1)
 
 
 def _acquire_windows_lock(descriptor: int) -> None:
@@ -71,12 +94,10 @@ def _acquire_os_lock(descriptor: int) -> None:
 
 
 def _release_os_lock(descriptor: int) -> None:
-    os.lseek(descriptor, 0, os.SEEK_SET)
     if os.name == "nt":
-        import msvcrt
-
-        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        _release_windows_lock(descriptor)
         return
+    os.lseek(descriptor, 0, os.SEEK_SET)
     posix_lock: Any = __import__("fcntl")
     posix_lock.flock(descriptor, posix_lock.LOCK_UN)
 

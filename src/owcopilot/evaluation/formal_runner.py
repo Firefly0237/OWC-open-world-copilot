@@ -17,8 +17,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from importlib import import_module
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol, cast
 
 from pydantic import BaseModel, ValidationError
 
@@ -70,6 +71,21 @@ _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
 _VERDICT_STATUSES = frozenset({EvalStatus.PASS, EvalStatus.FAIL})
 _PUBLICATION_THREAD_LOCKS_GUARD = threading.Lock()
 _PUBLICATION_THREAD_LOCKS: dict[str, threading.Lock] = {}
+
+
+class _WindowsLockingAPI(Protocol):
+    """Typed boundary for the Windows-only byte-range locking API."""
+
+    LK_NBLCK: int
+    LK_UNLCK: int
+
+    def locking(self, descriptor: int, mode: int, byte_count: int, /) -> None: ...
+
+
+def _windows_locking_api() -> _WindowsLockingAPI:
+    """Load ``msvcrt`` only on the Windows execution path."""
+
+    return cast(_WindowsLockingAPI, import_module("msvcrt"))
 
 
 class FormalRunnerError(RuntimeError):
@@ -563,6 +579,22 @@ def _publication_lock_identity_matches(descriptor: int, lock_path: Path) -> bool
     )
 
 
+def _try_windows_publication_lock(descriptor: int) -> None:
+    """Attempt the publication byte lock once without blocking."""
+
+    windows_lock = _windows_locking_api()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    windows_lock.locking(descriptor, windows_lock.LK_NBLCK, 1)
+
+
+def _release_windows_publication_lock(descriptor: int) -> None:
+    """Release the publication byte lock through the typed platform boundary."""
+
+    windows_lock = _windows_locking_api()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    windows_lock.locking(descriptor, windows_lock.LK_UNLCK, 1)
+
+
 @contextmanager
 def _publication_root_lock(root: Path) -> Iterator[None]:
     """Take a process-local and OS advisory lock that is released automatically on death."""
@@ -598,12 +630,9 @@ def _publication_root_lock(root: Path) -> Iterator[None]:
         if os.fstat(descriptor).st_size == 0:
             os.write(descriptor, b"\0")
             os.fsync(descriptor)
-        os.lseek(descriptor, 0, os.SEEK_SET)
         try:
             if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                _try_windows_publication_lock(descriptor)
             else:
                 posix_lock: Any = __import__("fcntl")
                 posix_lock.flock(descriptor, posix_lock.LOCK_EX | posix_lock.LOCK_NB)
@@ -624,11 +653,8 @@ def _publication_root_lock(root: Path) -> Iterator[None]:
         if descriptor >= 0:
             if os_locked:
                 try:
-                    os.lseek(descriptor, 0, os.SEEK_SET)
                     if os.name == "nt":
-                        import msvcrt
-
-                        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                        _release_windows_publication_lock(descriptor)
                     else:
                         posix_lock = __import__("fcntl")
                         posix_lock.flock(descriptor, posix_lock.LOCK_UN)

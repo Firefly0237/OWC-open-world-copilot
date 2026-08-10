@@ -408,6 +408,27 @@ def test_role_bootstrap_and_compose_pin_exact_postgresql_image() -> None:
     assert '"127.0.0.1:${OWCOPILOT_POSTGRES_PORT:-5432}:5432"' in local_compose
 
 
+def test_postgres_ci_verifies_the_running_container_against_the_pinned_digest() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    step_start = workflow.index("      - name: Start pinned PostgreSQL")
+    step_end = workflow.index("\n      - name:", step_start + 1)
+    step = workflow[step_start:step_end]
+
+    digest = "sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394"
+    assert "set -euo pipefail" in step
+    assert f"postgres_digest='{digest}'" in step
+    assert 'postgres_ref="postgres:17.10-bookworm@${postgres_digest}"' in step
+    assert 'configured_image="$(docker inspect -f \'{{.Config.Image}}\' "$pg_container")"' in step
+    assert 'running_image_id="$(docker inspect -f \'{{.Image}}\' "$pg_container")"' in step
+    assert (
+        'resolved_image_id="$(docker image inspect "$postgres_ref" --format \'{{.Id}}\')"' in step
+    )
+    assert 'test "$configured_image" = "$postgres_ref"' in step
+    assert 'test -n "$running_image_id"' in step
+    assert 'test "$running_image_id" = "$resolved_image_id"' in step
+    assert "docker image inspect postgres:17.10-bookworm " not in step
+
+
 def test_alembic_version_is_the_only_global_read_only_exception(
     registry: dict[str, Any],
 ) -> None:

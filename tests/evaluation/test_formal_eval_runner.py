@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -424,6 +425,40 @@ def test_persistent_advisory_lock_file_does_not_block_crash_resume(tmp_path: Pat
 
     assert result.ok
     assert lock_path.is_file()
+
+
+def test_windows_publication_lock_adapter_uses_acquire_and_release_modes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int, int]] = []
+    seeks: list[tuple[int, int, int]] = []
+    imported: list[str] = []
+
+    class FakeWindowsLocking:
+        LK_NBLCK = 303
+        LK_UNLCK = 404
+
+        @staticmethod
+        def locking(descriptor: int, mode: int, byte_count: int) -> None:
+            calls.append((descriptor, mode, byte_count))
+
+    def fake_import(name: str) -> FakeWindowsLocking:
+        imported.append(name)
+        return FakeWindowsLocking()
+
+    monkeypatch.setattr(formal_runner, "import_module", fake_import)
+    monkeypatch.setattr(
+        formal_runner.os,
+        "lseek",
+        lambda descriptor, offset, origin: seeks.append((descriptor, offset, origin)),
+    )
+
+    formal_runner._try_windows_publication_lock(42)
+    formal_runner._release_windows_publication_lock(42)
+
+    assert imported == ["msvcrt", "msvcrt"]
+    assert seeks == [(42, 0, os.SEEK_SET), (42, 0, os.SEEK_SET)]
+    assert calls == [(42, 303, 1), (42, 404, 1)]
 
 
 def test_cross_process_lock_releases_and_orphan_recovers_after_hard_kill(
