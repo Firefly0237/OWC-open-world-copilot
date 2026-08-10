@@ -9,12 +9,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+# The CLI reserves stderr for its machine-readable error document.  Transformers
+# otherwise emits an import-time advisory when only tokenizer dependencies are
+# installed, before the CLI can report its own structured result.
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 
 from owcopilot.evaluation.formal_artifacts import default_formal_root  # noqa: E402
 from owcopilot.evaluation.formal_runner import (  # noqa: E402

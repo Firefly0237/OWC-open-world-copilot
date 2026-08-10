@@ -43,6 +43,14 @@ from owcopilot.evaluation.protocol import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FORMAL_ROOT = _REPO_ROOT / "benchmarks" / "formal"
+
+
+def _formal_cli_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("TRANSFORMERS_NO_ADVISORY_WARNINGS", None)
+    return env
+
+
 _SCRIPT = _REPO_ROOT / "scripts" / "run_formal_evals.py"
 _RUN_ID = "runner-test-v1"
 _GENERATED_AT = "2026-08-03T01:02:03Z"
@@ -700,6 +708,7 @@ def test_cli_runs_all_suites_and_returns_machine_readable_success(tmp_path: Path
         capture_output=True,
         text=True,
         timeout=120,
+        env=_formal_cli_env(),
     )
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
@@ -738,6 +747,7 @@ def test_cli_different_run_id_collision_returns_exit_two_without_changing_old_by
         capture_output=True,
         text=True,
         timeout=120,
+        env=_formal_cli_env(),
     )
     assert completed.returncode == 2
     error = json.loads(completed.stderr)
@@ -766,6 +776,7 @@ def test_cli_tamper_returns_nonzero_and_no_run_artifacts(tmp_path: Path) -> None
         capture_output=True,
         text=True,
         timeout=120,
+        env=_formal_cli_env(),
     )
     assert completed.returncode == 2
     error = json.loads(completed.stderr)
