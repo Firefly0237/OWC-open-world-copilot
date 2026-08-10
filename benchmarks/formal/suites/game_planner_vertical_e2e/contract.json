@@ -1,0 +1,719 @@
+{
+  "allowed_providers": [
+    "fixture",
+    "scripted",
+    "real_model"
+  ],
+  "controls": [
+    {
+      "control_id": "game_planner_vertical_e2e.matched_good.v1",
+      "expected_harness_status": "PASS",
+      "implementation_status": "NOT_AVAILABLE",
+      "kind": "matched_good",
+      "production_path_required": true
+    },
+    {
+      "control_id": "game_planner_vertical_e2e.frozen_mutant.v1",
+      "expected_harness_status": "FAIL",
+      "implementation_status": "NOT_AVAILABLE",
+      "kind": "frozen_mutant",
+      "production_path_required": true
+    }
+  ],
+  "description": "Vertical game-planner journey from intake through grounded update and impact.",
+  "experiments": [
+    {
+      "baseline": {
+        "aggregate_budget_rule": "same_model_calls_and_input_plus_output_token_cap",
+        "baseline_id": "triage_rules_abstain_v1",
+        "description": "Frozen deterministic parser/rules baseline with the same abstention labels.",
+        "frozen_before_sealed": true,
+        "paired_by_case": true,
+        "scorer_identical_between_arms": true
+      },
+      "data_freeze": {
+        "dev": {
+          "content_sha256": null,
+          "dataset_id": "game_planner_vertical_e2e.triage.v1.dev",
+          "origin": "authored_dev",
+          "relative_path": "benchmarks/formal/data/game_planner_vertical_e2e/triage/dev",
+          "split": "dev",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "DEV_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "dev_may_be_promoted_to_sealed": false,
+        "near_duplicate_check_required": true,
+        "physical_separation_required": true,
+        "sealed": {
+          "content_sha256": null,
+          "dataset_id": "game_planner_vertical_e2e.triage.v1.sealed",
+          "origin": "independent_sealed",
+          "relative_path": "benchmarks/formal/data/game_planner_vertical_e2e/triage/sealed",
+          "split": "sealed",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "SEALED_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "sealed_outputs_unopened": true,
+        "world_entity_plot_cluster_split_required": true
+      },
+      "description": "Classify canon candidate, reference, mixed, and unknown with abstention.",
+      "diagnostic_metrics": [
+        {
+          "description": "Accuracy on non-abstained segments.",
+          "name": "triage_selective_accuracy",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Fraction of eligible segments not abstained.",
+          "name": "triage_coverage",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Area under the selective risk-coverage curve.",
+          "name": "triage_risk_coverage_auc",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Frozen-bin confidence calibration error.",
+          "name": "triage_expected_calibration_error",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Exact source-locator match rate.",
+          "name": "triage_locator_fidelity",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        }
+      ],
+      "dimension": "triage",
+      "experiment_id": "game_planner_vertical_e2e.triage.v1",
+      "external_data_blockers": [],
+      "paired_budget": {
+        "actual_tokens_cost_and_latency_reported_per_arm": true,
+        "allocation_id": "triage_grounded_draft",
+        "charged_components": [
+          "generator"
+        ],
+        "failed_errored_and_retried_usage_counted": true,
+        "model_calls_allowed": true,
+        "same_aggregate_input_output_token_cap_between_arms": true,
+        "same_cases_between_arms": true,
+        "same_model_call_cap_between_arms": true,
+        "same_model_id_between_arms": true,
+        "same_scorer_between_arms": true
+      },
+      "positive_coverage_gates": [
+        {
+          "case_ids": [
+            "triage.canon_candidate.positive-001",
+            "triage.reference.positive-001",
+            "triage.mixed.positive-001",
+            "triage.unknown.positive-001"
+          ],
+          "gate_id": "triage_non_abstain_coverage",
+          "metric_name": "triage_coverage",
+          "minimum_denominator": 4,
+          "minimum_rate": 0.5,
+          "unmet_status": "NOT_RUN"
+        }
+      ],
+      "preregistered_arms": [
+        {
+          "arm_id": "triage_candidate_v1",
+          "description": "Preregistered triage candidate on the production path.",
+          "role": "candidate"
+        },
+        {
+          "arm_id": "triage_rules_abstain_v1",
+          "description": "Frozen deterministic parser/rules baseline with the same abstention labels.",
+          "role": "baseline"
+        }
+      ],
+      "primary_metric": {
+        "description": "Macro-F1 across every preregistered content_role; no role may be omitted.",
+        "name": "triage_content_role_macro_f1",
+        "primary": true,
+        "scope": "quality",
+        "unit": "ratio"
+      },
+      "scorer": {
+        "byte_identical_trace_recalculation_only": true,
+        "changes_retire_opened_sealed_version": true,
+        "implementation_status": "NOT_AVAILABLE",
+        "scorer_id": "game_planner_vertical_e2e.triage",
+        "scorer_version": "preregistered-v1",
+        "sha256": null
+      },
+      "status": "NOT_AVAILABLE",
+      "status_reasons": [
+        "FORMAL_PRODUCTION_PATH_OR_DATASET_NOT_AVAILABLE"
+      ]
+    },
+    {
+      "baseline": {
+        "aggregate_budget_rule": "same_model_calls_and_input_plus_output_token_cap",
+        "baseline_id": "single_pass_grounded_draft_v1",
+        "description": "Single-pass grounded draft without optimizer/reflection, under equal aggregate budget.",
+        "frozen_before_sealed": true,
+        "paired_by_case": true,
+        "scorer_identical_between_arms": true
+      },
+      "data_freeze": {
+        "dev": {
+          "content_sha256": null,
+          "dataset_id": "game_planner_vertical_e2e.grounded_draft.v1.dev",
+          "origin": "authored_dev",
+          "relative_path": "benchmarks/formal/data/game_planner_vertical_e2e/grounded_draft/dev",
+          "split": "dev",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "DEV_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "dev_may_be_promoted_to_sealed": false,
+        "near_duplicate_check_required": true,
+        "physical_separation_required": true,
+        "sealed": {
+          "content_sha256": null,
+          "dataset_id": "game_planner_vertical_e2e.grounded_draft.v1.sealed",
+          "origin": "independent_sealed",
+          "relative_path": "benchmarks/formal/data/game_planner_vertical_e2e/grounded_draft/sealed",
+          "split": "sealed",
+          "status": "BLOCKED_EXTERNAL_DATA",
+          "status_reasons": [
+            "REPRESENTATIVE_SEALED_CORPUS_AND_SECOND_ANNOTATOR_UNAVAILABLE"
+          ]
+        },
+        "sealed_outputs_unopened": true,
+        "world_entity_plot_cluster_split_required": true
+      },
+      "description": "Compare grounded narrative drafting under blinded human review.",
+      "diagnostic_metrics": [
+        {
+          "description": "Schema-valid draft rate.",
+          "name": "grounded_draft_structural_validity_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Per-draft canonical conflict rate.",
+          "name": "grounded_draft_canon_conflict_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Per-draft unauthorized inspiration leakage rate.",
+          "name": "grounded_draft_leakage_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Blinded human revise rate.",
+          "name": "grounded_draft_human_revise_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Blinded human reject rate.",
+          "name": "grounded_draft_human_reject_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Paired human edit burden relative to the frozen baseline.",
+          "name": "grounded_draft_relative_modification_burden",
+          "primary": false,
+          "scope": "quality",
+          "unit": "normalized_edit_burden"
+        },
+        {
+          "description": "Fraction producing a reviewable draft.",
+          "name": "grounded_draft_output_coverage",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        }
+      ],
+      "dimension": "grounded_draft",
+      "experiment_id": "game_planner_vertical_e2e.grounded_draft.v1",
+      "external_data_blockers": [
+        {
+          "blocker_id": "REPRESENTATIVE_SEALED_CORPUS_UNAVAILABLE",
+          "description": "No representative independently held sealed narrative corpus is present.",
+          "status": "BLOCKED_EXTERNAL_DATA"
+        },
+        {
+          "blocker_id": "SECOND_ANNOTATOR_UNAVAILABLE",
+          "description": "No independent second human annotator has been secured.",
+          "status": "BLOCKED_EXTERNAL_DATA"
+        },
+        {
+          "blocker_id": "DISAGREEMENT_ADJUDICATION_UNAVAILABLE",
+          "description": "No independent disagreement adjudicator or completed protocol is available.",
+          "status": "BLOCKED_EXTERNAL_DATA"
+        }
+      ],
+      "paired_budget": {
+        "actual_tokens_cost_and_latency_reported_per_arm": true,
+        "allocation_id": "triage_grounded_draft",
+        "charged_components": [
+          "retriever",
+          "generator",
+          "verifier"
+        ],
+        "failed_errored_and_retried_usage_counted": true,
+        "model_calls_allowed": true,
+        "same_aggregate_input_output_token_cap_between_arms": true,
+        "same_cases_between_arms": true,
+        "same_model_call_cap_between_arms": true,
+        "same_model_id_between_arms": true,
+        "same_scorer_between_arms": true
+      },
+      "positive_coverage_gates": [
+        {
+          "case_ids": [
+            "draft.positive-001",
+            "draft.positive-002"
+          ],
+          "gate_id": "grounded_draft_non_refusal_coverage",
+          "metric_name": "grounded_draft_output_coverage",
+          "minimum_denominator": 2,
+          "minimum_rate": 0.5,
+          "unmet_status": "NOT_RUN"
+        }
+      ],
+      "preregistered_arms": [
+        {
+          "arm_id": "grounded_draft_candidate_v1",
+          "description": "Preregistered grounded_draft candidate on the production path.",
+          "role": "candidate"
+        },
+        {
+          "arm_id": "single_pass_grounded_draft_v1",
+          "description": "Single-pass grounded draft without optimizer/reflection, under equal aggregate budget.",
+          "role": "baseline"
+        }
+      ],
+      "primary_metric": {
+        "description": "Blinded human accept rate; revise and reject remain in the denominator.",
+        "name": "grounded_draft_human_accept_rate",
+        "primary": true,
+        "scope": "quality",
+        "unit": "ratio"
+      },
+      "scorer": {
+        "byte_identical_trace_recalculation_only": true,
+        "changes_retire_opened_sealed_version": true,
+        "implementation_status": "NOT_AVAILABLE",
+        "scorer_id": "game_planner_vertical_e2e.grounded_draft",
+        "scorer_version": "preregistered-v1",
+        "sha256": null
+      },
+      "status": "BLOCKED_EXTERNAL_DATA",
+      "status_reasons": [
+        "REPRESENTATIVE_SEALED_CORPUS_SECOND_ANNOTATOR_AND_ADJUDICATION_UNAVAILABLE"
+      ]
+    },
+    {
+      "baseline": {
+        "aggregate_budget_rule": "same_model_calls_and_input_plus_output_token_cap",
+        "baseline_id": "direct_reference_index_v1",
+        "description": "Frozen direct-reference-only impact lookup on the same changed objects.",
+        "frozen_before_sealed": true,
+        "paired_by_case": true,
+        "scorer_identical_between_arms": true
+      },
+      "data_freeze": {
+        "dev": {
+          "content_sha256": null,
+          "dataset_id": "game_planner_vertical_e2e.impact.v1.dev",
+          "origin": "authored_dev",
+          "relative_path": "benchmarks/formal/data/game_planner_vertical_e2e/impact/dev",
+          "split": "dev",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "DEV_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "dev_may_be_promoted_to_sealed": false,
+        "near_duplicate_check_required": true,
+        "physical_separation_required": true,
+        "sealed": {
+          "content_sha256": null,
+          "dataset_id": "game_planner_vertical_e2e.impact.v1.sealed",
+          "origin": "independent_sealed",
+          "relative_path": "benchmarks/formal/data/game_planner_vertical_e2e/impact/sealed",
+          "split": "sealed",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "SEALED_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "sealed_outputs_unopened": true,
+        "world_entity_plot_cluster_split_required": true
+      },
+      "description": "Locate expected impacted references after an existing object changes.",
+      "diagnostic_metrics": [
+        {
+          "description": "Precision over expected impacted refs.",
+          "name": "impact_expected_refs_precision",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Recall over expected impacted refs.",
+          "name": "impact_expected_refs_recall",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Fraction of changed objects yielding candidates.",
+          "name": "impact_query_result_coverage",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        }
+      ],
+      "dimension": "impact",
+      "experiment_id": "game_planner_vertical_e2e.impact.v1",
+      "external_data_blockers": [],
+      "paired_budget": {
+        "actual_tokens_cost_and_latency_reported_per_arm": true,
+        "allocation_id": "evidence_verifier",
+        "charged_components": [
+          "retriever"
+        ],
+        "failed_errored_and_retried_usage_counted": true,
+        "model_calls_allowed": true,
+        "same_aggregate_input_output_token_cap_between_arms": true,
+        "same_cases_between_arms": true,
+        "same_model_call_cap_between_arms": true,
+        "same_model_id_between_arms": true,
+        "same_scorer_between_arms": true
+      },
+      "positive_coverage_gates": [
+        {
+          "case_ids": [
+            "impact.positive-001",
+            "impact.positive-002"
+          ],
+          "gate_id": "impact_result_coverage",
+          "metric_name": "impact_query_result_coverage",
+          "minimum_denominator": 2,
+          "minimum_rate": 0.5,
+          "unmet_status": "NOT_RUN"
+        }
+      ],
+      "preregistered_arms": [
+        {
+          "arm_id": "impact_candidate_v1",
+          "description": "Preregistered impact candidate on the production path.",
+          "role": "candidate"
+        },
+        {
+          "arm_id": "direct_reference_index_v1",
+          "description": "Frozen direct-reference-only impact lookup on the same changed objects.",
+          "role": "baseline"
+        }
+      ],
+      "primary_metric": {
+        "description": "F1 over preregistered expected impacted reference identities.",
+        "name": "impact_expected_refs_f1",
+        "primary": true,
+        "scope": "quality",
+        "unit": "ratio"
+      },
+      "scorer": {
+        "byte_identical_trace_recalculation_only": true,
+        "changes_retire_opened_sealed_version": true,
+        "implementation_status": "NOT_AVAILABLE",
+        "scorer_id": "game_planner_vertical_e2e.impact",
+        "scorer_version": "preregistered-v1",
+        "sha256": null
+      },
+      "status": "NOT_AVAILABLE",
+      "status_reasons": [
+        "FORMAL_PRODUCTION_PATH_OR_DATASET_NOT_AVAILABLE"
+      ]
+    },
+    {
+      "baseline": {
+        "aggregate_budget_rule": "same_model_calls_and_input_plus_output_token_cap",
+        "baseline_id": "bm25_only_v1",
+        "description": "BM25-only retrieval using the same generation model, cases, scorer, and budget caps.",
+        "frozen_before_sealed": true,
+        "paired_by_case": true,
+        "scorer_identical_between_arms": true
+      },
+      "data_freeze": {
+        "dev": {
+          "content_sha256": null,
+          "dataset_id": "game_planner_vertical_e2e.rag.v1.dev",
+          "origin": "authored_dev",
+          "relative_path": "benchmarks/formal/data/game_planner_vertical_e2e/rag/dev",
+          "split": "dev",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "DEV_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "dev_may_be_promoted_to_sealed": false,
+        "near_duplicate_check_required": true,
+        "physical_separation_required": true,
+        "sealed": {
+          "content_sha256": null,
+          "dataset_id": "game_planner_vertical_e2e.rag.v1.sealed",
+          "origin": "independent_sealed",
+          "relative_path": "benchmarks/formal/data/game_planner_vertical_e2e/rag/sealed",
+          "split": "sealed",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "SEALED_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "sealed_outputs_unopened": true,
+        "world_entity_plot_cluster_split_required": true
+      },
+      "description": "Compare BM25, vector, and graph retrieval on answerable grounded QA.",
+      "diagnostic_metrics": [
+        {
+          "description": "Fraction of answerable questions receiving an answer.",
+          "name": "rag_answerable_coverage",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Exact supporting-locator citation rate.",
+          "name": "rag_citation_fidelity",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Correct abstention rate on unanswerable cases.",
+          "name": "rag_unanswerable_abstain_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Gold evidence recall at frozen K.",
+          "name": "rag_retrieval_recall_at_k",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        }
+      ],
+      "dimension": "rag",
+      "experiment_id": "game_planner_vertical_e2e.rag.v1",
+      "external_data_blockers": [],
+      "paired_budget": {
+        "actual_tokens_cost_and_latency_reported_per_arm": true,
+        "allocation_id": "evidence_verifier",
+        "charged_components": [
+          "retriever",
+          "generator",
+          "verifier"
+        ],
+        "failed_errored_and_retried_usage_counted": true,
+        "model_calls_allowed": true,
+        "same_aggregate_input_output_token_cap_between_arms": true,
+        "same_cases_between_arms": true,
+        "same_model_call_cap_between_arms": true,
+        "same_model_id_between_arms": true,
+        "same_scorer_between_arms": true
+      },
+      "positive_coverage_gates": [
+        {
+          "case_ids": [
+            "rag.answerable.positive-001",
+            "rag.answerable.positive-002"
+          ],
+          "gate_id": "rag_answerable_coverage",
+          "metric_name": "rag_answerable_coverage",
+          "minimum_denominator": 2,
+          "minimum_rate": 1.0,
+          "unmet_status": "NOT_RUN"
+        }
+      ],
+      "preregistered_arms": [
+        {
+          "arm_id": "bm25_only_v1",
+          "description": "BM25-only retrieval with the frozen generator, cases, scorer, and budget.",
+          "role": "baseline"
+        },
+        {
+          "arm_id": "vector_only_v1",
+          "description": "Vector-only retrieval with the frozen generator, cases, scorer, and budget.",
+          "role": "control"
+        },
+        {
+          "arm_id": "graph_expand_only_v1",
+          "description": "Graph-expansion-only retrieval with the same scorer and paired budget.",
+          "role": "control"
+        },
+        {
+          "arm_id": "bm25_vector_graph_fusion_v1",
+          "description": "Frozen BM25, vector, and graph fusion candidate under the paired budget.",
+          "role": "candidate"
+        }
+      ],
+      "primary_metric": {
+        "description": "Cited correct-answer rate over all preregistered answerable questions.",
+        "name": "rag_answerable_question_success_rate",
+        "primary": true,
+        "scope": "quality",
+        "unit": "ratio"
+      },
+      "scorer": {
+        "byte_identical_trace_recalculation_only": true,
+        "changes_retire_opened_sealed_version": true,
+        "implementation_status": "NOT_AVAILABLE",
+        "scorer_id": "game_planner_vertical_e2e.rag",
+        "scorer_version": "preregistered-v1",
+        "sha256": null
+      },
+      "status": "NOT_AVAILABLE",
+      "status_reasons": [
+        "FORMAL_PRODUCTION_PATH_OR_DATASET_NOT_AVAILABLE"
+      ]
+    }
+  ],
+  "fault_manifest": null,
+  "global_real_model_budget": {
+    "budget_id": "n0.3-global-real-model-budget-v1",
+    "byte_count": 1777,
+    "path": "../../global_real_model_budget.json",
+    "sha256": "7ee936678b2e1f7e3ce6b477d3411876f110409c35caba4ce77b746f6111fbe3"
+  },
+  "hard_zero_catalog": {
+    "byte_count": 14401,
+    "path": "../../hard_zero/game_planner_vertical_e2e/cases.json",
+    "sha256": "cf2249182646272ac3c2dca102aabd260930e96cc3b15dcbe91c53f0288ba578"
+  },
+  "hard_zero_gates": [
+    {
+      "attack_case_ids": [
+        "game_planner_vertical_e2e.attack.third-party-promotion-001"
+      ],
+      "benign_control_case_ids": [
+        "game_planner_vertical_e2e.benign.human-own-intake-001"
+      ],
+      "benign_false_reject_metric": "third_party_provenance_promotion_benign_false_reject_count",
+      "description": "Third-party material cannot become own/human/approved; legitimate own input remains usable.",
+      "gate_id": "third_party_provenance_promotion",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 1,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "third_party_provenance_promotion_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "game_planner_vertical_e2e.attack.reference-as-canon-001"
+      ],
+      "benign_control_case_ids": [
+        "game_planner_vertical_e2e.benign.canonical-answer-001"
+      ],
+      "benign_false_reject_metric": "reference_used_as_canonical_fact_benign_false_reject_count",
+      "description": "Reference material cannot support canonical QA; canonical evidence remains answerable.",
+      "gate_id": "reference_used_as_canonical_fact",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 1,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "reference_used_as_canonical_fact_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "game_planner_vertical_e2e.attack.unapproved-serving-001"
+      ],
+      "benign_control_case_ids": [
+        "game_planner_vertical_e2e.benign.approved-serving-001"
+      ],
+      "benign_false_reject_metric": "unapproved_release_visibility_benign_false_reject_count",
+      "description": "An unapproved ChangeSet violates the gate if it creates a visible canonical revision, advances authoring, OR advances serving; an approved revision must create exactly one canonical successor, advance authoring once, reach READY for every required projection, and advance serving exactly once.",
+      "gate_id": "unapproved_release_visibility",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 1,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "unapproved_release_visibility_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "game_planner_vertical_e2e.attack.leakage-not-checked-001"
+      ],
+      "benign_control_case_ids": [
+        "game_planner_vertical_e2e.benign.leakage-checked-clean-001"
+      ],
+      "benign_false_reject_metric": "unchecked_leakage_acceptance_benign_false_reject_count",
+      "description": "Drafts with leakage not_checked cannot be accepted; checked clean drafts remain usable.",
+      "gate_id": "unchecked_leakage_acceptance",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 1,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "unchecked_leakage_acceptance_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "game_planner_vertical_e2e.attack.projection-not-ready-001"
+      ],
+      "benign_control_case_ids": [
+        "game_planner_vertical_e2e.benign.projection-ready-001"
+      ],
+      "benign_false_reject_metric": "serving_before_projection_ready_benign_false_reject_count",
+      "description": "Serving cannot advance before required projections are ready.",
+      "gate_id": "serving_before_projection_ready",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 1,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "serving_before_projection_ready_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    }
+  ],
+  "manifest_status": "NOT_AVAILABLE",
+  "manifest_status_reasons": [
+    "FORMAL_PRODUCTION_PATH_NOT_IMPLEMENTED",
+    "PRODUCTION_QUALITY_RUNNER_NOT_AVAILABLE",
+    "SUBJECTIVE_GROUNDED_DRAFT_BLOCKED_EXTERNAL_DATA"
+  ],
+  "provider_evidence_policy": {
+    "fixture_max_scope": "harness",
+    "fixture_quality_effect_allowed": false,
+    "quality_provider": "real_model",
+    "scripted_gold_f1_is_external_quality_metric": false,
+    "scripted_max_scope": "harness"
+  },
+  "schema_version": "formal-suite-contract/v1",
+  "suite_id": "game_planner_vertical_e2e",
+  "suite_primary_metric": "triage_content_role_macro_f1",
+  "suite_version": "n0.3-v1"
+}

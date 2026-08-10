@@ -1,0 +1,291 @@
+{
+  "allowed_providers": [
+    "fixture",
+    "scripted"
+  ],
+  "artifacts": [
+    {
+      "byte_count": 24612,
+      "path": "contract.json",
+      "sha256": "893cde55f58d3f6f120ce69962b93a7538fa5db0691d84292dd9712e7c4af1d5",
+      "split": null
+    },
+    {
+      "byte_count": 1777,
+      "path": "../../global_real_model_budget.json",
+      "sha256": "7ee936678b2e1f7e3ce6b477d3411876f110409c35caba4ce77b746f6111fbe3",
+      "split": null
+    },
+    {
+      "byte_count": 83207,
+      "path": "../../hard_zero/failure_isolation_matrix/cases.json",
+      "sha256": "079d8bf01efb491e08c73ffa5389a2d0bf84b0abf3544f4c0bc8a48ad7dd7334",
+      "split": null
+    },
+    {
+      "byte_count": 223222,
+      "path": "../../faults/failure_isolation_matrix/fault_manifest.json",
+      "sha256": "92fc59e08ebe6d3ade272d0cb93cab983e7f5c2fb86f3e80e2ed3dddb60d70f0",
+      "split": null
+    }
+  ],
+  "description": "Two-tenant/two-instance fault, redelivery, fencing, and recovery matrix.",
+  "metrics": [
+    {
+      "description": "Fraction of executed fault cells preserving every preregistered invariant.",
+      "name": "failure_invariant_preservation_rate",
+      "primary": true,
+      "scope": "harness",
+      "unit": "ratio"
+    },
+    {
+      "description": "Fault cells with injection_hit_count exactly one and boundary A/B evidence.",
+      "name": "failure_injection_hit_rate",
+      "primary": false,
+      "scope": "harness",
+      "unit": "ratio"
+    },
+    {
+      "description": "Matched benign cells with catalog_hit_count exactly one and no injection marker.",
+      "name": "failure_benign_catalog_hit_rate",
+      "primary": false,
+      "scope": "harness",
+      "unit": "ratio"
+    },
+    {
+      "description": "Recoverable durable claims reaching one DONE result within the frozen bound.",
+      "name": "recoverable_fault_unique_done_rate",
+      "primary": false,
+      "scope": "harness",
+      "unit": "ratio"
+    },
+    {
+      "description": "Matched-good PASS and frozen-mutant FAIL decisions over all frozen controls.",
+      "name": "harness_control_discrimination_rate",
+      "primary": false,
+      "scope": "harness",
+      "unit": "ratio"
+    },
+    {
+      "description": "Hard-zero attack-side violations for cross_tenant_read_write.",
+      "name": "cross_tenant_read_write_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for cross_tenant_read_write.",
+      "name": "cross_tenant_read_write_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for mixed_revision_recovery.",
+      "name": "mixed_revision_recovery_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for mixed_revision_recovery.",
+      "name": "mixed_revision_recovery_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for concurrent_release_cas.",
+      "name": "concurrent_release_cas_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for concurrent_release_cas.",
+      "name": "concurrent_release_cas_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for duplicate_observable_canonical_effect.",
+      "name": "duplicate_observable_canonical_effect_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for duplicate_observable_canonical_effect.",
+      "name": "duplicate_observable_canonical_effect_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for projection_job_without_unique_done.",
+      "name": "projection_job_without_unique_done_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for projection_job_without_unique_done.",
+      "name": "projection_job_without_unique_done_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for durable_claim_without_unique_done.",
+      "name": "durable_claim_without_unique_done_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for durable_claim_without_unique_done.",
+      "name": "durable_claim_without_unique_done_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for durable_agent_run_resume.",
+      "name": "durable_agent_run_resume_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for durable_agent_run_resume.",
+      "name": "durable_agent_run_resume_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for revoked_sse_event_leakage.",
+      "name": "revoked_sse_event_leakage_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for revoked_sse_event_leakage.",
+      "name": "revoked_sse_event_leakage_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for service_role_cross_tenant_access.",
+      "name": "service_role_cross_tenant_access_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for service_role_cross_tenant_access.",
+      "name": "service_role_cross_tenant_access_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for publish_idempotency_replay_duplicate_effect.",
+      "name": "publish_idempotency_replay_duplicate_effect_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for publish_idempotency_replay_duplicate_effect.",
+      "name": "publish_idempotency_replay_duplicate_effect_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for reconciliation_revision_corruption.",
+      "name": "reconciliation_revision_corruption_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for reconciliation_revision_corruption.",
+      "name": "reconciliation_revision_corruption_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for nonrecoverable_assignment_terminal_reason.",
+      "name": "nonrecoverable_assignment_terminal_reason_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for nonrecoverable_assignment_terminal_reason.",
+      "name": "nonrecoverable_assignment_terminal_reason_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for cross_instance_job_visibility.",
+      "name": "cross_instance_job_visibility_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for cross_instance_job_visibility.",
+      "name": "cross_instance_job_visibility_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for assignment_outbox_atomicity.",
+      "name": "assignment_outbox_atomicity_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for assignment_outbox_atomicity.",
+      "name": "assignment_outbox_atomicity_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for projection_not_ready_serving_advance.",
+      "name": "projection_not_ready_serving_advance_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for projection_not_ready_serving_advance.",
+      "name": "projection_not_ready_serving_advance_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    }
+  ],
+  "report_schema_version": "formal-eval/v1",
+  "schema_version": "formal-eval/v1",
+  "scorer": null,
+  "status": "NOT_AVAILABLE",
+  "status_reasons": [
+    "TEAM_PROFILE_AND_FAULT_TARGETS_NOT_IMPLEMENTED",
+    "PRODUCTION_FAULT_RUNNER_NOT_AVAILABLE"
+  ],
+  "suite_id": "failure_isolation_matrix",
+  "suite_version": "n0.3-v1",
+  "trace_schema_version": "formal-eval/v1"
+}

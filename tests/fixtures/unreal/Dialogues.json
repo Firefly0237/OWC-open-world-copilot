@@ -1,0 +1,13 @@
+[
+  {
+    "Name": "dlg_hello",
+    "Quest": {
+      "RowName": "quest_patrol"
+    },
+    "Speaker": {
+      "RowName": "npc_mara"
+    },
+    "Text": "dlg.hello",
+    "Type": "dialogue"
+  }
+]

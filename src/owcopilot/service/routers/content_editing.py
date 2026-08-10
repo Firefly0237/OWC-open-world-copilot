@@ -41,6 +41,7 @@ from ..schemas import (
     QuestLogicPatchRequest,
     QuestPatchRequest,
     QuestSimulateRequest,
+    QuestSimulateResponse,
     RelationRequest,
     RenameRequest,
     SnapshotRestoreRequest,
@@ -178,7 +179,10 @@ def patch_quest_logic(
     """Set/replace a quest's native logic layer; returns the deterministic logic issues."""
     try:
         result = update_quest_logic_action(
-            _project_root_or_404(project), quest_id=quest_id, logic=req.logic
+            _project_root_or_404(project),
+            quest_id=quest_id,
+            logic=req.logic,
+            if_match=req.if_match,
         )
     except ValueError as e:
         raise _manage_error(e) from e
@@ -208,14 +212,18 @@ def draft_quest_logic_endpoint(
     return {"project": project, **result}
 
 
-@router.post("/projects/{project}/quests/{quest_id}:simulate")
+@router.post(
+    "/projects/{project}/quests/{quest_id}:simulate",
+    response_model=QuestSimulateResponse,
+    response_model_exclude_none=True,
+)
 def simulate_quest_endpoint(
     project: str,
     quest_id: str,
     req: QuestSimulateRequest,
     request: Request,
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-) -> dict[str, Any]:
+) -> QuestSimulateResponse:
     """WS-E playtest: walk the quest's logic and report path + outcome (deterministic, $0)."""
     try:
         result = simulate_quest_action(
@@ -223,10 +231,12 @@ def simulate_quest_endpoint(
             quest_id=quest_id,
             choices=req.choices,
             initial_state=req.initial_state,
+            dialogue_tree_id=req.dialogue_tree_id,
+            dialogue_choices=req.dialogue_choices,
         )
     except ValueError as e:
         raise _manage_error(e) from e
-    return {"project": project, **result}
+    return QuestSimulateResponse(project=project, **result)
 
 
 @router.post("/projects/{project}/rename:plan")
@@ -354,7 +364,7 @@ def set_node_position(
 ) -> dict[str, Any]:
     try:
         result = set_object_position_action(
-            _project_root_or_404(project), ref=req.ref, x=req.x, y=req.y
+            _project_root_or_404(project), ref=req.ref, x=req.x, y=req.y, z=req.z
         )
     except ValueError as e:
         raise _manage_error(e) from e

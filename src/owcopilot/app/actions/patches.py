@@ -18,6 +18,7 @@ from ...pipeline.patches import (
     rollback_patch_workflow,
     suggest_for_issue,
 )
+from ...storage.world_lock import serialized_world_write
 from ...telemetry import deterministic_step, llm_step, summarize_workflow
 from .._common import deterministic_cost_budget as _deterministic_cost_budget
 from .._common import open_project as _project
@@ -93,6 +94,7 @@ def list_patches_action(
         }
 
 
+@serialized_world_write
 def run_apply_action(
     content_root: str | Path,
     *,
@@ -113,6 +115,7 @@ def run_apply_action(
         }
 
 
+@serialized_world_write
 def run_rollback_action(
     content_root: str | Path,
     *,

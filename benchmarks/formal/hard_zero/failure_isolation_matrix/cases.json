@@ -1,0 +1,1636 @@
+{
+  "cases": [
+    {
+      "case_id": "failure_isolation_matrix.attack.tenant-a-to-b-read-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reject the read and return no Tenant B data.",
+        "observable_effect_constraint": "Exactly one policy rejection and zero cross-tenant rows are observable."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.tenant-a-to-b-read-001",
+      "gate_id": "cross_tenant_read_write",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate cross_tenant_read_write from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production team API plus PostgreSQL RLS read path",
+        "setup": [
+          "Tenant A principal targets a durable Tenant B object."
+        ],
+        "trigger": "Issue a cross-tenant read through a reused production connection."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.tenant-a-to-b-write-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reject the write and preserve Tenant B bytes.",
+        "observable_effect_constraint": "Exactly one policy rejection occurs and zero cross-tenant rows are mutated."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.tenant-a-to-b-write-001",
+      "gate_id": "cross_tenant_read_write",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate cross_tenant_read_write from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production team API plus PostgreSQL RLS write path",
+        "setup": [
+          "Tenant A principal targets a durable Tenant B object."
+        ],
+        "trigger": "Issue a cross-tenant write through a reused production connection."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.same-tenant-read-write-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Allow both same-tenant operations.",
+        "observable_effect_constraint": "Exactly one intended same-tenant write is visible."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.same-tenant-read-write-001",
+      "gate_id": "cross_tenant_read_write",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate cross_tenant_read_write from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production team API plus PostgreSQL RLS path",
+        "setup": [
+          "Tenant A principal and object share the same tenant scope."
+        ],
+        "trigger": "Perform one normal read and one normal write."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.kill-release-before-commit-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Recover the unchanged old authoring and serving revision.",
+        "observable_effect_constraint": "One old-revision recovery confirmation and zero partial revision, ledger, outbox, or pointer effects are visible."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.kill-release-before-commit-001",
+      "gate_id": "mixed_revision_recovery",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate mixed_revision_recovery from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production release transaction and restart reconciler",
+        "setup": [
+          "A release transaction has validated its base but has not committed revision state."
+        ],
+        "trigger": "Kill the process at the frozen pre-commit hook."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.kill-release-boundary-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Recover to one complete old or new revision, never a mixture.",
+        "observable_effect_constraint": "Zero mixed-revision reads are observable."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.kill-release-boundary-001",
+      "gate_id": "mixed_revision_recovery",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate mixed_revision_recovery from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production release transaction and recovery reconciler",
+        "setup": [
+          "A release has durable action A and has not completed action B."
+        ],
+        "trigger": "Hit the fault cell between the two frozen persistence actions."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.complete-release-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Expose one complete revision.",
+        "observable_effect_constraint": "Exactly one internally consistent revision is visible."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.complete-release-001",
+      "gate_id": "mixed_revision_recovery",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate mixed_revision_recovery from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production release transaction and recovery reconciler",
+        "setup": [
+          "A valid approved release is ready for the normal transaction path."
+        ],
+        "trigger": "Complete the release without injected interruption."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.same-base-concurrent-release-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Commit exactly one successor and return CONFLICT for the other writer.",
+        "observable_effect_constraint": "Exactly one canonical successor and one authoring-head advance are visible."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.same-base-concurrent-release-001",
+      "gate_id": "concurrent_release_cas",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate concurrent_release_cas from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production concurrent release transaction and authoring-head CAS",
+        "setup": [
+          "Two approved writers have independently validated the same authoring base revision."
+        ],
+        "trigger": "Release both writers at the frozen authoring-head CAS barrier."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.sequential-release-bases-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Commit both valid successors without a false conflict.",
+        "observable_effect_constraint": "Exactly two ordered canonical successors and two authoring advances are visible."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.sequential-release-bases-001",
+      "gate_id": "concurrent_release_cas",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate concurrent_release_cas from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production release transaction and authoring-head CAS",
+        "setup": [
+          "Two approved releases use successive, current base revisions."
+        ],
+        "trigger": "Commit each release normally in base-revision order."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.redeliver-outbox-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Deduplicate or reconcile to the existing canonical effect.",
+        "observable_effect_constraint": "At most one observable canonical effect exists."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.redeliver-outbox-001",
+      "gate_id": "duplicate_observable_canonical_effect",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate duplicate_observable_canonical_effect from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production PostgreSQL outbox and Redis Streams consumer",
+        "setup": [
+          "One canonical effect is durable and its delivery is redelivered."
+        ],
+        "trigger": "Consume the same outbox identity twice."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.single-delivery-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Create the intended effect and acknowledge delivery.",
+        "observable_effect_constraint": "Exactly one observable canonical effect exists."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.single-delivery-001",
+      "gate_id": "duplicate_observable_canonical_effect",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate duplicate_observable_canonical_effect from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production PostgreSQL outbox and Redis Streams consumer",
+        "setup": [
+          "One unpublished outbox item is ready for delivery."
+        ],
+        "trigger": "Deliver and acknowledge it once."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.redis-transient-outage-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Retain the outbox row and later deliver its identity without duplicate effects.",
+        "observable_effect_constraint": "At most one stream identity and one observable canonical effect exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.redis-transient-outage-001",
+      "gate_id": "duplicate_observable_canonical_effect",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate duplicate_observable_canonical_effect from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production PostgreSQL outbox relay to Redis Streams",
+        "setup": [
+          "A PostgreSQL outbox row is durable while Redis Streams is temporarily unavailable."
+        ],
+        "trigger": "Run relay delivery during the registered Redis outage, then restore Redis."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.relay-restart-before-delivery-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Restart from the pending outbox row and deliver it exactly once logically.",
+        "observable_effect_constraint": "At most one observable canonical effect exists and the outbox row is retained."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.relay-restart-before-delivery-001",
+      "gate_id": "duplicate_observable_canonical_effect",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate duplicate_observable_canonical_effect from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production PostgreSQL outbox relay process",
+        "setup": [
+          "A pending outbox row is durable and has not been published to Redis Streams."
+        ],
+        "trigger": "Kill the relay immediately before the stream delivery call and restart it."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.relay-restart-after-delivery-before-mark-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reconcile the repeated delivery identity and mark the same outbox row delivered.",
+        "observable_effect_constraint": "At most one observable canonical effect and one delivered marker exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.relay-restart-after-delivery-before-mark-001",
+      "gate_id": "duplicate_observable_canonical_effect",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate duplicate_observable_canonical_effect from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production Redis Streams delivery to PostgreSQL outbox marker boundary",
+        "setup": [
+          "The outbox identity is in Redis Streams but PostgreSQL is not marked delivered."
+        ],
+        "trigger": "Kill the relay after stream delivery and before the delivered marker, then restart."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.projection-worker-kill-after-claim-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reclaim the job and converge to one durable DONE/READY result.",
+        "observable_effect_constraint": "Exactly one projection result and at most one serving advance exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.projection-worker-kill-after-claim-001",
+      "gate_id": "projection_job_without_unique_done",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate projection_job_without_unique_done from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production Redis Streams projection worker and PostgreSQL job ledger",
+        "setup": [
+          "A projection job claim, lease, attempt, and fencing token are durable."
+        ],
+        "trigger": "Kill the projection worker before result and READY persistence."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.projection-exit-before-ack-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Redelivery observes the durable result and converges to the same terminal job.",
+        "observable_effect_constraint": "Exactly one projection result, READY state, and stream ACK exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.projection-exit-before-ack-001",
+      "gate_id": "projection_job_without_unique_done",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate projection_job_without_unique_done from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production projection result commit to Redis Streams ACK boundary",
+        "setup": [
+          "Projection result, READY state, and terminal job state are durable but ACK is not."
+        ],
+        "trigger": "Exit the projection worker at the frozen post-result/pre-ACK hook."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.projection-worker-kill-after-ack-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Restart from PostgreSQL DONE/READY truth and continue normal consumption.",
+        "observable_effect_constraint": "Exactly one projection result and ACK, one later normal consumer delivery, and zero repeated side effects exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.projection-worker-kill-after-ack-001",
+      "gate_id": "projection_job_without_unique_done",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate projection_job_without_unique_done from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production projection ACK post-commit hook and restart path",
+        "setup": [
+          "Projection result, READY, terminal DONE, and stream ACK are all durable."
+        ],
+        "trigger": "Kill the projection worker immediately after ACK and before its next consumer step."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.projection-stale-fencing-token-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reject the stale update and preserve the newer terminal result.",
+        "observable_effect_constraint": "Zero stale overwrites and exactly one current projection result exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.projection-stale-fencing-token-001",
+      "gate_id": "projection_job_without_unique_done",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate projection_job_without_unique_done from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production PostgreSQL projection job fencing CAS",
+        "setup": [
+          "A newer projection attempt and fencing token are already durable."
+        ],
+        "trigger": "Deliver a late terminal update from the expired projection worker token."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.projection-job-completes-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Complete the job once without false fencing rejection.",
+        "observable_effect_constraint": "Exactly one projection result, terminal DONE, and stream ACK exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.projection-job-completes-001",
+      "gate_id": "projection_job_without_unique_done",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate projection_job_without_unique_done from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production Redis Streams projection worker and PostgreSQL job ledger",
+        "setup": [
+          "One valid projection job has a current lease and fencing token."
+        ],
+        "trigger": "Claim, build, persist READY/DONE, and ACK normally."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.worker-kill-after-claim-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reclaim and converge to one DONE result within the frozen bound.",
+        "observable_effect_constraint": "Exactly one DONE result and at most one canonical effect exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.worker-kill-after-claim-001",
+      "gate_id": "durable_claim_without_unique_done",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_claim_without_unique_done from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production Redis Streams worker and PostgreSQL assignment ledger",
+        "setup": [
+          "An assignment claim, lease, and fencing token are durable."
+        ],
+        "trigger": "Kill the worker before result persistence."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.worker-kill-before-result-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reclaim idempotently and converge to one verified DONE result.",
+        "observable_effect_constraint": "Exactly one DONE result, evidence identity, and intended effect exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.worker-kill-before-result-001",
+      "gate_id": "durable_claim_without_unique_done",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_claim_without_unique_done from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production multi-agent worker to PostgreSQL result boundary",
+        "setup": [
+          "Worker tool evidence is durable but assignment result and DONE are not."
+        ],
+        "trigger": "Kill the worker at the frozen post-evidence/pre-result hook."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.exit-before-ack-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Redelivery observes the durable result and converges to the same DONE.",
+        "observable_effect_constraint": "Exactly one DONE result and at most one canonical effect exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.exit-before-ack-001",
+      "gate_id": "durable_claim_without_unique_done",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_claim_without_unique_done from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production Redis Streams worker and PostgreSQL assignment ledger",
+        "setup": [
+          "Result, evidence, and DONE state are durable but stream ACK is not."
+        ],
+        "trigger": "Exit the worker at the frozen pre-ACK boundary."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.verifier-restart-before-verdict-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Resume verification from immutable evidence and persist one terminal verdict.",
+        "observable_effect_constraint": "Exactly one verifier verdict and one terminal assignment result exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.verifier-restart-before-verdict-001",
+      "gate_id": "durable_claim_without_unique_done",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_claim_without_unique_done from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production durable result to independent verifier boundary",
+        "setup": [
+          "Assignment result and immutable evidence are durable but verifier verdict is not."
+        ],
+        "trigger": "Kill and restart the verifier at the frozen pre-verdict persistence hook."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.assignment-stale-fencing-token-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reject the stale result and preserve the replacement worker result.",
+        "observable_effect_constraint": "Zero stale overwrites and exactly one current terminal result exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.assignment-stale-fencing-token-001",
+      "gate_id": "durable_claim_without_unique_done",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_claim_without_unique_done from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production PostgreSQL assignment result fencing CAS",
+        "setup": [
+          "A lease expired and a replacement worker owns a newer fencing token."
+        ],
+        "trigger": "Allow the old worker to return a late result with its expired token."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.assignment-redelivery-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Return the durable existing result without a second execution or visible result.",
+        "observable_effect_constraint": "Exactly one terminal result and at most one intended effect exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.assignment-redelivery-001",
+      "gate_id": "durable_claim_without_unique_done",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_claim_without_unique_done from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production Redis Streams assignment consumer and PostgreSQL assignment ledger",
+        "setup": [
+          "A completed assignment stream message is delivered again with the same identity."
+        ],
+        "trigger": "Process the duplicate assignment delivery."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.assignment-completes-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reach one DONE result within the normal-path deadline.",
+        "observable_effect_constraint": "Exactly one DONE result and one intended effect exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.assignment-completes-001",
+      "gate_id": "durable_claim_without_unique_done",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_claim_without_unique_done from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production Redis Streams worker and PostgreSQL assignment ledger",
+        "setup": [
+          "One valid assignment is available to an active worker."
+        ],
+        "trigger": "Claim, execute, persist result, and ACK normally."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.agent-kill-before-tool-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Resume at the pending tool step without losing budget or duplicating effects.",
+        "observable_effect_constraint": "Exactly one resumed tool dispatch/effect and one monotonic budget check exist; zero budget resets occur."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.agent-kill-before-tool-001",
+      "gate_id": "durable_agent_run_resume",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_agent_run_resume from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production durable AgentRun dispatcher",
+        "setup": [
+          "Plan, approval, cumulative budget, and next tool intent are durable."
+        ],
+        "trigger": "Kill the Agent process immediately before tool dispatch."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.agent-kill-after-tool-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Resume from the evidence identity without repeating the tool effect.",
+        "observable_effect_constraint": "Exactly one tool effect, continuation, and monotonic budget check exist; zero budget resets occur."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.agent-kill-after-tool-001",
+      "gate_id": "durable_agent_run_resume",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_agent_run_resume from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production tool middleware to durable AgentRun checkpoint",
+        "setup": [
+          "The tool result and immutable EvidenceArtifact are durable."
+        ],
+        "trigger": "Kill immediately after the tool boundary and before run-state continuation."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.agent-kill-before-checkpoint-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Recover or rebuild the checkpoint reference without losing the observation.",
+        "observable_effect_constraint": "Exactly one observation/checkpoint hash binding and monotonic budget check exist; zero budget resets occur."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.agent-kill-before-checkpoint-001",
+      "gate_id": "durable_agent_run_resume",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_agent_run_resume from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production ObservationStore to AgentRun checkpoint boundary",
+        "setup": [
+          "A large observation artifact is durable while its checkpoint reference is not."
+        ],
+        "trigger": "Kill immediately before checkpoint commit."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.agent-kill-after-checkpoint-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Resume from that checkpoint without replaying completed side effects.",
+        "observable_effect_constraint": "Exactly one restored context/approval-bound next step and monotonic budget check exist; no duplicate effect or budget reset occurs."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.agent-kill-after-checkpoint-001",
+      "gate_id": "durable_agent_run_resume",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_agent_run_resume from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production durable AgentRun checkpoint resume boundary",
+        "setup": [
+          "The checkpoint, observation refs, approval state, and budget are durable."
+        ],
+        "trigger": "Kill immediately after checkpoint commit and before the next step starts."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.agent-kill-at-hitl-pause-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Restart in PAUSED_HITL and apply at most one later human decision.",
+        "observable_effect_constraint": "Exactly one restored PAUSED_HITL state and monotonic budget check exist; zero unapproved effects or budget resets occur."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.agent-kill-at-hitl-pause-001",
+      "gate_id": "durable_agent_run_resume",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_agent_run_resume from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production durable AgentRun HITL pause and resume path",
+        "setup": [
+          "The run is durably PAUSED with its pending approval request and budget."
+        ],
+        "trigger": "Kill while the run waits at the HITL pause."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.agent-kill-before-reflection-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Resume or regenerate one Reflection within the remaining aggregate budget.",
+        "observable_effect_constraint": "Exactly one feedback-bound Reflection and monotonic budget check exist; zero budget resets occur."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.agent-kill-before-reflection-001",
+      "gate_id": "durable_agent_run_resume",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_agent_run_resume from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production verifier feedback to bounded Reflection boundary",
+        "setup": [
+          "Actionable verifier feedback is durable but Reflection text is not."
+        ],
+        "trigger": "Kill immediately before Reflection generation."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.agent-kill-after-reflection-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Resume and inject that exact Reflection once into the next attempt.",
+        "observable_effect_constraint": "Exactly one Reflection-to-next-attempt binding and monotonic budget check exist; zero budget resets occur."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.agent-kill-after-reflection-001",
+      "gate_id": "durable_agent_run_resume",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_agent_run_resume from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production Reflection artifact to next AgentRun attempt boundary",
+        "setup": [
+          "One Reflection artifact is durable but the next-attempt injection is not."
+        ],
+        "trigger": "Kill immediately after Reflection persistence."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.agent-tool-checkpoint-completes-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Complete one tool/checkpoint transition.",
+        "observable_effect_constraint": "Exactly one tool effect, EvidenceArtifact, and checkpoint exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.agent-tool-checkpoint-completes-001",
+      "gate_id": "durable_agent_run_resume",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_agent_run_resume from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production durable AgentRun tool/checkpoint path",
+        "setup": [
+          "A valid run has an approved tool step and available checkpoint store."
+        ],
+        "trigger": "Dispatch the tool, persist evidence, and checkpoint normally."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.agent-hitl-resume-completes-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Resume once without false expiry or duplicate decision.",
+        "observable_effect_constraint": "Exactly one decision event and one resumed transition exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.agent-hitl-resume-completes-001",
+      "gate_id": "durable_agent_run_resume",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_agent_run_resume from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production durable AgentRun HITL resume path",
+        "setup": [
+          "A valid run is durably PAUSED for one human decision."
+        ],
+        "trigger": "Apply one valid decision and resume normally."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.agent-reflection-retry-completes-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Persist and inject one Reflection without resetting budget.",
+        "observable_effect_constraint": "Exactly one Reflection and one next attempt exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.agent-reflection-retry-completes-001",
+      "gate_id": "durable_agent_run_resume",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate durable_agent_run_resume from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production bounded Reflection retry path",
+        "setup": [
+          "A run has actionable verifier feedback and remaining aggregate budget."
+        ],
+        "trigger": "Generate one Reflection and enter one bounded retry."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.sse-revoked-membership-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Disconnect within the frozen bound and deliver no post-revocation tenant event.",
+        "observable_effect_constraint": "Exactly one bounded disconnect and zero post-revocation tenant events occur."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.sse-revoked-membership-001",
+      "gate_id": "revoked_sse_event_leakage",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate revoked_sse_event_leakage from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production authorized SSE stream reauthorization boundary",
+        "setup": [
+          "A tenant SSE connection exists and its membership is durably revoked."
+        ],
+        "trigger": "Attempt to deliver the next event or heartbeat after revocation."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.sse-authorized-stream-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Keep the connection usable and deliver the in-scope event.",
+        "observable_effect_constraint": "Exactly one in-scope event is delivered without false disconnection."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.sse-authorized-stream-001",
+      "gate_id": "revoked_sse_event_leakage",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate revoked_sse_event_leakage from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production authorized SSE stream",
+        "setup": [
+          "A tenant member keeps valid authorization on an established SSE connection."
+        ],
+        "trigger": "Deliver one normal event and bounded heartbeat."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.relay-cross-tenant-payload-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reject the payload before reading or mutating the target tenant.",
+        "observable_effect_constraint": "Exactly one policy rejection and zero cross-tenant relay rows/events occur."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.relay-cross-tenant-payload-001",
+      "gate_id": "service_role_cross_tenant_access",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate service_role_cross_tenant_access from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production outbox relay service-role PostgreSQL transaction",
+        "setup": [
+          "A relay service receives a payload naming another tenant scope."
+        ],
+        "trigger": "Reauthorize the opaque scope through the non-superuser relay role."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.worker-cross-tenant-payload-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reject the payload before reading or mutating the target tenant.",
+        "observable_effect_constraint": "Exactly one policy rejection and zero cross-tenant worker rows/results occur."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.worker-cross-tenant-payload-001",
+      "gate_id": "service_role_cross_tenant_access",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate service_role_cross_tenant_access from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production worker service-role PostgreSQL transaction",
+        "setup": [
+          "A worker delivery payload names another tenant scope."
+        ],
+        "trigger": "Reauthorize the opaque scope through the non-superuser worker role."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.relay-same-tenant-payload-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Allow one in-scope delivery.",
+        "observable_effect_constraint": "Exactly one in-scope stream event is delivered."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.relay-same-tenant-payload-001",
+      "gate_id": "service_role_cross_tenant_access",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate service_role_cross_tenant_access from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production outbox relay service-role PostgreSQL transaction",
+        "setup": [
+          "A relay payload and outbox row share one authorized tenant scope."
+        ],
+        "trigger": "Authorize and deliver the payload normally."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.worker-same-tenant-payload-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Allow one in-scope result.",
+        "observable_effect_constraint": "Exactly one in-scope terminal result is persisted."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.worker-same-tenant-payload-001",
+      "gate_id": "service_role_cross_tenant_access",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate service_role_cross_tenant_access from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production worker service-role PostgreSQL transaction",
+        "setup": [
+          "A worker payload and assignment share one authorized tenant scope."
+        ],
+        "trigger": "Authorize and process the payload normally."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.publish-idempotency-replay-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Return the original result identity without a second publish transaction.",
+        "observable_effect_constraint": "Exactly one visible authoring revision, outbox row, and ledger effect exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.publish-idempotency-replay-001",
+      "gate_id": "publish_idempotency_replay_duplicate_effect",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate publish_idempotency_replay_duplicate_effect from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production publish API transaction and idempotency ledger",
+        "setup": [
+          "One publish request has committed its idempotency key and canonical result."
+        ],
+        "trigger": "Replay the same publish request with the exact same idempotency key."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.distinct-idempotency-publishes-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Commit both distinct valid publishes without false deduplication.",
+        "observable_effect_constraint": "Exactly two ordered revisions, outbox rows, and ledger effects exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.distinct-idempotency-publishes-001",
+      "gate_id": "publish_idempotency_replay_duplicate_effect",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate publish_idempotency_replay_duplicate_effect from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production publish API transaction and idempotency ledger",
+        "setup": [
+          "Two valid publish requests use distinct idempotency keys and successive bases."
+        ],
+        "trigger": "Publish both requests through the normal API path."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.vector-reconciliation-duplicate-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Recompute from durable source truth and retain one current-revision vector row.",
+        "observable_effect_constraint": "Exactly one vector row per durable source identity remains after repair."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.vector-reconciliation-duplicate-001",
+      "gate_id": "reconciliation_revision_corruption",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate reconciliation_revision_corruption from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production PostgreSQL/pgvector reconciliation worker",
+        "setup": [
+          "A revision has duplicate vector projection rows for one durable source identity."
+        ],
+        "trigger": "Run the production vector reconciliation scan and repair transaction."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.community-cross-revision-corruption-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Recompute the community from one durable source revision and replace corruption.",
+        "observable_effect_constraint": "Every repaired community row and member reference names the same revision."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.community-cross-revision-corruption-001",
+      "gate_id": "reconciliation_revision_corruption",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate reconciliation_revision_corruption from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production graph/community reconciliation worker",
+        "setup": [
+          "A community projection mixes members or edges from two source revisions."
+        ],
+        "trigger": "Run the production community reconciliation scan and repair transaction."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.reconciliation-clean-repaired-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Preserve the clean and repaired states without duplicate or cross-revision output.",
+        "observable_effect_constraint": "One same-revision projection state remains for each durable source identity."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.reconciliation-clean-repaired-001",
+      "gate_id": "reconciliation_revision_corruption",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate reconciliation_revision_corruption from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production vector and graph/community reconciliation workers",
+        "setup": [
+          "One clean projection and one correctly repaired projection match durable source truth."
+        ],
+        "trigger": "Run reconciliation again over both current-revision projection states."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.assignment-bad-payload-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Persist exactly one terminal FAILED_BAD_PAYLOAD result.",
+        "observable_effect_constraint": "Exactly one precise terminal reason and zero unauthorized side effects exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.assignment-bad-payload-001",
+      "gate_id": "nonrecoverable_assignment_terminal_reason",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate nonrecoverable_assignment_terminal_reason from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production assignment validation and terminal ledger path",
+        "setup": [
+          "A claimed assignment contains a durably hash-bound schema-invalid payload."
+        ],
+        "trigger": "Validate the payload at the production worker boundary."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.assignment-policy-rejection-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Persist exactly one terminal FAILED_POLICY_REJECTION result.",
+        "observable_effect_constraint": "Exactly one precise terminal reason and zero forbidden tool effects exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.assignment-policy-rejection-001",
+      "gate_id": "nonrecoverable_assignment_terminal_reason",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate nonrecoverable_assignment_terminal_reason from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production assignment policy and terminal ledger path",
+        "setup": [
+          "A claimed assignment requests an operation forbidden by the frozen task policy."
+        ],
+        "trigger": "Evaluate policy before dispatching the forbidden operation."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.assignment-explicit-cancellation-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Persist exactly one terminal FAILED_EXPLICIT_CANCELLATION result.",
+        "observable_effect_constraint": "Exactly one precise terminal reason and zero post-cancellation effects exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.assignment-explicit-cancellation-001",
+      "gate_id": "nonrecoverable_assignment_terminal_reason",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate nonrecoverable_assignment_terminal_reason from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production cancellation event and terminal assignment path",
+        "setup": [
+          "An explicit cancellation event is durable for one active assignment."
+        ],
+        "trigger": "Observe cancellation before the next worker effect and finalize the assignment."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.assignment-retry-budget-exhaustion-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Persist exactly one terminal FAILED_RETRY_BUDGET_EXHAUSTED result.",
+        "observable_effect_constraint": "Exactly one precise terminal reason, zero extra attempts, and no budget reset exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.assignment-retry-budget-exhaustion-001",
+      "gate_id": "nonrecoverable_assignment_terminal_reason",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate nonrecoverable_assignment_terminal_reason from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production retry budget and terminal assignment path",
+        "setup": [
+          "The assignment has durably consumed its final preregistered retry budget unit."
+        ],
+        "trigger": "Request one additional retry through the production retry gate."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.valid-assignment-terminal-done-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Persist exactly one terminal DONE result without a false FAILED reason.",
+        "observable_effect_constraint": "Exactly one DONE result and one authorized intended effect exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.valid-assignment-terminal-done-001",
+      "gate_id": "nonrecoverable_assignment_terminal_reason",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate nonrecoverable_assignment_terminal_reason from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production assignment worker, verifier, and terminal ledger path",
+        "setup": [
+          "One valid authorized assignment has sufficient retry budget and no cancellation."
+        ],
+        "trigger": "Execute, verify, and persist the assignment normally."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.assignment-outbox-kill-before-commit-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Expose neither row after kill, then commit both exactly once during recovery.",
+        "observable_effect_constraint": "Zero half-state is visible; one assignment and one matching outbox row finally exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.assignment-outbox-kill-before-commit-001",
+      "gate_id": "assignment_outbox_atomicity",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate assignment_outbox_atomicity from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production assignment/outbox PostgreSQL transaction and same-key recovery",
+        "setup": [
+          "A durable same-key command is ready to create assignment and outbox in one PG transaction."
+        ],
+        "trigger": "Kill the process at the frozen pre-commit hook, then recover with the same key."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.assignment-outbox-kill-after-commit-before-delivery-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Recover the pending outbox identity and converge to one terminal DONE.",
+        "observable_effect_constraint": "Exactly one assignment, outbox row, delivery identity, and DONE result exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.assignment-outbox-kill-after-commit-before-delivery-001",
+      "gate_id": "assignment_outbox_atomicity",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate assignment_outbox_atomicity from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production assignment/outbox commit to relay delivery boundary",
+        "setup": [
+          "Assignment and matching outbox row committed atomically but delivery has not started."
+        ],
+        "trigger": "Kill after PG commit and before Redis delivery, then start the relay recovery path."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.assignment-outbox-atomic-commit-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Commit the matched pair atomically and reach one terminal DONE.",
+        "observable_effect_constraint": "Exactly one matched assignment/outbox pair, delivery, and DONE result exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.assignment-outbox-atomic-commit-001",
+      "gate_id": "assignment_outbox_atomicity",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate assignment_outbox_atomicity from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production assignment/outbox PostgreSQL transaction and relay/worker path",
+        "setup": [
+          "One valid same-key command is ready for the normal assignment/outbox transaction."
+        ],
+        "trigger": "Commit both rows, deliver, execute, and complete normally."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.instance-a-exit-instance-b-reclaim-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Instance B observes the same scoped job and uniquely completes it.",
+        "observable_effect_constraint": "Distinct source/recovery instance identities and exactly one terminal result exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.instance-a-exit-instance-b-reclaim-001",
+      "gate_id": "cross_instance_job_visibility",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate cross_instance_job_visibility from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production two-instance job API, SSE, Redis reclaim, and PostgreSQL ledger",
+        "setup": [
+          "Instance A has durably created one scoped job and recorded its source identity."
+        ],
+        "trigger": "Kill instance A, then query, observe SSE, reclaim, and complete from instance B."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.cross-instance-job-visible-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "The second instance sees and completes the same job without false isolation.",
+        "observable_effect_constraint": "Distinct instance identities and exactly one visible terminal result exist."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.cross-instance-job-visible-001",
+      "gate_id": "cross_instance_job_visibility",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate cross_instance_job_visibility from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production two-instance job API, SSE, Redis delivery, and PostgreSQL ledger",
+        "setup": [
+          "Two healthy instances share one tenant scope and durable job ledger."
+        ],
+        "trigger": "Create on instance A and normally query, observe, and complete on instance B."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.attack.projection-failure-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Keep the old serving revision and leave work retryable.",
+        "observable_effect_constraint": "Zero serving advances occur before every required projection is READY."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.attack.projection-failure-001",
+      "gate_id": "projection_not_ready_serving_advance",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate projection_not_ready_serving_advance from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production projection worker, pgvector, and serving-pointer gate",
+        "setup": [
+          "A required pgvector or graph projection is not READY."
+        ],
+        "trigger": "Attempt recovery and serving-pointer advance while the dependency fault is active."
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.benign.all-projections-ready-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Advance once to the fully projected revision.",
+        "observable_effect_constraint": "Exactly one serving advance exposes one consistent revision."
+      },
+      "fault_manifest_cell_id": "failure_isolation_matrix.benign.all-projections-ready-001",
+      "gate_id": "projection_not_ready_serving_advance",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate projection_not_ready_serving_advance from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production projection worker, pgvector, and serving-pointer gate",
+        "setup": [
+          "Every required projection for the new revision is READY."
+        ],
+        "trigger": "Advance the serving pointer through the normal gate."
+      }
+    }
+  ],
+  "implementation_status": "NOT_AVAILABLE",
+  "production_path_exercised": false,
+  "run_status": "NOT_RUN",
+  "schema_version": "formal-hard-zero-catalog/v1",
+  "status_reasons": [
+    "PRODUCTION_FAULT_RUNNER_NOT_AVAILABLE"
+  ],
+  "suite_id": "failure_isolation_matrix"
+}

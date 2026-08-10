@@ -8,14 +8,18 @@ Two spec sources, per the design:
   rule proves ``AG EF ending`` — *no soft-lock*: every reachable (stage, flag-state) can still reach
   some ending. This is the one genuinely universal CTL property (it needs no planner input) and the
   flagship the structural reachability audit cannot see once flag semantics gate the branches.
+  The checker runs **world-aware**: this rule holds the whole bundle, so it first cross-references
+  every flag (:mod:`owcopilot.logic.xref`) and tells the CTL engine which flags nothing anywhere
+  writes. Without that, a guard on a dialogue-set or cross-quest flag forces an honest withhold on
+  exactly the shared-flag content the check matters most for.
 * **Plot-specific declared specs.** Any :class:`~owcopilot.logic.temporal.TemporalSpec` a planner
   has confirmed (via the spec-authoring agent) and stored on ``quest.metadata["temporal_specs"]`` is
   checked — ``AG p`` invariants (mutual exclusion, resource floors, "a done flag never regresses")
   and ``EF p`` reachability.
 
-Zero-false-positive discipline (this is a hard audit gate, like the other 30 rules): a violation is
-emitted as an ERROR **only when the CTL verdict is sound** — a concrete reachable counterexample, or
-a proof over an exhaustively explored state space. A bound-truncated "could not prove" verdict emits
+Zero-false-positive discipline (this is a hard audit gate, like every other registered rule): a
+violation is emitted as an ERROR **only when the CTL verdict is sound** — a concrete reachable
+counterexample, or a proof over an exhaustively explored state space. A truncated verdict emits
 nothing (it is not a violation), and a *vacuous* pass (an invariant that holds only because its
 trigger is never reachable — a likely mis-grounded spec) emits a WARNING for human review, never an
 ERROR. Every emitted issue carries the replayable branch-id witness in its evidence.
@@ -38,6 +42,7 @@ from ...logic.temporal import (
     check_temporal_spec,
     parse_specs_from_quest,
 )
+from ...logic.xref import build_flag_xref
 from ..context import AuditContext
 from ..models import Category, Evidence, Issue, Severity
 
@@ -54,20 +59,33 @@ class FlagTemporalInvariantRule:
     category = Category.LOGIC
 
     def check(self, ctx: AuditContext) -> Iterable[Issue]:
+        # One world-level pass before the per-quest loop. Without it every checker here is stuck in
+        # a single-quest view and must withhold whenever a guard reads a flag this quest does not
+        # write — which, in a world where flags are shared across quests by default, is most of the
+        # interesting content. See owcopilot.logic.xref for why this set is sound.
+        never_written = build_flag_xref(ctx.bundle).provably_never_written()
+
         for quest in ctx.bundle.quests.values():
             if quest.logic is None or not quest.stages:
                 continue
             target = f"quest:{quest.id}"
 
-            soft_lock = check_soft_lock(quest)
+            soft_lock = check_soft_lock(quest, provably_never_written=never_written)
             if soft_lock.status is SpecStatus.VIOLATED:
                 yield self._violation_issue(quest.id, target, soft_lock)
 
             for spec in parse_specs_from_quest(quest):
-                yield from self._check_spec(quest.id, target, quest, spec)
+                yield from self._check_spec(quest.id, target, quest, spec, never_written)
 
-    def _check_spec(self, quest_id: str, target: str, quest, spec: TemporalSpec) -> Iterable[Issue]:
-        result = check_temporal_spec(quest, spec)
+    def _check_spec(
+        self,
+        quest_id: str,
+        target: str,
+        quest,
+        spec: TemporalSpec,
+        never_written: frozenset[str] = frozenset(),
+    ) -> Iterable[Issue]:
+        result = check_temporal_spec(quest, spec, provably_never_written=never_written)
         if result.status is SpecStatus.VIOLATED:
             yield self._violation_issue(quest_id, target, result)
         elif result.status is SpecStatus.VACUOUS:

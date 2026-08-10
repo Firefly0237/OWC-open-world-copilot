@@ -1,0 +1,270 @@
+{
+  "schema_version": 2,
+  "node": "N2.1",
+  "alias_policy": "FORBID_ALIAS_OR_REEXPORT",
+  "capability_boundary": {
+    "declared_counts_as_implemented": false,
+    "c13_claim_tier": "NONE",
+    "c13_state": "NOT_AVAILABLE"
+  },
+  "contracts": [
+    {
+      "name": "OwnershipScope",
+      "status": "IMPLEMENTED",
+      "implementation": {
+        "module": "owcopilot.contracts.identity",
+        "symbol": "OwnershipScope"
+      },
+      "first_consumer_node": "N1.2",
+      "first_consumer_component": "team.persistence.rls_scope",
+      "acceptance_node": "N1.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "ArtifactIdentity",
+      "status": "IMPLEMENTED",
+      "implementation": {
+        "module": "owcopilot.contracts.identity",
+        "symbol": "ArtifactIdentity"
+      },
+      "first_consumer_node": "N2.1",
+      "first_consumer_component": "intake.artifact_persistence",
+      "acceptance_node": "N1.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "ContentObjectVersion",
+      "status": "IMPLEMENTED",
+      "implementation": {
+        "module": "owcopilot.contracts.revisions",
+        "symbol": "ContentObjectVersion"
+      },
+      "first_consumer_node": "N1.2",
+      "first_consumer_component": "team.persistence.content_object_versions",
+      "acceptance_node": "N1.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "RevisionMembership",
+      "status": "IMPLEMENTED",
+      "implementation": {
+        "module": "owcopilot.contracts.revisions",
+        "symbol": "RevisionMembership"
+      },
+      "first_consumer_node": "N1.2",
+      "first_consumer_component": "team.persistence.revision_membership",
+      "acceptance_node": "N1.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "ContentRevision",
+      "status": "IMPLEMENTED",
+      "implementation": {
+        "module": "owcopilot.contracts.revisions",
+        "symbol": "ContentRevision"
+      },
+      "first_consumer_node": "N1.2",
+      "first_consumer_component": "team.persistence.content_revisions",
+      "acceptance_node": "N1.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "ReleasePointer",
+      "status": "IMPLEMENTED",
+      "implementation": {
+        "module": "owcopilot.contracts.revisions",
+        "symbol": "ReleasePointer"
+      },
+      "first_consumer_node": "N1.2",
+      "first_consumer_component": "team.persistence.release_pointer_cas",
+      "acceptance_node": "N1.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "SourceSegment",
+      "status": "IMPLEMENTED",
+      "implementation": {
+        "module": "owcopilot.intake.contracts",
+        "symbol": "SourceSegment"
+      },
+      "first_consumer_node": "N2.1",
+      "first_consumer_component": "intake.source_segmentation",
+      "acceptance_node": "N2.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "IntakeRun",
+      "status": "IMPLEMENTED",
+      "implementation": {
+        "module": "owcopilot.intake.contracts",
+        "symbol": "IntakeRun"
+      },
+      "first_consumer_node": "N2.1",
+      "first_consumer_component": "intake.run_state_machine",
+      "acceptance_node": "N2.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "TriageVerdict",
+      "status": "IMPLEMENTED",
+      "implementation": {
+        "module": "owcopilot.intake.contracts",
+        "symbol": "TriageVerdict"
+      },
+      "first_consumer_node": "N2.1",
+      "first_consumer_component": "intake.triage_gate",
+      "acceptance_node": "N2.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "ChangeSet",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.authoring.contracts",
+      "planned_symbol": "ChangeSet",
+      "first_consumer_node": "N2.2",
+      "first_consumer_component": "authoring.change_review",
+      "acceptance_node": "N2.2",
+      "legacy_name_collisions": [
+        {
+          "qualified_name": "owcopilot.impact.models.ChangeSet",
+          "may_alias": false
+        }
+      ]
+    },
+    {
+      "name": "ReviewDecision",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.authoring.contracts",
+      "planned_symbol": "ReviewDecision",
+      "first_consumer_node": "N2.2",
+      "first_consumer_component": "authoring.review_decision",
+      "acceptance_node": "N2.2",
+      "legacy_name_collisions": [
+        {
+          "qualified_name": "owcopilot.pipeline.review.ReviewDecision",
+          "may_alias": false
+        }
+      ]
+    },
+    {
+      "name": "EvidenceUnit",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.knowledge.contracts",
+      "planned_symbol": "EvidenceUnit",
+      "first_consumer_node": "N3.1",
+      "first_consumer_component": "knowledge.evidence_ledger",
+      "acceptance_node": "N3.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "DerivedClaim",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.knowledge.contracts",
+      "planned_symbol": "DerivedClaim",
+      "first_consumer_node": "N3.1",
+      "first_consumer_component": "knowledge.claim_derivation",
+      "acceptance_node": "N3.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "ExecutionScope",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.agent.contracts",
+      "planned_symbol": "ExecutionScope",
+      "first_consumer_node": "N4.1",
+      "first_consumer_component": "agent.execution_orchestration",
+      "acceptance_node": "N4.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "TaskContract",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.agent.contracts",
+      "planned_symbol": "TaskContract",
+      "first_consumer_node": "N4.1",
+      "first_consumer_component": "agent.task_planning",
+      "acceptance_node": "N4.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "PlanArtifact",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.agent.contracts",
+      "planned_symbol": "PlanArtifact",
+      "first_consumer_node": "N4.1",
+      "first_consumer_component": "agent.task_planning",
+      "acceptance_node": "N4.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "EffectSpec",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.agent.contracts",
+      "planned_symbol": "EffectSpec",
+      "first_consumer_node": "N4.1",
+      "first_consumer_component": "agent.tool_effect_gate",
+      "acceptance_node": "N4.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "ApprovalGrant",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.agent.contracts",
+      "planned_symbol": "ApprovalGrant",
+      "first_consumer_node": "N4.1",
+      "first_consumer_component": "agent.approval_gate",
+      "acceptance_node": "N4.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "EvidenceRecord",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.agent.contracts",
+      "planned_symbol": "EvidenceRecord",
+      "first_consumer_node": "N4.1",
+      "first_consumer_component": "agent.execution_evidence",
+      "acceptance_node": "N4.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "VerifierVerdict",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.agent.contracts",
+      "planned_symbol": "VerifierVerdict",
+      "first_consumer_node": "N4.1",
+      "first_consumer_component": "agent.result_verification",
+      "acceptance_node": "N4.1",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "MemoryItem",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.memory.contracts",
+      "planned_symbol": "MemoryItem",
+      "first_consumer_node": "N4.3",
+      "first_consumer_component": "memory.item_store",
+      "acceptance_node": "N4.3",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "MemoryEvent",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.memory.contracts",
+      "planned_symbol": "MemoryEvent",
+      "first_consumer_node": "N4.3",
+      "first_consumer_component": "memory.event_ledger",
+      "acceptance_node": "N4.3",
+      "legacy_name_collisions": []
+    },
+    {
+      "name": "RetrievalPolicyVersion",
+      "status": "DECLARED",
+      "planned_module": "owcopilot.memory.contracts",
+      "planned_symbol": "RetrievalPolicyVersion",
+      "first_consumer_node": "N4.3",
+      "first_consumer_component": "memory.retrieval_policy",
+      "acceptance_node": "N4.3",
+      "legacy_name_collisions": []
+    }
+  ]
+}

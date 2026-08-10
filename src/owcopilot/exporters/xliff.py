@@ -72,7 +72,7 @@ def write_localization_csv(bundle: ContentBundle, path: Path) -> None:
     )
     for row in rows:
         writer.writerow(row)
-    path.write_text(buffer.getvalue(), encoding="utf-8")
+    path.write_bytes(buffer.getvalue().encode("utf-8"))
 
 
 def _units(bundle: ContentBundle) -> dict[str, list[tuple[str, str, int | None]]]:
@@ -111,4 +111,4 @@ def render_xliff(bundle: ContentBundle) -> str:
 
 
 def write_localization_xliff(bundle: ContentBundle, path: Path) -> None:
-    path.write_text(render_xliff(bundle), encoding="utf-8")
+    path.write_bytes(render_xliff(bundle).encode("utf-8"))

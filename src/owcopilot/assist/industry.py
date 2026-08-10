@@ -1,9 +1,9 @@
 # 游戏内容 prompt 用的行业调研 rubric 片段。
 """Industry-researched rubric snippets for game-content prompts.
 
-These notes are deliberately short enough to live inside system prompts. The fuller rationale and
-URLs are documented in ``project_docs/行业调研提示词依据.md``; keep the source ids stable so tests
-can assert that critique/quality prompts do not drift back to unsourced taste.
+These notes are deliberately short enough to live inside system prompts. Their stable source
+ids are part of the prompt contract, so tests can assert that critique/quality prompts do not drift
+back to unsourced taste.
 """
 
 from __future__ import annotations

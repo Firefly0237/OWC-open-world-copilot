@@ -67,6 +67,17 @@ def as_structured_tools(
     skills: list[Skill] = [s for s in registry if allowed is None or s.name in allowed]
     tools: list[StructuredTool] = []
     for skill in skills:
+        metadata: dict[str, Any] = {
+            "owc_semantic_projection": skill.semantic_projection_name,
+            "owc_state_marker_policy": skill.state_marker_policy,
+        }
+        if skill.polling is not None:
+            metadata["owc_polling_policy"] = {
+                "status_field": skill.polling.status_field,
+                "pending_values": list(skill.polling.pending_values),
+                "max_polls": skill.polling.max_polls,
+                "deadline_seconds": skill.polling.deadline_seconds,
+            }
         tools.append(
             StructuredTool(
                 name=skill.name,
@@ -74,6 +85,7 @@ def as_structured_tools(
                 args_schema=skill.openai_tool_schema()["function"]["parameters"],
                 func=_bridge(registry, skill.name),
                 response_format="content_and_artifact",
+                metadata=metadata,
             )
         )
     return tools

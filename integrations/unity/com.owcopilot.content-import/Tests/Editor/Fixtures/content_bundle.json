@@ -1,0 +1,173 @@
+{
+  "dialogue_trees": {},
+  "dialogues": {
+    "dlg_hello": {
+      "id": "dlg_hello",
+      "locale": "zh-CN",
+      "metadata": {},
+      "origin": "human",
+      "quest_id": "quest_patrol",
+      "review_status": "approved",
+      "speaker_id": "npc_mara",
+      "text": "站住！",
+      "text_key": "dlg.hello"
+    }
+  },
+  "entities": {
+    "fac_watch": {
+      "aliases": [],
+      "description": "",
+      "id": "fac_watch",
+      "metadata": {},
+      "name": "守夜人",
+      "origin": "human",
+      "review_status": "approved",
+      "status": "active",
+      "tags": [],
+      "type": "faction"
+    },
+    "loc_town": {
+      "aliases": [],
+      "description": "",
+      "id": "loc_town",
+      "metadata": {},
+      "name": "Town",
+      "origin": "human",
+      "review_status": "approved",
+      "status": "active",
+      "tags": [],
+      "type": "location"
+    },
+    "npc_mara": {
+      "aliases": [],
+      "description": "边境斥候。",
+      "id": "npc_mara",
+      "metadata": {},
+      "name": "玛拉",
+      "origin": "human",
+      "review_status": "approved",
+      "status": "active",
+      "tags": [],
+      "type": "npc"
+    }
+  },
+  "localized_texts": {},
+  "pois": {},
+  "quest_event_refs": {},
+  "quests": {
+    "quest_intro": {
+      "dialogue_refs": [],
+      "id": "quest_intro",
+      "localization_keys": [],
+      "metadata": {},
+      "objective": "",
+      "origin": "human",
+      "prerequisites": [],
+      "review_status": "approved",
+      "rewards": [],
+      "stages": [],
+      "tags": [],
+      "title": "序章"
+    },
+    "quest_patrol": {
+      "dialogue_refs": [
+        "dlg_hello",
+        "dlg_ghost"
+      ],
+      "giver_npc": "npc_mara",
+      "id": "quest_patrol",
+      "localization_keys": [],
+      "location": "loc_town",
+      "logic": {
+        "branches": [
+          {
+            "condition": "v_seen",
+            "effects": [],
+            "from_stage": "s1",
+            "id": "br1",
+            "outcome": "done",
+            "to_stage": ""
+          }
+        ],
+        "precondition": "",
+        "stage_logic": [
+          {
+            "effects_on_complete": [
+              {
+                "op": "set",
+                "value": true,
+                "var": "v_seen"
+              }
+            ],
+            "precondition": "",
+            "stage_id": "s1"
+          }
+        ],
+        "unlocks": [
+          "quest_next"
+        ],
+        "variables": [
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "v_seen",
+            "name": "seen",
+            "type": "bool"
+          }
+        ]
+      },
+      "metadata": {},
+      "objective": "在天黑前巡视边境线。",
+      "origin": "human",
+      "prerequisites": [
+        "quest_intro",
+        "quest_missing"
+      ],
+      "review_status": "approved",
+      "rewards": [],
+      "stages": [
+        {
+          "id": "s1",
+          "location": "loc_town",
+          "required_entities": [
+            "npc_mara",
+            "ent_ghost"
+          ],
+          "summary": "出发"
+        }
+      ],
+      "tags": [],
+      "timeline_order": 1,
+      "title": "巡逻边境"
+    }
+  },
+  "regions": {},
+  "relations": [
+    {
+      "kind": "haunts",
+      "metadata": {},
+      "origin": "human",
+      "review_status": "approved",
+      "source": "ghost_x",
+      "target": "loc_town"
+    },
+    {
+      "kind": "member_of",
+      "metadata": {},
+      "origin": "human",
+      "review_status": "approved",
+      "source": "npc_mara",
+      "target": "fac_watch"
+    },
+    {
+      "kind": "resides_in",
+      "metadata": {},
+      "origin": "human",
+      "review_status": "approved",
+      "source": "npc_mara",
+      "target": "loc_town"
+    }
+  ],
+  "style_guides": {},
+  "terms": {}
+}

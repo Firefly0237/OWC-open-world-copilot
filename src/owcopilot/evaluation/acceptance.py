@@ -57,7 +57,7 @@ from .blind_spots import evaluate_blind_spots
 # W1-2 诚实标注：本 gate 跑的是 OfflineGoalAwareChatModel（离线确定性替身，按 gold 序列构造应答），
 # 不是任何真实 LLM。mean_f1==1.0 是"替身按设计返回 gold 序列"的产物，测的是 agent 执行链路接线是否
 # 正确，不是真模型的工具选择能力。此数字**不得作为对外材料里的工具选择准确率声称**；真 live-model
-# 工具选择评测是 Wave 5 W5-1（docs/研究/一轮修改优化_总实施方案.md）。
+# 工具选择评测的历史设计见 benchmarks/evidence/。
 TOOL_ACCURACY_GATE: float = 0.80
 
 DETECTION_RATE_GATE = 0.85
@@ -575,7 +575,7 @@ def retrieval_eval_queries() -> list[tuple[str, str | None]]:
     - This query set targets the bge-m3 semantic path; HashingEmbedder (bag-of-chars)
       will have lower recall on paraphrase queries.
     - Sample size (15 queries) is too small for statistically significant CI intervals;
-      this is a portfolio demonstration, not a production benchmark (n ≥ 100 needed for
+      this is a small regression dataset (n ≥ 100 is needed for
       Wilson CI < ±5%).
     - ``run_semantic_retrieval_benchmark()`` compares bge-m3 vs BM25-only on this set.
     - **hit_rate in the acceptance gate (``RETRIEVAL_HIT_RATE_GATE``) is measured after
@@ -649,7 +649,7 @@ def run_semantic_retrieval_benchmark(
     - This function uses the REAL bge-m3 embedder (SemanticEmbedder) to measure the
       semantic path.  It is skipped in CI (``skip_if_no_semantic=True``) to keep $0
       and deterministic gates intact.
-    - Run locally or in portfolio review:
+    - Run locally or in offline benchmark runs:
       ``python -c "from owcopilot.evaluation.acceptance import run_semantic_retrieval_benchmark;
       print(run_semantic_retrieval_benchmark('/tmp/ws'))"``
 
@@ -1092,8 +1092,11 @@ def run_acceptance_evaluation(
     metrics["detected"] = len(detected)
 
     # Honest denominator disclosure: detection_rate is over the *seeded* errors, which exercise a
-    # SUBSET of the rule registry, not all 29 rules. Surfacing rules_covered / rules_uncovered keeps
-    # detection_rate=1.0 from being read as "all rules validated by acceptance". The uncovered rules
+    # SUBSET of the rule registry. The size of that subset is emitted below as rules_total /
+    # rules_covered / rules_uncovered rather than written into this comment as a number that would
+    # drift away from the registry — a disclosure whose scale cannot be checked is not a
+    # disclosure. Surfacing them keeps detection_rate=1.0 from being read as "all rules validated
+    # by acceptance". The uncovered rules
     # (PROMPT_INJECTION, the dialogue-tree family, quest-logic/reachability, unreviewed-AI, ...) are
     # each covered by their own dedicated unit tests; they are just not seeded into this one world.
     all_rule_codes = set(build_default_rule_registry().codes())
@@ -1238,7 +1241,8 @@ def evaluate_tool_selection() -> dict[str, Any]:
 
     真实性标签：FIXTURE，非 real-model。返回的 ``mean_f1`` 由 ``OfflineGoalAwareChatModel``（离线
     确定性替身）跑出来，不是任何真实 LLM 的工具选择表现，**不得作为对外材料声称的工具选择准确率
-    数字**。真 live-model 工具选择评测见 Wave 5 W5-1（docs/研究/一轮修改优化_总实施方案.md）。
+    数字**。真 live-model 工具选择评测的历史设计见
+    benchmarks/evidence/。
 
     Returns ``{"mean_f1": float, "scenarios": [per-scenario detail dicts]}``.
     """

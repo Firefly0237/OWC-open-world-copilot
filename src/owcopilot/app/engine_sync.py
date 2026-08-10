@@ -62,11 +62,15 @@ def plan_engine_sync_back(
     engine: dict[str, Any] = {}
     for raw in incoming:
         quest = coerce_quest(raw)
+        if quest.id in engine:
+            raise ValueError(f"引擎数据包含重复任务 ID：{quest.id}")
         engine[quest.id] = quest
     base_etags: dict[str, str] = {}
     if baseline is not None:
         for raw in baseline:
             quest = coerce_quest(raw)
+            if quest.id in base_etags:
+                raise ValueError(f"导出基线包含重复任务 ID：{quest.id}")
             base_etags[quest.id] = etag_for(quest)
 
     new: list[str] = []

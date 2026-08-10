@@ -1,0 +1,501 @@
+{
+  "allowed_providers": [
+    "fixture",
+    "scripted"
+  ],
+  "controls": [
+    {
+      "control_id": "failure_isolation_matrix.matched_good.v1",
+      "expected_harness_status": "PASS",
+      "implementation_status": "NOT_AVAILABLE",
+      "kind": "matched_good",
+      "production_path_required": true
+    },
+    {
+      "control_id": "failure_isolation_matrix.frozen_mutant.v1",
+      "expected_harness_status": "FAIL",
+      "implementation_status": "NOT_AVAILABLE",
+      "kind": "frozen_mutant",
+      "production_path_required": true
+    }
+  ],
+  "description": "Two-tenant/two-instance fault, redelivery, fencing, and recovery matrix.",
+  "experiments": [
+    {
+      "baseline": {
+        "aggregate_budget_rule": "not_applicable_harness",
+        "baseline_id": "frozen_fault_mutant_v1",
+        "description": "Known-bad implementation that misses one persistence/isolation invariant.",
+        "frozen_before_sealed": true,
+        "paired_by_case": true,
+        "scorer_identical_between_arms": true
+      },
+      "data_freeze": null,
+      "description": "Exercise frozen persistence boundaries, fault hits, recovery, and isolation.",
+      "diagnostic_metrics": [
+        {
+          "description": "Fault cells with injection_hit_count exactly one and boundary A/B evidence.",
+          "name": "failure_injection_hit_rate",
+          "primary": false,
+          "scope": "harness",
+          "unit": "ratio"
+        },
+        {
+          "description": "Matched benign cells with catalog_hit_count exactly one and no injection marker.",
+          "name": "failure_benign_catalog_hit_rate",
+          "primary": false,
+          "scope": "harness",
+          "unit": "ratio"
+        },
+        {
+          "description": "Recoverable durable claims reaching one DONE result within the frozen bound.",
+          "name": "recoverable_fault_unique_done_rate",
+          "primary": false,
+          "scope": "harness",
+          "unit": "ratio"
+        }
+      ],
+      "dimension": "failure_isolation",
+      "experiment_id": "failure_isolation_matrix.failure_isolation.v1",
+      "external_data_blockers": [],
+      "paired_budget": {
+        "actual_tokens_cost_and_latency_reported_per_arm": true,
+        "allocation_id": null,
+        "charged_components": [],
+        "failed_errored_and_retried_usage_counted": true,
+        "model_calls_allowed": false,
+        "same_aggregate_input_output_token_cap_between_arms": true,
+        "same_cases_between_arms": true,
+        "same_model_call_cap_between_arms": true,
+        "same_model_id_between_arms": true,
+        "same_scorer_between_arms": true
+      },
+      "positive_coverage_gates": [
+        {
+          "case_ids": [
+            "failure_isolation_matrix.attack.tenant-a-to-b-read-001",
+            "failure_isolation_matrix.attack.tenant-a-to-b-write-001",
+            "failure_isolation_matrix.attack.kill-release-boundary-001",
+            "failure_isolation_matrix.attack.redeliver-outbox-001",
+            "failure_isolation_matrix.attack.worker-kill-after-claim-001",
+            "failure_isolation_matrix.attack.exit-before-ack-001",
+            "failure_isolation_matrix.attack.projection-failure-001",
+            "failure_isolation_matrix.attack.kill-release-before-commit-001",
+            "failure_isolation_matrix.attack.same-base-concurrent-release-001",
+            "failure_isolation_matrix.attack.redis-transient-outage-001",
+            "failure_isolation_matrix.attack.relay-restart-before-delivery-001",
+            "failure_isolation_matrix.attack.relay-restart-after-delivery-before-mark-001",
+            "failure_isolation_matrix.attack.projection-worker-kill-after-claim-001",
+            "failure_isolation_matrix.attack.projection-exit-before-ack-001",
+            "failure_isolation_matrix.attack.projection-worker-kill-after-ack-001",
+            "failure_isolation_matrix.attack.projection-stale-fencing-token-001",
+            "failure_isolation_matrix.attack.worker-kill-before-result-001",
+            "failure_isolation_matrix.attack.verifier-restart-before-verdict-001",
+            "failure_isolation_matrix.attack.assignment-stale-fencing-token-001",
+            "failure_isolation_matrix.attack.assignment-redelivery-001",
+            "failure_isolation_matrix.attack.agent-kill-before-tool-001",
+            "failure_isolation_matrix.attack.agent-kill-after-tool-001",
+            "failure_isolation_matrix.attack.agent-kill-before-checkpoint-001",
+            "failure_isolation_matrix.attack.agent-kill-after-checkpoint-001",
+            "failure_isolation_matrix.attack.agent-kill-at-hitl-pause-001",
+            "failure_isolation_matrix.attack.agent-kill-before-reflection-001",
+            "failure_isolation_matrix.attack.agent-kill-after-reflection-001",
+            "failure_isolation_matrix.attack.sse-revoked-membership-001",
+            "failure_isolation_matrix.attack.relay-cross-tenant-payload-001",
+            "failure_isolation_matrix.attack.worker-cross-tenant-payload-001",
+            "failure_isolation_matrix.attack.publish-idempotency-replay-001",
+            "failure_isolation_matrix.attack.vector-reconciliation-duplicate-001",
+            "failure_isolation_matrix.attack.community-cross-revision-corruption-001",
+            "failure_isolation_matrix.attack.assignment-bad-payload-001",
+            "failure_isolation_matrix.attack.assignment-policy-rejection-001",
+            "failure_isolation_matrix.attack.assignment-explicit-cancellation-001",
+            "failure_isolation_matrix.attack.assignment-retry-budget-exhaustion-001",
+            "failure_isolation_matrix.attack.assignment-outbox-kill-before-commit-001",
+            "failure_isolation_matrix.attack.assignment-outbox-kill-after-commit-before-delivery-001",
+            "failure_isolation_matrix.attack.instance-a-exit-instance-b-reclaim-001"
+          ],
+          "gate_id": "failure_injection_hit_coverage",
+          "metric_name": "failure_injection_hit_rate",
+          "minimum_denominator": 40,
+          "minimum_rate": 1.0,
+          "unmet_status": "NOT_RUN"
+        },
+        {
+          "case_ids": [
+            "failure_isolation_matrix.benign.same-tenant-read-write-001",
+            "failure_isolation_matrix.benign.complete-release-001",
+            "failure_isolation_matrix.benign.single-delivery-001",
+            "failure_isolation_matrix.benign.assignment-completes-001",
+            "failure_isolation_matrix.benign.all-projections-ready-001",
+            "failure_isolation_matrix.benign.sequential-release-bases-001",
+            "failure_isolation_matrix.benign.projection-job-completes-001",
+            "failure_isolation_matrix.benign.agent-tool-checkpoint-completes-001",
+            "failure_isolation_matrix.benign.agent-hitl-resume-completes-001",
+            "failure_isolation_matrix.benign.agent-reflection-retry-completes-001",
+            "failure_isolation_matrix.benign.sse-authorized-stream-001",
+            "failure_isolation_matrix.benign.relay-same-tenant-payload-001",
+            "failure_isolation_matrix.benign.worker-same-tenant-payload-001",
+            "failure_isolation_matrix.benign.distinct-idempotency-publishes-001",
+            "failure_isolation_matrix.benign.reconciliation-clean-repaired-001",
+            "failure_isolation_matrix.benign.valid-assignment-terminal-done-001",
+            "failure_isolation_matrix.benign.cross-instance-job-visible-001",
+            "failure_isolation_matrix.benign.assignment-outbox-atomic-commit-001"
+          ],
+          "gate_id": "failure_benign_catalog_hit_coverage",
+          "metric_name": "failure_benign_catalog_hit_rate",
+          "minimum_denominator": 18,
+          "minimum_rate": 1.0,
+          "unmet_status": "NOT_RUN"
+        }
+      ],
+      "preregistered_arms": [
+        {
+          "arm_id": "failure_isolation_candidate_v1",
+          "description": "Preregistered failure_isolation candidate on the production path.",
+          "role": "candidate"
+        },
+        {
+          "arm_id": "frozen_fault_mutant_v1",
+          "description": "Known-bad implementation that misses one persistence/isolation invariant.",
+          "role": "baseline"
+        }
+      ],
+      "primary_metric": {
+        "description": "Fraction of executed fault cells preserving every preregistered invariant.",
+        "name": "failure_invariant_preservation_rate",
+        "primary": true,
+        "scope": "harness",
+        "unit": "ratio"
+      },
+      "scorer": {
+        "byte_identical_trace_recalculation_only": true,
+        "changes_retire_opened_sealed_version": true,
+        "implementation_status": "NOT_AVAILABLE",
+        "scorer_id": "failure_isolation_matrix.failure_isolation",
+        "scorer_version": "preregistered-v1",
+        "sha256": null
+      },
+      "status": "NOT_AVAILABLE",
+      "status_reasons": [
+        "FORMAL_PRODUCTION_PATH_OR_DATASET_NOT_AVAILABLE"
+      ]
+    }
+  ],
+  "fault_manifest": {
+    "byte_count": 223222,
+    "path": "../../faults/failure_isolation_matrix/fault_manifest.json",
+    "sha256": "92fc59e08ebe6d3ade272d0cb93cab983e7f5c2fb86f3e80e2ed3dddb60d70f0"
+  },
+  "global_real_model_budget": {
+    "budget_id": "n0.3-global-real-model-budget-v1",
+    "byte_count": 1777,
+    "path": "../../global_real_model_budget.json",
+    "sha256": "7ee936678b2e1f7e3ce6b477d3411876f110409c35caba4ce77b746f6111fbe3"
+  },
+  "hard_zero_catalog": {
+    "byte_count": 83207,
+    "path": "../../hard_zero/failure_isolation_matrix/cases.json",
+    "sha256": "079d8bf01efb491e08c73ffa5389a2d0bf84b0abf3544f4c0bc8a48ad7dd7334"
+  },
+  "hard_zero_gates": [
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.tenant-a-to-b-read-001",
+        "failure_isolation_matrix.attack.tenant-a-to-b-write-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.same-tenant-read-write-001"
+      ],
+      "benign_false_reject_metric": "cross_tenant_read_write_benign_false_reject_count",
+      "description": "Cross-tenant reads/writes are blocked while same-tenant operations work.",
+      "gate_id": "cross_tenant_read_write",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 2,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "cross_tenant_read_write_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.kill-release-before-commit-001",
+        "failure_isolation_matrix.attack.kill-release-boundary-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.complete-release-001"
+      ],
+      "benign_false_reject_metric": "mixed_revision_recovery_benign_false_reject_count",
+      "description": "Recovery never exposes a mixed old/new revision; either consistent revision works.",
+      "gate_id": "mixed_revision_recovery",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 2,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "mixed_revision_recovery_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.same-base-concurrent-release-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.sequential-release-bases-001"
+      ],
+      "benign_false_reject_metric": "concurrent_release_cas_benign_false_reject_count",
+      "description": "Two approved same-base releases produce exactly one canonical successor and one authoring-head advance; ordered current-base releases both remain usable.",
+      "gate_id": "concurrent_release_cas",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 1,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "concurrent_release_cas_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.redeliver-outbox-001",
+        "failure_isolation_matrix.attack.redis-transient-outage-001",
+        "failure_isolation_matrix.attack.relay-restart-before-delivery-001",
+        "failure_isolation_matrix.attack.relay-restart-after-delivery-before-mark-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.single-delivery-001"
+      ],
+      "benign_false_reject_metric": "duplicate_observable_canonical_effect_benign_false_reject_count",
+      "description": "Redelivery, Redis outage, and either relay restart boundary converge to at most one observable canonical effect.",
+      "gate_id": "duplicate_observable_canonical_effect",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 4,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "duplicate_observable_canonical_effect_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.projection-worker-kill-after-claim-001",
+        "failure_isolation_matrix.attack.projection-exit-before-ack-001",
+        "failure_isolation_matrix.attack.projection-worker-kill-after-ack-001",
+        "failure_isolation_matrix.attack.projection-stale-fencing-token-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.projection-job-completes-001"
+      ],
+      "benign_false_reject_metric": "projection_job_without_unique_done_benign_false_reject_count",
+      "description": "Projection claim/result/ACK restarts and stale fencing converge to exactly one current DONE/READY projection result.",
+      "gate_id": "projection_job_without_unique_done",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 4,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "projection_job_without_unique_done_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.worker-kill-after-claim-001",
+        "failure_isolation_matrix.attack.worker-kill-before-result-001",
+        "failure_isolation_matrix.attack.exit-before-ack-001",
+        "failure_isolation_matrix.attack.verifier-restart-before-verdict-001",
+        "failure_isolation_matrix.attack.assignment-stale-fencing-token-001",
+        "failure_isolation_matrix.attack.assignment-redelivery-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.assignment-completes-001"
+      ],
+      "benign_false_reject_metric": "durable_claim_without_unique_done_benign_false_reject_count",
+      "description": "A recoverable fault after durable claim must converge to one DONE result in time.",
+      "gate_id": "durable_claim_without_unique_done",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 6,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "durable_claim_without_unique_done_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.agent-kill-before-tool-001",
+        "failure_isolation_matrix.attack.agent-kill-after-tool-001",
+        "failure_isolation_matrix.attack.agent-kill-before-checkpoint-001",
+        "failure_isolation_matrix.attack.agent-kill-after-checkpoint-001",
+        "failure_isolation_matrix.attack.agent-kill-at-hitl-pause-001",
+        "failure_isolation_matrix.attack.agent-kill-before-reflection-001",
+        "failure_isolation_matrix.attack.agent-kill-after-reflection-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.agent-tool-checkpoint-completes-001",
+        "failure_isolation_matrix.benign.agent-hitl-resume-completes-001",
+        "failure_isolation_matrix.benign.agent-reflection-retry-completes-001"
+      ],
+      "benign_false_reject_metric": "durable_agent_run_resume_benign_false_reject_count",
+      "description": "Every registered AgentRun kill boundary resumes from durable plan, evidence, checkpoint, HITL, Reflection, and cumulative-budget truth without duplicate effects.",
+      "gate_id": "durable_agent_run_resume",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 7,
+      "minimum_benign_denominator": 3,
+      "violation_metric": "durable_agent_run_resume_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.sse-revoked-membership-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.sse-authorized-stream-001"
+      ],
+      "benign_false_reject_metric": "revoked_sse_event_leakage_benign_false_reject_count",
+      "description": "Revoked membership yields zero later tenant events while an authorized stream works.",
+      "gate_id": "revoked_sse_event_leakage",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 1,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "revoked_sse_event_leakage_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.relay-cross-tenant-payload-001",
+        "failure_isolation_matrix.attack.worker-cross-tenant-payload-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.relay-same-tenant-payload-001",
+        "failure_isolation_matrix.benign.worker-same-tenant-payload-001"
+      ],
+      "benign_false_reject_metric": "service_role_cross_tenant_access_benign_false_reject_count",
+      "description": "Non-superuser relay and worker roles reject opaque cross-tenant payload scope while both matched same-tenant service paths work.",
+      "gate_id": "service_role_cross_tenant_access",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 2,
+      "minimum_benign_denominator": 2,
+      "violation_metric": "service_role_cross_tenant_access_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.publish-idempotency-replay-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.distinct-idempotency-publishes-001"
+      ],
+      "benign_false_reject_metric": "publish_idempotency_replay_duplicate_effect_benign_false_reject_count",
+      "description": "A same-key publish replay returns the original result and cannot create a second visible authoring revision, outbox row, or ledger effect; distinct keys on successive bases remain usable.",
+      "gate_id": "publish_idempotency_replay_duplicate_effect",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 1,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "publish_idempotency_replay_duplicate_effect_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.vector-reconciliation-duplicate-001",
+        "failure_isolation_matrix.attack.community-cross-revision-corruption-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.reconciliation-clean-repaired-001"
+      ],
+      "benign_false_reject_metric": "reconciliation_revision_corruption_benign_false_reject_count",
+      "description": "Vector duplicates and cross-revision community corruption are recomputed from durable source truth into one unique same-revision projection state.",
+      "gate_id": "reconciliation_revision_corruption",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 2,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "reconciliation_revision_corruption_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.assignment-bad-payload-001",
+        "failure_isolation_matrix.attack.assignment-policy-rejection-001",
+        "failure_isolation_matrix.attack.assignment-explicit-cancellation-001",
+        "failure_isolation_matrix.attack.assignment-retry-budget-exhaustion-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.valid-assignment-terminal-done-001"
+      ],
+      "benign_false_reject_metric": "nonrecoverable_assignment_terminal_reason_benign_false_reject_count",
+      "description": "Bad payload, policy rejection, explicit cancellation, and retry-budget exhaustion each yield exactly one FAILED terminal with its precise reason and zero unauthorized side effects; a valid assignment reaches DONE.",
+      "gate_id": "nonrecoverable_assignment_terminal_reason",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 4,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "nonrecoverable_assignment_terminal_reason_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.instance-a-exit-instance-b-reclaim-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.cross-instance-job-visible-001"
+      ],
+      "benign_false_reject_metric": "cross_instance_job_visibility_benign_false_reject_count",
+      "description": "After source instance A durably creates a scoped job and exits, distinct recovery instance B must query, observe, reclaim, and uniquely complete that same job; the healthy two-instance path remains visible.",
+      "gate_id": "cross_instance_job_visibility",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 1,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "cross_instance_job_visibility_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.assignment-outbox-kill-before-commit-001",
+        "failure_isolation_matrix.attack.assignment-outbox-kill-after-commit-before-delivery-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.assignment-outbox-atomic-commit-001"
+      ],
+      "benign_false_reject_metric": "assignment_outbox_atomicity_benign_false_reject_count",
+      "description": "Assignment and matching outbox row commit in one PostgreSQL transaction: a pre-commit kill exposes neither before same-key recovery commits one pair, and a post-commit/pre-delivery kill relays the durable pair to one DONE result.",
+      "gate_id": "assignment_outbox_atomicity",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 2,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "assignment_outbox_atomicity_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "failure_isolation_matrix.attack.projection-failure-001"
+      ],
+      "benign_control_case_ids": [
+        "failure_isolation_matrix.benign.all-projections-ready-001"
+      ],
+      "benign_false_reject_metric": "projection_not_ready_serving_advance_benign_false_reject_count",
+      "description": "Serving pointer cannot advance before all required projections are READY.",
+      "gate_id": "projection_not_ready_serving_advance",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 1,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "projection_not_ready_serving_advance_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    }
+  ],
+  "manifest_status": "NOT_AVAILABLE",
+  "manifest_status_reasons": [
+    "TEAM_PROFILE_AND_FAULT_TARGETS_NOT_IMPLEMENTED",
+    "PRODUCTION_FAULT_RUNNER_NOT_AVAILABLE"
+  ],
+  "provider_evidence_policy": {
+    "fixture_max_scope": "harness",
+    "fixture_quality_effect_allowed": false,
+    "quality_provider": "real_model",
+    "scripted_gold_f1_is_external_quality_metric": false,
+    "scripted_max_scope": "harness"
+  },
+  "schema_version": "formal-suite-contract/v1",
+  "suite_id": "failure_isolation_matrix",
+  "suite_primary_metric": "failure_invariant_preservation_rate",
+  "suite_version": "n0.3-v1"
+}

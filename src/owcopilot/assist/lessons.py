@@ -88,6 +88,7 @@ def extract_lessons_from_report(
             lesson_text,
             dimension=dimension,
             exemplar_ids=exemplars.get((item_type, dimension)) or None,
+            observed_false_pass_count=count,
         )
         written += 1
     return written

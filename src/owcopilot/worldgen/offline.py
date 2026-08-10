@@ -333,15 +333,19 @@ def _parse_brief_message(user: str) -> dict[str, Any]:
 
 
 def _reference_report(system: str) -> list[dict[str, Any]]:
+    """The stand-in's reference rows: which sources it saw, and nothing it cannot know.
+
+    A double is free to invent world content (that is its job), but NOT compliance claims: it
+    cannot check whether proper nouns or long verbatim spans were reused, so it writes no
+    ``transformation`` / ``excluded`` at all. The consumer
+    (:func:`owcopilot.worldgen.service._reference_report`) then records the silence honestly
+    instead of a fabricated "未复用原文" that a reader would take for a performed check.
+    """
     return [
         {
             "source_ref": ref,
             "source_title": title,
             "used_for": "灵感参考：主题、节奏和冲突结构",
-            "transformation": (
-                "转化为能源、阵营和区域之间的新冲突，没有把参考材料当作正式设定事实。"
-            ),
-            "excluded": ["未复用参考材料中的专有名词", "未复用长段原文"],
         }
         for ref, title, _body in _reference_rows(system)[:4]
     ]

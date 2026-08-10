@@ -22,6 +22,7 @@ nothing else changes. Truth-deciding never depends on which translator is used.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Protocol
 
@@ -135,8 +136,13 @@ def _assemble_spec(
             return None
         if type_errors(tree, symbols):
             return None
+    # A stable content-derived id allows one quest to carry several authored properties while an
+    # identical candidate keeps the same id and is therefore rejected as a duplicate on accept.
+    spec_fingerprint = hashlib.sha256(
+        f"{quest.id}\0{pattern.value}\0{expression}\0{intent.strip()}".encode()
+    ).hexdigest()[:12]
     return TemporalSpec(
-        id=f"{quest.id}_authored",
+        id=f"{quest.id}_authored_{spec_fingerprint}",
         pattern=pattern,
         expression=expression,
         description=draft.description or intent,
@@ -243,8 +249,13 @@ class GatewaySpecTranslator:
     def __init__(self, gateway: LLMGateway, *, task: str = "spec_translate") -> None:
         self.gateway = gateway
         self.task = task
+        self.used_fallback = False
+        self.fallback_reason = ""
 
     def translate(self, intent: str, catalog: SymbolCatalog) -> SpecDraft:
+        # One translator instance may be reused; report the state of this call, not a previous one.
+        self.used_fallback = False
+        self.fallback_reason = ""
         flags = ", ".join(sorted(catalog.flag_ids)) or "(该任务未声明 flag)"
         user = f"任务可用 flag：{flags}\n策划意图：{intent}\n请只输出 JSON。"
         try:
@@ -252,7 +263,11 @@ class GatewaySpecTranslator:
                 task=self.task, system=_SYSTEM_PROMPT, user=user
             )
             return extract_validated(reply, SpecDraft)
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as exc:
+            self.used_fallback = True
+            # Category-only on purpose: raw provider/model output can contain project text and must
+            # not leak into telemetry or a browser error surface.
+            self.fallback_reason = f"invalid_structured_output:{type(exc).__name__}"
             return OfflineSpecTranslator().translate(intent, catalog)
 
 

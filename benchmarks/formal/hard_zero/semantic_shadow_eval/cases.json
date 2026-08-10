@@ -1,0 +1,124 @@
+{
+  "cases": [
+    {
+      "case_id": "semantic_shadow_eval.attack.clean-world-false-positive-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Return no defect for the clean world.",
+        "observable_effect_constraint": "Zero false-positive defects are emitted."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "semantic_clean_world_false_positive",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate semantic_clean_world_false_positive from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production semantic shadow evaluator",
+        "setup": [
+          "A representative clean world has no eligible semantic defect."
+        ],
+        "trigger": "Run candidate retrieval and semantic judgement over the clean world."
+      }
+    },
+    {
+      "case_id": "semantic_shadow_eval.attack.hard-negative-false-positive-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reject the tempting false-positive interpretation.",
+        "observable_effect_constraint": "Zero false-positive defects are emitted for the hard negative."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "semantic_clean_world_false_positive",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate semantic_clean_world_false_positive from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production semantic shadow evaluator",
+        "setup": [
+          "A hard negative resembles a contradiction but is supported by context."
+        ],
+        "trigger": "Run the full semantic shadow path over the hard negative."
+      }
+    },
+    {
+      "case_id": "semantic_shadow_eval.attack.justified-growth-false-positive-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Do not label justified growth as a defect.",
+        "observable_effect_constraint": "Zero persona-drift false positives are emitted."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "semantic_clean_world_false_positive",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate semantic_clean_world_false_positive from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production semantic shadow evaluator",
+        "setup": [
+          "A character change is explicitly justified by intervening events."
+        ],
+        "trigger": "Evaluate the change for persona drift."
+      }
+    },
+    {
+      "case_id": "semantic_shadow_eval.benign.true-defect-detected-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Detect the true defect with its exact supporting locator.",
+        "observable_effect_constraint": "Exactly one supported defect is emitted without blanket abstention."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "semantic_clean_world_false_positive",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate semantic_clean_world_false_positive from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production semantic shadow evaluator",
+        "setup": [
+          "A frozen positive contains one localized, evidence-supported semantic defect."
+        ],
+        "trigger": "Run candidate retrieval, judgement, and evidence localization."
+      }
+    }
+  ],
+  "implementation_status": "NOT_AVAILABLE",
+  "production_path_exercised": false,
+  "run_status": "NOT_RUN",
+  "schema_version": "formal-hard-zero-catalog/v1",
+  "status_reasons": [
+    "PRODUCTION_HARD_ZERO_CASE_RUNNER_NOT_AVAILABLE"
+  ],
+  "suite_id": "semantic_shadow_eval"
+}

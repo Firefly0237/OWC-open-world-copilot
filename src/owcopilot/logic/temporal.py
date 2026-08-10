@@ -181,18 +181,29 @@ def _written_flags(logic: QuestLogic) -> set[str]:
     return written
 
 
-def _external_input_flags(logic: QuestLogic) -> set[str]:
+def _external_input_flags(
+    logic: QuestLogic, provably_never_written: frozenset[str] = frozenset()
+) -> set[str]:
     """Flags a stage precondition or branch condition READS but no quest effect WRITES — i.e. state
     the quest does not control (a dialogue-set flag, a cross-quest ``quest:x.done``, an entry
     input). A dead-end blocked by such a flag is NOT a sound single-quest soft-lock: the owning
     dialogue / other quest may set it so the block clears. Read only from *internal* guards (stage
-    preconditions + branch conditions); the quest-level precondition only gates entry."""
+    preconditions + branch conditions); the quest-level precondition only gates entry.
+
+    ``provably_never_written`` narrows that concession with world knowledge. "Not written by me"
+    only implies "owned by someone else" while this quest is all the checker can see; a flag that
+    **nothing in the whole world writes** has no owning layer to clear it, so it seals a dead-end
+    just as firmly as a quest-local flag. Callers get that set from
+    :meth:`owcopilot.logic.xref.FlagXref.provably_never_written`, which restricts it to flags
+    declared in some quest's variable table — an undeclared reference may still be written by engine
+    gameplay this tool cannot see, and must keep its concession. Default empty = quest-local
+    behaviour, unchanged."""
     read_in_guards: set[str] = set()
     for stage in logic.stage_logic:
         read_in_guards |= _refs_of(stage.precondition)
     for branch in logic.branches:
         read_in_guards |= _refs_of(branch.condition)
-    return read_in_guards - _written_flags(logic)
+    return read_in_guards - _written_flags(logic) - provably_never_written
 
 
 # --------------------------------------------------------------------------------------------------
@@ -430,16 +441,21 @@ def _trap_block_refs(quest: Quest, node: Node, entry_state: dict[str, Value]) ->
 
 
 def _classify_dead_region(
-    quest: Quest, graph: _Graph, dead: list[Node], base: TemporalResult
+    quest: Quest,
+    graph: _Graph,
+    dead: list[Node],
+    base: TemporalResult,
+    provably_never_written: frozenset[str] = frozenset(),
 ) -> TemporalResult:
     """Decide, over an exhaustively-explored quest with a non-empty dead set, whether it is a sound
     soft-lock or must be withheld. A dead-end is a SOUND soft-lock only when the flags that seal it
-    are all written by the quest itself; if any trap depends on an external input flag (a
-    dialogue-set or cross-quest flag the quest never writes), the owning layer may clear the block,
-    so a single-quest verdict is withheld rather than reported as a false positive."""
+    are all *decidable*: written by the quest itself, or — given ``provably_never_written`` from the
+    world-level cross-reference — written by nothing at all. If any trap still depends on a flag
+    some other layer may own (a dialogue-set or cross-quest flag), the owning layer may clear the
+    block, so a single-quest verdict is withheld rather than reported as a false positive."""
     logic = quest.logic
     assert logic is not None
-    inputs = _external_input_flags(logic)
+    inputs = _external_input_flags(logic, provably_never_written)
     # Trap sources = dead nodes with no successor (blocked precondition / deadlock / dangling only);
     # every other dead node inherits its deadness from one of these.
     trap_sources = [n for n in dead if not graph.adjacency.get(n)]
@@ -452,8 +468,14 @@ def _classify_dead_region(
         n for n in trap_sources
         if not (_trap_block_refs(quest, n, graph.node_state[n]) & inputs)
     ]
-    if sealed:  # a genuine dead-end sealed by quest-controlled flags → a sound soft-lock
+    if sealed:  # a genuine dead-end sealed by decidable flags → a sound soft-lock
         worst = min(sealed, key=_key)
+        # Which blockers only became decidable through world knowledge: naming them turns a bare
+        # "there is a soft-lock" into an actionable "nothing anywhere sets this flag", which is a
+        # different repair (write it somewhere) from a quest-local trap (change this branch).
+        world_sealed = sorted(
+            _trap_block_refs(quest, worst, graph.node_state[worst]) & provably_never_written
+        )
         base.holds = False
         base.status = SpecStatus.VIOLATED
         base.strong = True
@@ -462,6 +484,11 @@ def _classify_dead_region(
         base.counterexample_detail = (
             f"在阶段 '{worst[0]}' 存在一个可达状态，从该状态再也走不到任何结局（软锁 / 死局）。"
         )
+        if world_sealed:
+            base.counterexample_detail += (
+                f" 挡住它的 {'、'.join(world_sealed)} 在全世界范围内没有任何一处会写入，"
+                "所以没有任何一层能来解开这个卡死。"
+            )
         base.message = "检测到软锁：存在无法通关的可达状态。"
         return base
 
@@ -490,12 +517,17 @@ def check_soft_lock(
     *,
     max_states: int = _DEFAULT_MAX_STATES,
     max_depth: int = _DEFAULT_MAX_DEPTH,
+    provably_never_written: frozenset[str] = frozenset(),
 ) -> TemporalResult:
     """``AG EF ending`` — decide whether every reachable state can still reach some quest ending.
 
     A violation (a reachable soft-lock state) is reported with the branch-id witness reaching it; it
     is sound only when the exploration was exhaustive (a truncated run cannot prove a state has NO
     onward ending, so a soft-lock verdict under truncation is withheld and reported as weak).
+
+    ``provably_never_written`` is the world's answer to "could another layer clear this block?" —
+    pass :meth:`owcopilot.logic.xref.FlagXref.provably_never_written` to stop withholding on flags
+    nothing in the world ever writes. Omitted, the check stays quest-local exactly as before.
     """
     spec = TemporalSpec(
         id="soft_lock", pattern=PropertyPattern.AG_EF_ENDING, provenance="builtin",
@@ -532,7 +564,7 @@ def check_soft_lock(
             base.strong = False
             base.message = "探索在边界内截断，疑似软锁无法证明为真正死局；结论降级为边界内未证。"
             return base
-        return _classify_dead_region(quest, graph, dead, base)
+        return _classify_dead_region(quest, graph, dead, base, provably_never_written)
 
     if graph.truncated:
         base.status = SpecStatus.NO_COUNTEREXAMPLE_IN_BOUND
@@ -550,11 +582,20 @@ def check_temporal_spec(
     *,
     max_states: int = _DEFAULT_MAX_STATES,
     max_depth: int = _DEFAULT_MAX_DEPTH,
+    provably_never_written: frozenset[str] = frozenset(),
 ) -> TemporalResult:
     """Decide ``spec`` against ``quest``. ``AG_EF_ENDING`` routes to :func:`check_soft_lock`;
-    ``AG``/``EF`` evaluate the sliced reachable state graph and return an honest verdict."""
+    ``AG``/``EF`` evaluate the sliced reachable state graph and return an honest verdict.
+
+    ``provably_never_written`` only affects the soft-lock pattern (see :func:`check_soft_lock`);
+    ``AG``/``EF`` decide over the reachable state graph and never withhold on flag ownership."""
     if spec.pattern is PropertyPattern.AG_EF_ENDING:
-        result = check_soft_lock(quest, max_states=max_states, max_depth=max_depth)
+        result = check_soft_lock(
+            quest,
+            max_states=max_states,
+            max_depth=max_depth,
+            provably_never_written=provably_never_written,
+        )
         return result.model_copy(update={"spec_id": spec.id})
 
     logic = quest.logic

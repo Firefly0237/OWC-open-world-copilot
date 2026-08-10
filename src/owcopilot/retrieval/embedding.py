@@ -55,6 +55,7 @@ import os
 from functools import lru_cache
 
 from ..llm.cache import Embedder, HashingEmbedder
+from ..model_artifacts import model_artifact_for_repo
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +75,16 @@ class SemanticEmbedder:
     cannot be loaded at first use (e.g. no network on the very first run), the embedder degrades to
     the deterministic hashing stub so retrieval keeps working on BM25 + graph, not crashing."""
 
-    def __init__(self, model_name: str = DEFAULT_SEMANTIC_MODEL) -> None:
+    def __init__(
+        self, model_name: str = DEFAULT_SEMANTIC_MODEL, *, revision: str | None = None
+    ) -> None:
         self.model_name = model_name
-        self.model_id = f"st:{model_name}"
+        artifact = model_artifact_for_repo(model_name)
+        self.model_revision = revision if revision is not None else (
+            artifact.revision if artifact is not None else None
+        )
+        revision_suffix = f"@{self.model_revision}" if self.model_revision else ""
+        self.model_id = f"st:{model_name}{revision_suffix}"
         self._model: object | None = None
         self._fallback: HashingEmbedder | None = None
         #: Machine-readable degrade flag. ``False`` until the semantic model fails to load and this
@@ -86,10 +94,11 @@ class SemanticEmbedder:
         #: warning log alone is not visible to callers. ``auto`` mode only; explicit ``semantic``
         #: opt-in fails loud instead (never degrades).
         self.degraded: bool = False
+        self.degradation_reason: str | None = None
 
     def _ensure_model(self) -> object:
         if self._model is None:
-            self._model = _load_model(self.model_name)
+            self._model = _load_model(self.model_name, self.model_revision)
         return self._model
 
     def embed(self, text: str) -> list[float]:
@@ -114,6 +123,7 @@ class SemanticEmbedder:
             # mark the degrade machine-readably so downstream consumers (not just the log) can tell
             # this process is on the BM25-only fallback, and key vectors under the fallback's id.
             self.degraded = True
+            self.degradation_reason = f"semantic_model_load_failed:{type(exc).__name__}"
             self.model_id = self._fallback.model_id
             return self._fallback.embed_many(texts)
         # normalize so cosine == dot; convert_to_numpy keeps memory flat for large batches.
@@ -124,7 +134,7 @@ class SemanticEmbedder:
 
 
 @lru_cache(maxsize=4)
-def _load_model(model_name: str) -> object:
+def _load_model(model_name: str, revision: str | None = None) -> object:
     # Quiet the Hub's "unauthenticated requests" notice and progress bars: we pull a public model
     # and need no token, so it is just noise on a first-run download. Set verbosity via env BEFORE
     # huggingface_hub is imported (it reads HF_HUB_VERBOSITY at import), and filter the warning as a
@@ -137,7 +147,14 @@ def _load_model(model_name: str) -> object:
     warnings.filterwarnings("ignore", message=".*unauthenticated requests to the HF Hub.*")
     from sentence_transformers import SentenceTransformer  # heavy, optional, lazy
 
-    return SentenceTransformer(model_name)
+    model_source = model_name
+    if revision is not None:
+        from huggingface_hub import snapshot_download  # noqa: PLC0415
+
+        # Serial resolution avoids huggingface_hub's first-use symlink-probe race on non-admin
+        # Windows. The large weight remains streamed once; only the small file fan-out is serial.
+        model_source = snapshot_download(repo_id=model_name, revision=revision, max_workers=1)
+    return SentenceTransformer(model_source)
 
 
 def semantic_installed() -> bool:
@@ -148,7 +165,8 @@ def semantic_installed() -> bool:
 def semantic_available(model_name: str = DEFAULT_SEMANTIC_MODEL) -> bool:
     """True when the optional dependency imports and the model can be constructed (loads it)."""
     try:
-        _load_model(model_name)
+        artifact = model_artifact_for_repo(model_name)
+        _load_model(model_name, artifact.revision if artifact is not None else None)
         return True
     except Exception:
         return False
@@ -173,4 +191,9 @@ def resolve_embedder() -> Embedder:
     # degrading to hashing if that load fails), else the deterministic stub.
     if semantic_installed():
         return SemanticEmbedder(model)
-    return HashingEmbedder()
+    fallback = HashingEmbedder()
+    # ``auto`` promised semantic retrieval but the optional runtime is absent. Keep the concrete
+    # type for compatibility while exposing an honest, machine-readable fallback state.
+    fallback.degraded = True  # type: ignore[attr-defined]
+    fallback.degradation_reason = "sentence_transformers_not_installed"  # type: ignore[attr-defined]
+    return fallback

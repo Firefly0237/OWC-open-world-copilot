@@ -1,0 +1,83 @@
+{
+  "cases": [
+    {
+      "case_id": "game_planner_vertical_e2e.signed_intake.attack.001",
+      "role": "attack",
+      "stimulus": {
+        "client_provenance_claim": "own_ip",
+        "request_origin": "local",
+        "server_signed_intake_token_valid": true,
+        "signed_contract_provenance": "licensed"
+      }
+    },
+    {
+      "case_id": "game_planner_vertical_e2e.signed_intake.benign.001",
+      "role": "benign",
+      "stimulus": {
+        "client_provenance_claim": null,
+        "request_origin": "local",
+        "server_signed_intake_token_valid": true,
+        "signed_contract_provenance": "licensed"
+      }
+    }
+  ],
+  "data_partition": "harness_control",
+  "description": "Synthetic harness control for a legal local signed-intake contract and provenance escalation mutant.",
+  "fixture_id": "game_planner_vertical_e2e.evaluator_conformance.v1",
+  "implementations": [
+    {
+      "declared_kind": "matched_good",
+      "expected_harness_status": "PASS",
+      "implementation_id": "game_planner_vertical_e2e.matched_good.v1",
+      "observations": [
+        {
+          "case_id": "game_planner_vertical_e2e.signed_intake.attack.001",
+          "outcome": {
+            "accepted": true,
+            "client_provenance_auto_upgraded": false,
+            "resolved_provenance": "licensed"
+          }
+        },
+        {
+          "case_id": "game_planner_vertical_e2e.signed_intake.benign.001",
+          "outcome": {
+            "accepted": true,
+            "client_provenance_auto_upgraded": false,
+            "resolved_provenance": "licensed"
+          }
+        }
+      ]
+    },
+    {
+      "declared_kind": "frozen_mutant",
+      "expected_harness_status": "FAIL",
+      "implementation_id": "game_planner_vertical_e2e.frozen_mutant.v1",
+      "observations": [
+        {
+          "case_id": "game_planner_vertical_e2e.signed_intake.attack.001",
+          "outcome": {
+            "accepted": true,
+            "client_provenance_auto_upgraded": true,
+            "resolved_provenance": "own_ip"
+          }
+        },
+        {
+          "case_id": "game_planner_vertical_e2e.signed_intake.benign.001",
+          "outcome": {
+            "accepted": true,
+            "client_provenance_auto_upgraded": false,
+            "resolved_provenance": "licensed"
+          }
+        }
+      ]
+    }
+  ],
+  "metric_scope": "harness",
+  "payload_sha256": "41e873bb4150de77bb24bc031f5dd47d5693ef244bf648619b8560c8b6d44483",
+  "production_path_exercised": false,
+  "provider": "fixture",
+  "quality_effects_allowed": false,
+  "real_model_used": false,
+  "schema_version": "formal-control-fixture/v1",
+  "suite_id": "game_planner_vertical_e2e"
+}

@@ -1,0 +1,30 @@
+[
+  {
+    "DisplayName": "序章",
+    "Name": "quest_intro",
+    "Type": "quest"
+  },
+  {
+    "DialogueRefs": [
+      {
+        "RowName": "dlg_hello"
+      }
+    ],
+    "DisplayName": "巡逻边境",
+    "GiverNPC": {
+      "RowName": "npc_mara"
+    },
+    "Location": {
+      "RowName": "loc_town"
+    },
+    "Name": "quest_patrol",
+    "Objective": "在天黑前巡视边境线。",
+    "Prerequisites": [
+      {
+        "RowName": "quest_intro"
+      }
+    ],
+    "TimelineOrder": 1,
+    "Type": "quest"
+  }
+]

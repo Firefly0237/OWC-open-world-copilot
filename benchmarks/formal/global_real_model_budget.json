@@ -1,0 +1,74 @@
+{
+  "allocations": [
+    {
+      "allocation_id": "triage_grounded_draft",
+      "cost_usd_cap": 16.0,
+      "model_call_cap": 160,
+      "priority_rank": 1,
+      "token_cap": 1600000
+    },
+    {
+      "allocation_id": "evidence_verifier",
+      "cost_usd_cap": 12.0,
+      "model_call_cap": 120,
+      "priority_rank": 2,
+      "token_cap": 1200000
+    },
+    {
+      "allocation_id": "memory",
+      "cost_usd_cap": 8.0,
+      "model_call_cap": 80,
+      "priority_rank": 3,
+      "token_cap": 800000
+    },
+    {
+      "allocation_id": "reflection",
+      "cost_usd_cap": 8.0,
+      "model_call_cap": 80,
+      "priority_rank": 4,
+      "token_cap": 800000
+    },
+    {
+      "allocation_id": "multi_agent",
+      "cost_usd_cap": 10.0,
+      "model_call_cap": 100,
+      "priority_rank": 5,
+      "token_cap": 1000000
+    },
+    {
+      "allocation_id": "mcts",
+      "cost_usd_cap": 0.0,
+      "model_call_cap": 0,
+      "priority_rank": null,
+      "token_cap": 0
+    }
+  ],
+  "authorization_note": "CAP_IS_A_SAFETY_CEILING_NOT_SPEND_AUTHORIZATION",
+  "budget_id": "n0.3-global-real-model-budget-v1",
+  "charged_components": [
+    "planner",
+    "orchestrator",
+    "worker",
+    "verifier",
+    "reflection",
+    "compression",
+    "retry",
+    "retriever",
+    "generator",
+    "semantic_judge"
+  ],
+  "cost_usd_cap": 60.0,
+  "currency": "USD",
+  "failed_errored_and_retried_usage_counted": true,
+  "model_call_cap": 600,
+  "schema_version": "formal-global-real-model-budget/v1",
+  "scope_id": "n0.3_to_m5_formal_real_model_program",
+  "spend_authorized": false,
+  "token_cap": 6000000,
+  "token_definition": "input_plus_output_across_all_charged_components",
+  "unallocated_reserve": {
+    "cost_usd_cap": 6.0,
+    "model_call_cap": 60,
+    "token_cap": 600000
+  }
+}

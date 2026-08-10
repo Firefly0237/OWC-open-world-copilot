@@ -1,0 +1,319 @@
+"""REST tests for Phase 3: WS-I asset linking, generic export, WS-K engine back-sync."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+fastapi = pytest.importorskip("fastapi")
+from fastapi.testclient import TestClient  # noqa: E402
+
+from owcopilot.content.models import ContentBundle, Entity, EntityType, Quest  # noqa: E402
+from owcopilot.content.store import ContentStore  # noqa: E402
+from owcopilot.service.api import create_app  # noqa: E402
+
+
+@pytest.fixture()
+def client(tmp_path, monkeypatch) -> TestClient:
+    root = tmp_path / "content"
+    ContentStore(root).save(
+        ContentBundle(
+            entities={"npc_x": Entity(id="npc_x", name="甲", type=EntityType.NPC)},
+            quests={
+                "q_edit": Quest(
+                    id="q_edit",
+                    title="将改",
+                    objective="旧目标",
+                    localization_keys=["quest.q_edit.objective"],
+                )
+            },
+        )
+    )
+    monkeypatch.setenv(
+        "OWCOPILOT_PROJECTS_JSON", json.dumps({"demo": str(root).replace("\\", "/")})
+    )
+    monkeypatch.delenv("OWCOPILOT_API_KEY", raising=False)
+    monkeypatch.setattr("owcopilot.service.api.load_dotenv", lambda: None)
+    return TestClient(create_app())
+
+
+def test_asset_attach_list_detach_round_trip(client: TestClient) -> None:
+    attach = client.post(
+        "/projects/demo/assets:attach",
+        json={"object_ref": "entity:npc_x", "kind": "image", "uri": "art/x.png", "title": "立绘"},
+    )
+    assert attach.status_code == 201, attach.text
+    asset_id = attach.json()["asset"]["id"]
+
+    listed = client.get("/projects/demo/assets", params={"object_ref": "entity:npc_x"})
+    assert listed.status_code == 200
+    assert listed.json()["assets"][0]["uri"] == "art/x.png"
+
+    detach = client.post("/projects/demo/assets:detach", params={"asset_id": asset_id})
+    assert detach.status_code == 200 and detach.json()["removed"] is True
+    assert (
+        client.get("/projects/demo/assets", params={"object_ref": "entity:npc_x"}).json()["assets"]
+        == []
+    )
+
+
+def test_asset_attach_rejects_empty_uri(client: TestClient) -> None:
+    # pydantic min_length=1 means a blank uri is a 422 before it ever reaches the action
+    resp = client.post(
+        "/projects/demo/assets:attach",
+        json={"object_ref": "entity:npc_x", "kind": "link", "uri": ""},
+    )
+    assert resp.status_code == 422
+
+
+def test_generic_export_leaves_canon_untouched(client: TestClient, tmp_path) -> None:
+    # a quest with logic so a script is actually emitted
+    root = tmp_path / "content"
+    store = ContentStore(root)
+    bundle = store.load()
+    resp = client.post("/projects/demo/exports", json={"target_engine": "generic"})
+    assert resp.status_code == 200, resp.text
+    kinds = {f["kind"] for f in resp.json()["manifest"]["files"]}
+    assert "content_bundle" in kinds  # export ran without error
+    assert bundle.quests  # canon untouched by export
+
+
+def test_unity_export_localization_optin_flows_through_request(client: TestClient) -> None:
+    off = client.post("/projects/demo/exports", json={"target_engine": "unity"})
+    assert off.status_code == 200, off.text
+    off_kinds = {f["kind"] for f in off.json()["manifest"]["files"]}
+    assert not any(k.startswith("unity_localization") for k in off_kinds)
+
+    on = client.post(
+        "/projects/demo/exports",
+        json={"target_engine": "unity", "unity_localization": True},
+    )
+    assert on.status_code == 200, on.text
+    on_kinds = {f["kind"] for f in on.json()["manifest"]["files"]}
+    assert {"unity_localization_csv", "unity_localization_readme"} <= on_kinds
+
+
+def test_export_row_struct_map_renames_columns_through_request(client: TestClient) -> None:
+    """A1 (REST entry): the row_struct_map request field threads into the UE projection — the
+    renamed column reaches Quests.json and the C++ row header, proving the field is wired."""
+    resp = client.post(
+        "/projects/demo/exports",
+        json={
+            "target_engine": "unreal",
+            "row_struct_map": {"quests": {"DisplayName": "sDisplayName"}},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    unreal_dir = Path(resp.json()["output_dir"]) / "unreal"
+    quests = json.loads((unreal_dir / "Quests.json").read_text(encoding="utf-8"))
+    row = next(r for r in quests if r["Name"] == "q_edit")
+    assert "sDisplayName" in row and "DisplayName" not in row
+    header = (unreal_dir / "OWCopilotRows.h").read_text(encoding="utf-8")
+    assert "FText sDisplayName;" in header
+
+
+def test_engine_import_queues_changes_for_review(client: TestClient) -> None:
+    resp = client.post(
+        "/projects/demo/engine:import",
+        json={
+            "quests": [
+                {
+                    "id": "q_edit",
+                    "title": "将改",
+                    "objective": "引擎侧改过的目标",
+                    "localization_keys": ["quest.q_edit.objective"],
+                }
+            ],
+            "baseline_quests": [
+                {
+                    "id": "q_edit",
+                    "title": "将改",
+                    "objective": "旧目标",
+                    "localization_keys": ["quest.q_edit.objective"],
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["changed"] == ["q_edit"]
+    assert body["baseline_provided"] is True
+    assert body["conflicts"] == []
+    assert body["review_item_id"]  # HITL: queued, not auto-landed
+
+    accepted = client.post(
+        f"/projects/demo/review_items/{body['review_item_id']}:decide",
+        json={"decision": "accepted", "operator": "engine-reviewer"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    quest = client.get("/projects/demo/quests/q_edit").json()["quest"]
+    assert quest["objective"] == "引擎侧改过的目标"
+
+
+def test_engine_import_accept_rechecks_enqueue_baseline(client: TestClient) -> None:
+    queued = client.post(
+        "/projects/demo/engine:import",
+        json={
+            "quests": [{"id": "q_edit", "title": "将改", "objective": "引擎改动"}],
+            "baseline_quests": [
+                {
+                    "id": "q_edit",
+                    "title": "将改",
+                    "objective": "旧目标",
+                    "localization_keys": ["quest.q_edit.objective"],
+                }
+            ],
+        },
+    )
+    assert queued.status_code == 200, queued.text
+    item_id = queued.json()["review_item_id"]
+
+    library_edit = client.patch(
+        "/projects/demo/quests/q_edit", json={"objective": "排队后发生的库侧修改"}
+    )
+    assert library_edit.status_code == 200, library_edit.text
+    rejected = client.post(
+        f"/projects/demo/review_items/{item_id}:decide",
+        json={"decision": "accepted", "operator": "engine-reviewer"},
+    )
+    assert rejected.status_code == 409, rejected.text
+    assert "正典又发生了变化" in rejected.json()["detail"]
+    quest = client.get("/projects/demo/quests/q_edit").json()["quest"]
+    assert quest["objective"] == "排队后发生的库侧修改"
+
+
+def test_engine_import_requires_export_baseline(client: TestClient) -> None:
+    response = client.post(
+        "/projects/demo/engine:import",
+        json={"quests": [{"id": "q_edit", "title": "将改", "objective": "x"}]},
+    )
+    assert response.status_code == 422
+
+
+def test_import_recognize_table_dry_run_and_apply(client: TestClient) -> None:
+    content = "id,name,type,home\nnpc_a,Aldric,npc,loc_keep\nloc_keep,Keep,location,\n"
+    dry = client.post(
+        "/projects/demo/import:recognize",
+        json={"source_format": "table", "content": content, "filename": "cast.csv"},
+    )
+    assert dry.status_code == 200, dry.text
+    body = dry.json()
+    assert set(body["new"]) == {"npc_a", "loc_keep"}
+    assert body["applied"] is False
+
+    applied = client.post(
+        "/projects/demo/import:recognize",
+        json={
+            "source_format": "table",
+            "content": content,
+            "filename": "cast.csv",
+            "field_mapping": {
+                "id_column": "id",
+                "name_column": "name",
+                "type_column": "type",
+                "relation_columns": {"home": "resides_in"},
+            },
+            "apply": True,
+        },
+    )
+    assert applied.status_code == 200, applied.text
+    body = applied.json()
+    assert body["applied"] is True and body["review_item_id"]
+    assert "audit_preview" in body
+
+
+def test_import_recognize_rejects_bad_format(client: TestClient) -> None:
+    resp = client.post(
+        "/projects/demo/import:recognize",
+        json={"source_format": "rpgmaker", "content": "x"},
+    )
+    assert resp.status_code == 422  # pattern guard rejects before the action runs
+
+
+def test_import_recognize_base64_upload_and_auto_sniff(client: TestClient) -> None:
+    import base64
+
+    b64 = base64.b64encode(b"id,name,type\nnpc_new,New,npc\n").decode()
+    resp = client.post(
+        "/projects/demo/import:recognize",
+        json={"source_format": "auto", "content_base64": b64, "filename": "cast.csv"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["source_format"] == "table"
+    assert "npc_new" in body["new"]
+
+
+def test_import_apply_edited_plan(client: TestClient) -> None:
+    rec = client.post(
+        "/projects/demo/import:recognize",
+        json={"source_format": "table", "content": "id,name,type\nnpc_p,P,npc\n"},
+    ).json()
+    resp = client.post("/projects/demo/import:apply", json={"plan": rec["plan"]})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["applied"] is True and body["review_item_id"]
+
+
+def test_recognize_mapping_templates_crud(client: TestClient) -> None:
+    save = client.post(
+        "/projects/demo/recognize/mappings",
+        json={"name": "t1", "mapping": {"id_column": "id", "name_column": "name"}},
+    )
+    assert save.status_code == 200, save.text
+    assert "t1" in client.get("/projects/demo/recognize/mappings").json()["templates"]
+
+    assert client.delete("/projects/demo/recognize/mappings/t1").status_code == 200
+    assert "t1" not in client.get("/projects/demo/recognize/mappings").json()["templates"]
+
+
+def test_recognize_mapping_templates_cursor_pages_and_stale_snapshot(client: TestClient) -> None:
+    mapping = {"id_column": "id", "name_column": "name"}
+    for index in range(45):
+        saved = client.post(
+            "/projects/demo/recognize/mappings",
+            json={"name": f"template_{index:02d}", "mapping": mapping},
+        )
+        assert saved.status_code == 200, saved.text
+
+    # No query parameters keeps the legacy, complete name -> mapping dictionary.
+    legacy = client.get("/projects/demo/recognize/mappings")
+    assert legacy.status_code == 200
+    assert len(legacy.json()["templates"]) == 45
+    assert "total" not in legacy.json()
+
+    first = client.get("/projects/demo/recognize/mappings", params={"limit": 20})
+    assert first.status_code == 200, first.text
+    first_body = first.json()
+    assert list(first_body["templates"]) == [f"template_{index:02d}" for index in range(20)]
+    assert first_body["total"] == 45
+    assert first_body["next_cursor"]
+    assert first_body["snapshot_etag"]
+
+    second = client.get(
+        "/projects/demo/recognize/mappings",
+        params={"limit": 20, "cursor": first_body["next_cursor"]},
+    )
+    assert second.status_code == 200, second.text
+    assert list(second.json()["templates"]) == [f"template_{index:02d}" for index in range(20, 40)]
+    assert second.json()["next_cursor"]
+
+    invalid = client.get(
+        "/projects/demo/recognize/mappings", params={"limit": 20, "cursor": "bad-cursor"}
+    )
+    assert invalid.status_code == 422
+
+    assert (
+        client.post(
+            "/projects/demo/recognize/mappings",
+            json={"name": "template_99", "mapping": mapping},
+        ).status_code
+        == 200
+    )
+    stale = client.get(
+        "/projects/demo/recognize/mappings",
+        params={"limit": 20, "cursor": first_body["next_cursor"]},
+    )
+    assert stale.status_code == 409

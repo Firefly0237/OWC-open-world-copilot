@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 
+from ...app.actions import list_patches_action
 from ...impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
 from ...pipeline.patches import (
     apply_patch_workflow,
@@ -21,7 +22,8 @@ from ...pipeline.patches import (
 )
 from ...telemetry import deterministic_step, llm_step, summarize_workflow
 from ..api import _task_gateway
-from ..dependencies import _deterministic_cost_budget, _registered_project
+from ..dependencies import _deterministic_cost_budget, _project_root_or_404, _registered_project
+from ..pagination import PaginationCursorError, paginate
 from ..schemas import (
     ProjectImpactRequest,
     ProjectImpactResponse,
@@ -33,6 +35,31 @@ from ..schemas import (
 )
 
 router = APIRouter()
+
+
+@router.get("/projects/{project}/patches")
+def list_project_patches(
+    project: str,
+    request: Request,
+    status: str | None = Query(default=None, max_length=40),
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = Query(default=None, max_length=1000),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> dict[str, object]:
+    """List persisted repair proposals so agent-created patches can always be recovered."""
+    result = list_patches_action(_project_root_or_404(project), status=status)
+    try:
+        page = paginate(result["patches"], limit=limit, cursor=cursor)
+    except PaginationCursorError as exc:
+        raise HTTPException(status_code=409 if exc.stale else 422, detail=str(exc)) from exc
+    return {
+        "project": project,
+        "patches": page.items,
+        "total": page.total,
+        "next_cursor": page.next_cursor,
+        "snapshot_etag": page.snapshot_etag,
+        "cost_budget": result["cost_budget"],
+    }
 
 
 @router.post("/projects/{project}/impact:analyze", response_model=ProjectImpactResponse)

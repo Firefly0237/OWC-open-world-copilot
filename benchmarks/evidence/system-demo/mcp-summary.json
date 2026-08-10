@@ -1,0 +1,151 @@
+{
+  "demo_status": "passed",
+  "model_mode": "offline_deterministic",
+  "tool_transport": "mcp",
+  "single_agent": {
+    "status": "completed",
+    "stop_reason": "finished",
+    "actions": [
+      "audit_project",
+      "build_context_pack",
+      "quality_harness"
+    ],
+    "thread_id": "46ffae43-ea1d-40ac-af58-ee52d2f34431",
+    "telemetry_calls": 4,
+    "mcp_traces": [
+      {
+        "argument_summary": {
+          "limit": 50
+        },
+        "content_bytes": 5092,
+        "error_code": null,
+        "latency_ms": 4500.15080004232,
+        "outcome": "ok",
+        "outcome_unknown": false,
+        "phase": null,
+        "protocol_version": "2025-11-25",
+        "remote_message_sha256": null,
+        "retryable": false,
+        "risk_flags": [],
+        "schema_fingerprint": "39d0a10260a6a8bcb5392db32e6384fdc2830bf8f2b45e091cf92b6d61c53262",
+        "server_name": "owcopilot-local-consumer",
+        "tool_name": "audit_project",
+        "transport": "stdio"
+      }
+    ]
+  },
+  "memory": {
+    "persisted_run_count": 1
+  },
+  "multi_agent": {
+    "session_id": "8ba40bca-701a-4358-b23b-142ba5ae098f",
+    "participants": [
+      "diag_01",
+      "orchestrator",
+      "repair_01",
+      "verifier_01"
+    ],
+    "blackboard_message_types": [
+      "synthesize",
+      "task_assign",
+      "task_result",
+      "verify_request",
+      "verify_result"
+    ],
+    "verifier_verdicts": [
+      {
+        "agent_id": "verifier_01",
+        "open_errors_verified": 2,
+        "rationale": "Verifier independently found 2 open error(s) [deterministic-audit]; worker claimed 2. Delta=0 (within tolerance=0).",
+        "verdict": "pass"
+      },
+      {
+        "agent_id": "verifier_01",
+        "open_errors_verified": 2,
+        "rationale": "Verifier independently found 2 open error(s) [deterministic-audit]. Worker made no verifiable error-count claim (it ran no audit and stated no count), so there is nothing to contradict; reporting ground truth only.",
+        "verdict": "pass"
+      }
+    ],
+    "decomposition_degraded": true,
+    "budget_scope": {
+      "max_cost_usd": "settled_cost_blocks_next_dispatch",
+      "max_decomposed_subtasks": 6,
+      "max_tool_calls": "per_subtask_or_verifier_run",
+      "per_agent_max_tool_calls": null,
+      "session_global_budget_status": "hard_model_and_tool_call_ledgers_with_settled_cost_gate",
+      "session_global_model_budget": {
+        "concurrent_in_flight_cost_can_overshoot": true,
+        "cost_gate_exhausted": false,
+        "cost_gate_semantics": "settled_cost_blocks_next_dispatch",
+        "cost_is_estimate": false,
+        "hard_dollar_cap": false,
+        "model_calls_by_kind": {
+          "orchestrator_decompose": 2,
+          "planning:attempt-0": 4
+        },
+        "model_calls_limit": 128,
+        "model_calls_remaining": 122,
+        "model_calls_used": 6,
+        "settled_cost_limit_usd": null,
+        "settled_cost_usd": 0,
+        "tool_calls_by_name": {
+          "audit_project": 3,
+          "build_context_pack": 1,
+          "quality_harness": 1
+        },
+        "tool_calls_limit": 256,
+        "tool_calls_remaining": 251,
+        "tool_calls_used": 5
+      },
+      "session_global_tool_budget": {
+        "tool_calls_by_name": {
+          "audit_project": 3,
+          "build_context_pack": 1,
+          "quality_harness": 1
+        },
+        "tool_calls_limit": 256,
+        "tool_calls_remaining": 251,
+        "tool_calls_used": 5
+      }
+    },
+    "telemetry": {
+      "cache_hit_rate": 0,
+      "calls": 6,
+      "cost_is_estimate": false,
+      "failed_calls": 0,
+      "gateway_invocations": 6,
+      "input_tokens": 0,
+      "mean_latency_ms": 0.22,
+      "output_tokens": 0,
+      "provider_cache_hit_token_share": 0,
+      "total_cost_usd": 0,
+      "transport_attempt_cap": 6
+    }
+  },
+  "pdf_rag": {
+    "status": "passed",
+    "artifact_version_id": "0b3e6bb6-54d8-42c7-8279-b4a3fc129cf5",
+    "reference_source_id": "ref_quest_pdf_reference_1eeddb45",
+    "segment_count": 3,
+    "retrieval_unit_count": 1,
+    "chunk_policy_version": "system-demo-structure-v1",
+    "chunk_strategy": "structure",
+    "query": "north gate",
+    "hit_ref": "reference_chunk:ref_quest_pdf_reference_1eeddb45_unit_00001_76351a19",
+    "locator_pages": [
+      1,
+      2
+    ],
+    "resolved_citation_text": [
+      "Quest condition: recover the sigil.",
+      "Return it to the archivist.",
+      "Completion unlocks the north gate."
+    ],
+    "citation_round_trip": true,
+    "retrieval_profile": "BM25 plus HashingEmbedder powers the offline smoke; bge-m3 and the neural reranker are exercised by the retrieval benchmark."
+  },
+  "warnings": [
+    "session 8ba40bca-701a-4358-b23b-142ba5ae098f: LLM goal decomposition failed — fell back to static template. Subtasks are generic, not goal-specific. [DECOMPOSITION DEGRADED — static fallback active]"
+  ],
+  "run_profile": "Offline system smoke covering CLI, tools, storage, checkpoints, memory, MCP, multi-agent coordination, and the PDF-to-RAG citation path with a deterministic model."
+}

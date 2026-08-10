@@ -13,10 +13,46 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 from . import CostTier, SideEffect, Skill, SkillParameter, SkillRegistry
 from .observation_overflow import read_observation
+
+_VOLATILE_SEMANTIC_KEYS = frozenset(
+    {
+        "started_at",
+        "finished_at",
+        "created_at",
+        "updated_at",
+        "generated_at",
+        "duration_ms",
+        "latency_ms",
+        "request_id",
+        "trace_id",
+    }
+)
+
+
+def _stable_semantic_value(value: Any) -> Any:
+    """Recursively remove runtime-only fields while preserving domain ids and authored order."""
+    if isinstance(value, dict):
+        return {
+            key: _stable_semantic_value(item)
+            for key, item in value.items()
+            if key not in _VOLATILE_SEMANTIC_KEYS
+        }
+    if isinstance(value, list):
+        return [_stable_semantic_value(item) for item in value]
+    return value
+
+
+def _builtin_semantic_projection(skill_name: str, result: dict[str, Any]) -> Any:
+    projected = dict(result)
+    if skill_name == "audit_project":
+        # AuditRun.id is a fresh UUID each invocation and its timestamps are execution metadata;
+        # stable findings/content_hash/open_errors carry the actual diagnosis semantics.
+        projected.pop("audit_run", None)
+    return _stable_semantic_value(projected)
 
 
 def default_skill_registry(*, content_root: str, sqlite_path: str | None = None) -> SkillRegistry:
@@ -35,11 +71,29 @@ def default_skill_registry(*, content_root: str, sqlite_path: str | None = None)
     """
     # Lazy import keeps `owcopilot.skills` cheap to import and avoids any import-time coupling
     # to the (heavier) pipeline/llm stack the tool handlers pull in.
+    from ..content.hash import content_hash
+    from ..content.store import ContentStore
     from ..mcp_server import tools
 
-    def bind(tool: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    def bind(tool: Callable[..., Any]) -> Callable[..., dict[str, Any]]:
         """Inject the session args so they are never part of the model-facing parameter set."""
-        return partial(tool, content_root=content_root, sqlite_path=sqlite_path)
+        return cast(
+            "Callable[..., dict[str, Any]]",
+            partial(tool, content_root=content_root, sqlite_path=sqlite_path),
+        )
+
+    def project_revision() -> str:
+        shared = tools._shared_project.get()
+        bundle = shared.bundle if shared is not None else ContentStore(content_root).load()
+        return content_hash(bundle)
+
+    def semantic_contract(name: str) -> dict[str, Any]:
+        return {
+            "semantic_projection": partial(_builtin_semantic_projection, name),
+            "semantic_projection_name": f"builtin:{name}:stable-v1",
+            "state_marker": project_revision,
+            "state_marker_policy": "canon-content-hash-v1",
+        }
 
     registry = SkillRegistry()
 
@@ -53,6 +107,7 @@ def default_skill_registry(*, content_root: str, sqlite_path: str | None = None)
             cost_tier=CostTier.DETERMINISTIC,
             side_effect=SideEffect.READ_ONLY,
             handler=bind(tools.audit_project),
+            **semantic_contract("audit_project"),
         )
     )
     registry.register(
@@ -63,10 +118,25 @@ def default_skill_registry(*, content_root: str, sqlite_path: str | None = None)
             side_effect=SideEffect.READ_ONLY,
             handler=bind(tools.list_issues),
             parameters=(
-                SkillParameter("severity", "string", "error | warning", required=False),
-                SkillParameter("rule_code", "string", "Filter by audit rule code.", required=False),
-                SkillParameter("status", "string", "open | resolved | ignored", required=False),
+                SkillParameter(
+                    "severity", "string", "error | warning", required=False, default=None
+                ),
+                SkillParameter(
+                    "rule_code",
+                    "string",
+                    "Filter by audit rule code.",
+                    required=False,
+                    default=None,
+                ),
+                SkillParameter(
+                    "status",
+                    "string",
+                    "open | resolved | ignored",
+                    required=False,
+                    default=None,
+                ),
             ),
+            **semantic_contract("list_issues"),
         )
     )
     registry.register(
@@ -81,9 +151,63 @@ def default_skill_registry(*, content_root: str, sqlite_path: str | None = None)
             parameters=(
                 SkillParameter("query", "string", "What to look up in the world.", required=True),
                 SkillParameter(
-                    "budget_tokens", "integer", "Context size budget (default 800).", required=False
+                    "budget_tokens",
+                    "integer",
+                    "Context size budget (default 800).",
+                    required=False,
+                    default=800,
                 ),
             ),
+            **semantic_contract("build_context_pack"),
+        )
+    )
+    registry.register(
+        Skill(
+            name="search_references",
+            description=(
+                "Retrieve grounding material from the inspiration reference library (never canon) "
+                "for a query — the agent-facing counterpart of build_context_pack, over uploaded "
+                "reference sources instead of the world's own content."
+            ),
+            cost_tier=CostTier.DETERMINISTIC,
+            side_effect=SideEffect.READ_ONLY,
+            handler=bind(tools.search_references),
+            parameters=(
+                SkillParameter(
+                    "query", "string", "What to look up in the reference library.", required=True
+                ),
+                SkillParameter(
+                    "budget_tokens",
+                    "integer",
+                    "Context size budget (default 1000).",
+                    required=False,
+                    default=1000,
+                ),
+            ),
+            **semantic_contract("search_references"),
+        )
+    )
+    registry.register(
+        Skill(
+            name="flag_xref",
+            description=(
+                "Cross-reference a world state flag: who declares it, who writes it, who reads it, "
+                "and which decidable problems it has (conflicting declarations, a gate nothing can "
+                "open, a write nothing reads). Pure lookup, no model."
+            ),
+            cost_tier=CostTier.DETERMINISTIC,
+            side_effect=SideEffect.READ_ONLY,
+            handler=bind(tools.flag_xref),
+            parameters=(
+                SkillParameter(
+                    "flag",
+                    "string",
+                    "Narrow to one variable id; omit to get every flag in the world.",
+                    required=False,
+                    default=None,
+                ),
+            ),
+            **semantic_contract("flag_xref"),
         )
     )
     registry.register(
@@ -105,9 +229,14 @@ def default_skill_registry(*, content_root: str, sqlite_path: str | None = None)
                     required=True,
                 ),
                 SkillParameter(
-                    "max_depth", "integer", "Graph walk depth (default 2).", required=False
+                    "max_depth",
+                    "integer",
+                    "Graph walk depth (default 2).",
+                    required=False,
+                    default=2,
                 ),
             ),
+            **semantic_contract("impact_of"),
         )
     )
     registry.register(
@@ -128,9 +257,14 @@ def default_skill_registry(*, content_root: str, sqlite_path: str | None = None)
                     required=True,
                 ),
                 SkillParameter(
-                    "max_candidates", "integer", "Max candidates (default 3).", required=False
+                    "max_candidates",
+                    "integer",
+                    "Max candidates (default 3).",
+                    required=False,
+                    default=3,
                 ),
             ),
+            **semantic_contract("propose_fix"),
         )
     )
     registry.register(
@@ -153,6 +287,7 @@ def default_skill_registry(*, content_root: str, sqlite_path: str | None = None)
                     required=True,
                 ),
             ),
+            **semantic_contract("read_observation"),
         )
     )
     registry.register(
@@ -167,15 +302,21 @@ def default_skill_registry(*, content_root: str, sqlite_path: str | None = None)
             handler=bind(tools.quality_harness),
             parameters=(
                 SkillParameter(
-                    "max_issues", "integer", "Top issues to inspect (default 5).", required=False
+                    "max_issues",
+                    "integer",
+                    "Top issues to inspect (default 5).",
+                    required=False,
+                    default=5,
                 ),
                 SkillParameter(
                     "propose_fixes",
                     "boolean",
                     "Include fix proposals (default true).",
                     required=False,
+                    default=True,
                 ),
             ),
+            **semantic_contract("quality_harness"),
         )
     )
     return registry

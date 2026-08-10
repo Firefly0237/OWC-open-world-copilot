@@ -1,0 +1,789 @@
+{
+  "closure_scenarios": [
+    {
+      "dialogue_choices": [
+        "n0:0"
+      ],
+      "dialogue_expected": {
+        "final_state": {
+          "door_open": true
+        },
+        "message": "",
+        "path": [
+          "n0",
+          "n1"
+        ],
+        "status": "completed",
+        "steps": [
+          {
+            "chosen": "n0:0",
+            "effects": [
+              "door_open set True"
+            ],
+            "node_id": "n0"
+          },
+          {
+            "chosen": "",
+            "effects": [],
+            "node_id": "n1"
+          }
+        ],
+        "tree_id": "t_closure"
+      },
+      "dialogue_initial_state": {},
+      "name": "dialogue_unlocks_stage",
+      "quest_choices": [],
+      "quest_expected": {
+        "final_state": {
+          "door_open": true
+        },
+        "message": "",
+        "path": [
+          "s0",
+          "s1"
+        ],
+        "status": "completed",
+        "steps": [
+          {
+            "branch_taken": "",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "s0"
+          },
+          {
+            "branch_taken": "",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "s1"
+          }
+        ]
+      },
+      "quest_id": "q_closure",
+      "tree_id": "t_closure"
+    }
+  ],
+  "dialogue_scenarios": [
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {
+          "flag_met": true
+        },
+        "message": "",
+        "path": [
+          "n0",
+          "n1"
+        ],
+        "status": "completed",
+        "steps": [
+          {
+            "chosen": "n0:0",
+            "effects": [
+              "flag_met set True"
+            ],
+            "node_id": "n0"
+          },
+          {
+            "chosen": "",
+            "effects": [],
+            "node_id": "n1"
+          }
+        ],
+        "tree_id": "t_completed"
+      },
+      "initial_state": {},
+      "name": "walk_completed",
+      "tree_id": "t_completed"
+    },
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {},
+        "message": "链接指向不存在的节点「ghost」",
+        "path": [
+          "n0"
+        ],
+        "status": "dangling",
+        "steps": [
+          {
+            "chosen": "",
+            "effects": [],
+            "node_id": "n0"
+          }
+        ],
+        "tree_id": "t_dangling"
+      },
+      "initial_state": {},
+      "name": "walk_dangling",
+      "tree_id": "t_dangling"
+    },
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {
+          "gate": false
+        },
+        "message": "节点「n0」没有可满足的选项",
+        "path": [
+          "n0"
+        ],
+        "status": "deadlock",
+        "steps": [
+          {
+            "chosen": "",
+            "effects": [],
+            "node_id": "n0"
+          }
+        ],
+        "tree_id": "t_deadlock"
+      },
+      "initial_state": {},
+      "name": "walk_deadlock",
+      "tree_id": "t_deadlock"
+    },
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {},
+        "message": "在节点「n0」检测到循环",
+        "path": [
+          "n0",
+          "n1"
+        ],
+        "status": "cycle",
+        "steps": [
+          {
+            "chosen": "",
+            "effects": [],
+            "node_id": "n0"
+          },
+          {
+            "chosen": "",
+            "effects": [],
+            "node_id": "n1"
+          }
+        ],
+        "tree_id": "t_cycle"
+      },
+      "initial_state": {},
+      "name": "walk_cycle",
+      "tree_id": "t_cycle"
+    }
+  ],
+  "meta": {
+    "description": "Differential-test corpus: production simulate_quest/walk_dialogue_tree is the oracle; the C# QuestRunner/DialogueWalker replays these fixed inputs and must agree on status/path/steps/final_state (message excluded).",
+    "support_quests": [
+      "q0000",
+      "q0001"
+    ],
+    "support_seed": 20260711,
+    "support_tier": "support"
+  },
+  "quest_scenarios": [
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {
+          "v_started": true
+        },
+        "message": "",
+        "path": [
+          "s0",
+          "s1"
+        ],
+        "status": "completed",
+        "steps": [
+          {
+            "branch_taken": "",
+            "effects": [
+              "v_started set True"
+            ],
+            "precondition_ok": true,
+            "stage_id": "s0"
+          },
+          {
+            "branch_taken": "",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "s1"
+          }
+        ]
+      },
+      "initial_state": {},
+      "name": "linear_completed",
+      "quest_id": "q_linear"
+    },
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {
+          "rep:fac_watch": 1
+        },
+        "message": "",
+        "path": [
+          "s0"
+        ],
+        "status": "completed",
+        "steps": [
+          {
+            "branch_taken": "br_win",
+            "effects": [
+              "rep:fac_watch inc 1"
+            ],
+            "precondition_ok": true,
+            "stage_id": "s0"
+          }
+        ]
+      },
+      "initial_state": {},
+      "name": "terminal_outcome",
+      "quest_id": "q_terminal"
+    },
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {
+          "gate": false
+        },
+        "message": "阶段 's0' 没有可走的分支",
+        "path": [
+          "s0"
+        ],
+        "status": "deadlock",
+        "steps": [
+          {
+            "branch_taken": "",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "s0"
+          }
+        ]
+      },
+      "initial_state": {},
+      "name": "deadlock",
+      "quest_id": "q_deadlock"
+    },
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {
+          "key": false
+        },
+        "message": "阶段 's1' 的前置不满足",
+        "path": [
+          "s0",
+          "s1"
+        ],
+        "status": "blocked",
+        "steps": [
+          {
+            "branch_taken": "",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "s0"
+          },
+          {
+            "branch_taken": "",
+            "effects": [],
+            "precondition_ok": false,
+            "stage_id": "s1"
+          }
+        ]
+      },
+      "initial_state": {},
+      "name": "blocked_precondition",
+      "quest_id": "q_blocked"
+    },
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {},
+        "message": "在阶段 's0' 检测到循环",
+        "path": [
+          "s0",
+          "s1"
+        ],
+        "status": "cycle",
+        "steps": [
+          {
+            "branch_taken": "b_s0_s1",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "s0"
+          },
+          {
+            "branch_taken": "b_s1_s0",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "s1"
+          }
+        ]
+      },
+      "initial_state": {},
+      "name": "cycle",
+      "quest_id": "q_cycle"
+    },
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {
+          "has_writ": false
+        },
+        "message": "任务前置不满足：has_writ",
+        "path": [],
+        "status": "unavailable",
+        "steps": []
+      },
+      "initial_state": {},
+      "name": "quest_gate_unavailable",
+      "quest_id": "q_gated"
+    },
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {
+          "has_writ": true
+        },
+        "message": "",
+        "path": [
+          "s0",
+          "s1"
+        ],
+        "status": "completed",
+        "steps": [
+          {
+            "branch_taken": "",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "s0"
+          },
+          {
+            "branch_taken": "",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "s1"
+          }
+        ]
+      },
+      "initial_state": {
+        "has_writ": true
+      },
+      "name": "quest_gate_satisfied",
+      "quest_id": "q_gated"
+    },
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {
+          "noted": true
+        },
+        "message": "",
+        "path": [
+          "s0"
+        ],
+        "status": "completed",
+        "steps": [
+          {
+            "branch_taken": "",
+            "effects": [
+              "noted set True"
+            ],
+            "precondition_ok": true,
+            "stage_id": "s0"
+          }
+        ]
+      },
+      "initial_state": {},
+      "name": "quest_gate_empty_is_open",
+      "quest_id": "q_open_gate"
+    },
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {
+          "q0000_v0": true,
+          "q0000_v1": false,
+          "q0000_v2": false,
+          "q0000_v3": false,
+          "q0000_v4": false,
+          "q0000_v5": false,
+          "q0000_v6": false,
+          "q0000_v7": false
+        },
+        "message": "",
+        "path": [
+          "q0000_s0",
+          "q0000_s1",
+          "q0000_s2",
+          "q0000_s3",
+          "q0000_s4",
+          "q0000_s5",
+          "q0000_s6",
+          "q0000_s7",
+          "q0000_s8",
+          "q0000_s9",
+          "q0000_s10",
+          "q0000_s11",
+          "q0000_s12",
+          "q0000_s13",
+          "q0000_s14",
+          "q0000_s15",
+          "q0000_s16",
+          "q0000_s17",
+          "q0000_s18",
+          "q0000_s19",
+          "q0000_s20",
+          "q0000_s21",
+          "q0000_s22",
+          "q0000_s23",
+          "q0000_s24",
+          "q0000_s25",
+          "q0000_s26",
+          "q0000_s27"
+        ],
+        "status": "completed",
+        "steps": [
+          {
+            "branch_taken": "q0000_b0_adv",
+            "effects": [
+              "q0000_v0 set True"
+            ],
+            "precondition_ok": true,
+            "stage_id": "q0000_s0"
+          },
+          {
+            "branch_taken": "q0000_b1_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s1"
+          },
+          {
+            "branch_taken": "q0000_b2_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s2"
+          },
+          {
+            "branch_taken": "q0000_b3_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s3"
+          },
+          {
+            "branch_taken": "q0000_b4_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s4"
+          },
+          {
+            "branch_taken": "q0000_b5_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s5"
+          },
+          {
+            "branch_taken": "q0000_b6_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s6"
+          },
+          {
+            "branch_taken": "q0000_b7_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s7"
+          },
+          {
+            "branch_taken": "q0000_b8_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s8"
+          },
+          {
+            "branch_taken": "q0000_b9_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s9"
+          },
+          {
+            "branch_taken": "q0000_b10_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s10"
+          },
+          {
+            "branch_taken": "q0000_b11_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s11"
+          },
+          {
+            "branch_taken": "q0000_b12_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s12"
+          },
+          {
+            "branch_taken": "q0000_b13_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s13"
+          },
+          {
+            "branch_taken": "q0000_b14_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s14"
+          },
+          {
+            "branch_taken": "q0000_b15_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s15"
+          },
+          {
+            "branch_taken": "q0000_b16_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s16"
+          },
+          {
+            "branch_taken": "q0000_b17_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s17"
+          },
+          {
+            "branch_taken": "q0000_b18_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s18"
+          },
+          {
+            "branch_taken": "q0000_b19_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s19"
+          },
+          {
+            "branch_taken": "q0000_b20_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s20"
+          },
+          {
+            "branch_taken": "q0000_b21_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s21"
+          },
+          {
+            "branch_taken": "q0000_b22_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s22"
+          },
+          {
+            "branch_taken": "q0000_b23_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s23"
+          },
+          {
+            "branch_taken": "q0000_b24_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s24"
+          },
+          {
+            "branch_taken": "q0000_b25_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s25"
+          },
+          {
+            "branch_taken": "q0000_b26_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s26"
+          },
+          {
+            "branch_taken": "",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0000_s27"
+          }
+        ]
+      },
+      "initial_state": {},
+      "name": "support_q0000",
+      "quest_id": "q0000"
+    },
+    {
+      "choices": [],
+      "expected": {
+        "final_state": {
+          "q0001_v0": true,
+          "q0001_v1": false,
+          "q0001_v2": false,
+          "q0001_v3": false,
+          "q0001_v4": false,
+          "q0001_v5": false,
+          "q0001_v6": false,
+          "q0001_v7": false
+        },
+        "message": "",
+        "path": [
+          "q0001_s0",
+          "q0001_s1",
+          "q0001_s2",
+          "q0001_s3",
+          "q0001_s4",
+          "q0001_s5",
+          "q0001_s6",
+          "q0001_s7",
+          "q0001_s8",
+          "q0001_s9",
+          "q0001_s10",
+          "q0001_s11",
+          "q0001_s12",
+          "q0001_s13",
+          "q0001_s14",
+          "q0001_s15",
+          "q0001_s16",
+          "q0001_s17",
+          "q0001_s18",
+          "q0001_s19"
+        ],
+        "status": "completed",
+        "steps": [
+          {
+            "branch_taken": "q0001_b0_adv",
+            "effects": [
+              "q0001_v0 set True"
+            ],
+            "precondition_ok": true,
+            "stage_id": "q0001_s0"
+          },
+          {
+            "branch_taken": "q0001_b1_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s1"
+          },
+          {
+            "branch_taken": "q0001_b2_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s2"
+          },
+          {
+            "branch_taken": "q0001_b3_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s3"
+          },
+          {
+            "branch_taken": "q0001_b4_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s4"
+          },
+          {
+            "branch_taken": "q0001_b5_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s5"
+          },
+          {
+            "branch_taken": "q0001_b6_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s6"
+          },
+          {
+            "branch_taken": "q0001_b7_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s7"
+          },
+          {
+            "branch_taken": "q0001_b8_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s8"
+          },
+          {
+            "branch_taken": "q0001_b9_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s9"
+          },
+          {
+            "branch_taken": "q0001_b10_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s10"
+          },
+          {
+            "branch_taken": "q0001_b11_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s11"
+          },
+          {
+            "branch_taken": "q0001_b12_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s12"
+          },
+          {
+            "branch_taken": "q0001_b13_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s13"
+          },
+          {
+            "branch_taken": "q0001_b14_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s14"
+          },
+          {
+            "branch_taken": "q0001_b15_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s15"
+          },
+          {
+            "branch_taken": "q0001_b16_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s16"
+          },
+          {
+            "branch_taken": "q0001_b17_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s17"
+          },
+          {
+            "branch_taken": "q0001_b18_adv",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s18"
+          },
+          {
+            "branch_taken": "",
+            "effects": [],
+            "precondition_ok": true,
+            "stage_id": "q0001_s19"
+          }
+        ]
+      },
+      "initial_state": {},
+      "name": "support_q0001",
+      "quest_id": "q0001"
+    }
+  ]
+}

@@ -20,12 +20,14 @@ from ...assist.review_queue import ReviewQueue
 from ...content.models import ContentBundle, DialogueNode, Entity, EntityType, Relation
 from ...content.relation_kinds import is_symmetric_kind
 from ...pipeline.audit import run_full_audit
+from ...storage.world_lock import serialized_world_write
 from ...telemetry import llm_step, summarize_workflow
 from .._common import deterministic_cost_budget as _deterministic_cost_budget
 from .._common import open_project as _project
 from ._shared import _gateway
 
 
+@serialized_world_write
 def update_entity_action(
     content_root: str | Path,
     *,
@@ -71,6 +73,7 @@ def update_entity_action(
         }
 
 
+@serialized_world_write
 def update_style_guide_action(
     content_root: str | Path,
     *,
@@ -103,6 +106,7 @@ def update_style_guide_action(
         }
 
 
+@serialized_world_write
 def delete_object_action(
     content_root: str | Path,
     *,
@@ -178,6 +182,7 @@ def _new_entity_id(bundle: ContentBundle, *, name: str, entity_type: EntityType)
     return candidate
 
 
+@serialized_world_write
 def create_entity_action(
     content_root: str | Path,
     *,
@@ -214,6 +219,7 @@ def create_entity_action(
         }
 
 
+@serialized_world_write
 def update_quest_action(
     content_root: str | Path,
     *,
@@ -274,16 +280,19 @@ def update_quest_action(
 
 
 # >>> WS-A logic endpoints (human-edit pipeline; logic audits surface via the normal audit) >>>
+@serialized_world_write
 def update_quest_logic_action(
     content_root: str | Path,
     *,
     quest_id: str,
     logic: dict[str, Any] | None,
+    if_match: str | None = None,
     sqlite_path: str | None = None,
 ) -> dict[str, Any]:
     """Set/replace a quest's native logic layer (None clears it). Malformed expressions are rejected
     up front (clean 4xx, not a 500); the saved logic's deterministic issues are returned so the
     editor sees unreachable stages / deadlocks / undefined vars immediately."""
+    from ...collab import ConflictError, check_etag, etag_for
     from ...content.models import QuestLogic
     from ...logic import LogicSyntaxError, audit_quest_logic, parse_expr
 
@@ -292,6 +301,10 @@ def update_quest_logic_action(
         quest = bundle.quests.get(quest_id)
         if quest is None:
             raise ValueError(f"任务不存在：{quest_id}")
+        try:
+            check_etag(current=etag_for(quest), if_match=if_match)
+        except ConflictError as exc:
+            raise ValueError(str(exc)) from exc
         parsed_logic: QuestLogic | None = None
         if logic is not None:
             try:
@@ -310,6 +323,7 @@ def update_quest_logic_action(
         issues = audit_quest_logic(updated)
         return {
             "quest": updated.model_dump(mode="json"),
+            "etag": etag_for(updated),
             "logic_issues": [{"code": i.code, "message": i.message, "ref": i.ref} for i in issues],
             "cost_budget": _deterministic_cost_budget("quest_logic_update"),
         }
@@ -388,22 +402,47 @@ def simulate_quest_action(
     *,
     quest_id: str,
     choices: list[str] | None = None,
-    initial_state: dict[str, Any] | None = None,
+    initial_state: dict[str, bool | int | str] | None = None,
+    dialogue_tree_id: str | None = None,
+    dialogue_choices: list[str] | None = None,
     sqlite_path: str | None = None,
 ) -> dict[str, Any]:
-    """WS-E playtest: deterministically walk a quest's logic and report the path + outcome."""
-    from ...logic import simulate_quest
+    """WS-E playtest: optionally walk dialogue, then simulate one deterministic quest path.
+
+    Dialogue effects seed the quest simulation.  Explicit ``initial_state`` values are applied
+    afterwards and therefore win on key conflicts, matching the CLI composition contract.
+    """
+    from ...logic import simulate_quest, walk_dialogue_tree
 
     with _project(content_root, sqlite_path) as project:
         quest = project.bundle.quests.get(quest_id)
         if quest is None:
             raise ValueError(f"任务不存在：{quest_id}")
-        run = simulate_quest(quest, choices=choices, initial_state=initial_state)
-        return {
+
+        dialogue_walk: dict[str, Any] | None = None
+        effective_state = initial_state
+        if dialogue_tree_id:
+            tree = project.bundle.dialogue_trees.get(dialogue_tree_id)
+            if tree is None:
+                available = (
+                    "、".join(sorted(project.bundle.dialogue_trees)) or "（当前世界没有对白树）"
+                )
+                raise ValueError(f"对白树「{dialogue_tree_id}」不存在。当前可用对白树：{available}")
+            walk = walk_dialogue_tree(tree, choices=dialogue_choices)
+            dialogue_walk = walk.model_dump(mode="json")
+            merged_state = dict(walk.final_state)
+            merged_state.update(initial_state or {})
+            effective_state = merged_state
+
+        run = simulate_quest(quest, choices=choices, initial_state=effective_state)
+        payload = {
             "quest_id": quest_id,
             "run": run.model_dump(mode="json"),
             "cost_budget": _deterministic_cost_budget("quest_simulate"),
         }
+        if dialogue_walk is not None:
+            payload["dialogue_walk"] = dialogue_walk
+        return payload
 
 
 # >>> WS-C search + safe refactor >>>
@@ -446,6 +485,7 @@ def plan_rename_action(
         }
 
 
+@serialized_world_write
 def apply_rename_action(
     content_root: str | Path,
     *,
@@ -479,6 +519,7 @@ def apply_rename_action(
         }
 
 
+@serialized_world_write
 def restore_snapshot_action(
     content_root: str | Path,
     *,
@@ -500,6 +541,7 @@ def restore_snapshot_action(
         }
 
 
+@serialized_world_write
 def add_relation_action(
     content_root: str | Path,
     *,
@@ -537,6 +579,7 @@ def add_relation_action(
         }
 
 
+@serialized_world_write
 def remove_relation_action(
     content_root: str | Path,
     *,
@@ -561,6 +604,7 @@ def remove_relation_action(
         return {"removed": removed, "cost_budget": _deterministic_cost_budget("relation_remove")}
 
 
+@serialized_world_write
 def update_dialogue_tree_action(
     content_root: str | Path,
     *,
@@ -608,18 +652,22 @@ def update_dialogue_tree_action(
         }
 
 
+@serialized_world_write
 def set_object_position_action(
     content_root: str | Path,
     *,
     ref: str,
     x: float,
     y: float,
+    z: float | None = None,
     sqlite_path: str | None = None,
 ) -> dict[str, Any]:
     """Persist a dragged node's position into the object's ``metadata.graph_pos`` (the layout uses
     the override when present, else falls back to the deterministic layout)."""
     object_type, _, object_id = ref.partition(":")
     pos = [round(float(x), 1), round(float(y), 1)]
+    if z is not None:
+        pos.append(round(float(z), 1))
     with _project(content_root, sqlite_path) as project:
         bundle = project.content_store.load()
         collections: dict[str, MutableMapping[str, Any]] = {

@@ -1,0 +1,266 @@
+{
+  "allowed_providers": [
+    "fixture",
+    "scripted",
+    "real_model"
+  ],
+  "artifacts": [
+    {
+      "byte_count": 32835,
+      "path": "contract.json",
+      "sha256": "916e8429fca8da8b232e7e778b3ae54033c96dfcde774eee5eb1da7161083532",
+      "split": null
+    },
+    {
+      "byte_count": 1777,
+      "path": "../../global_real_model_budget.json",
+      "sha256": "7ee936678b2e1f7e3ce6b477d3411876f110409c35caba4ce77b746f6111fbe3",
+      "split": null
+    },
+    {
+      "byte_count": 18641,
+      "path": "../../hard_zero/agent_trust_gold/cases.json",
+      "sha256": "3a5885558eb2948200820b223e2a91782b71f686f54f6482c7170396c9e97669",
+      "split": null
+    }
+  ],
+  "description": "Planning, tools, evidence, reflection, memory, Persona, and fixed collaboration.",
+  "metrics": [
+    {
+      "description": "Verifier-accepted task completion over every paired task.",
+      "name": "planning_task_completion_rate",
+      "primary": true,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Plans satisfying dependency and budget contracts.",
+      "name": "planning_valid_plan_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Successful bounded replans after actionable failure.",
+      "name": "planning_replan_success_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Verifier-accepted completion rate for reflection retry versus ordinary retry.",
+      "name": "reflection_retry_task_completion_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Eligible failures receiving one retry.",
+      "name": "reflection_actionable_retry_coverage",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Retries where reflection changes plan or tool choice.",
+      "name": "reflection_plan_change_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Verifier-accepted completion with validated memory versus memory off.",
+      "name": "memory_on_task_completion_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Validated useful memory delivered to prompt.",
+      "name": "memory_delivered_positive_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Invalid memory entering a prompt.",
+      "name": "memory_invalid_prompt_entry_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Unique verifier-accepted completion rate under equal aggregate budget.",
+      "name": "multi_agent_task_completion_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Decomposable tasks completing fan-out and join.",
+      "name": "multi_agent_fanout_join_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Assignments with exactly one visible result.",
+      "name": "multi_agent_unique_result_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Verifier-accepted task completion on tool-requiring tasks.",
+      "name": "tool_use_task_completion_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Precision of selected production tools.",
+      "name": "tool_selection_precision",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Recall of required production tools.",
+      "name": "tool_selection_recall",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Exact rubric-valid tool argument rate.",
+      "name": "tool_argument_correctness_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Required effects covered by trusted evidence.",
+      "name": "tool_evidence_coverage",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Tool tasks completing a valid action.",
+      "name": "tool_completed_action_coverage",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Blinded independent accept rate over representative Persona tasks.",
+      "name": "persona_blinded_accept_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Statements consistent with frozen character facts.",
+      "name": "persona_consistency_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Knowledge-boundary violation rate.",
+      "name": "persona_knowledge_boundary_violation_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Unjustified cross-scene Persona drift rate.",
+      "name": "persona_drift_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Fraction producing a reviewable response.",
+      "name": "persona_output_coverage",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Matched-good PASS and frozen-mutant FAIL decisions over all frozen controls.",
+      "name": "harness_control_discrimination_rate",
+      "primary": false,
+      "scope": "harness",
+      "unit": "ratio"
+    },
+    {
+      "description": "Hard-zero attack-side violations for forged_worker_evidence_accepted.",
+      "name": "forged_worker_evidence_accepted_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for forged_worker_evidence_accepted.",
+      "name": "forged_worker_evidence_accepted_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for invalid_memory_enters_prompt.",
+      "name": "invalid_memory_enters_prompt_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for invalid_memory_enters_prompt.",
+      "name": "invalid_memory_enters_prompt_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for attempt_budget_reset.",
+      "name": "attempt_budget_reset_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for attempt_budget_reset.",
+      "name": "attempt_budget_reset_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for duplicate_visible_assignment_result.",
+      "name": "duplicate_visible_assignment_result_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for duplicate_visible_assignment_result.",
+      "name": "duplicate_visible_assignment_result_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    }
+  ],
+  "report_schema_version": "formal-eval/v1",
+  "schema_version": "formal-eval/v1",
+  "scorer": null,
+  "status": "NOT_AVAILABLE",
+  "status_reasons": [
+    "FORMAL_AGENT_TRUST_PATH_NOT_IMPLEMENTED",
+    "PRODUCTION_QUALITY_RUNNER_NOT_AVAILABLE",
+    "SUBJECTIVE_PERSONA_BLOCKED_EXTERNAL_DATA"
+  ],
+  "suite_id": "agent_trust_gold",
+  "suite_version": "n0.3-v1",
+  "trace_schema_version": "formal-eval/v1"
+}

@@ -78,6 +78,19 @@ def _section_lines(text: str, header: str) -> list[str]:
 
 
 def _context_rows(system: str) -> list[tuple[str, str, str]]:
+    marker = "UNTRUSTED_RETRIEVED_EVIDENCE_JSON:\n"
+    if marker in system:
+        raw = system.split(marker, 1)[1].split("\nEND_UNTRUSTED_RETRIEVED_EVIDENCE_JSON", 1)[0]
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            payload = []
+        if isinstance(payload, list):
+            return [
+                (str(item["ref"]), str(item.get("title", "")), str(item.get("body", "")))
+                for item in payload
+                if isinstance(item, dict) and item.get("ref")
+            ]
     rows: list[tuple[str, str, str]] = []
     for ref, title, body in re.findall(r"^- \[([a-z_]+:[^\]]+)\]\s*([^:]*):\s*(.*)$", system, re.M):
         rows.append((ref, title.strip(), body.strip()))

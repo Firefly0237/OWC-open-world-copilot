@@ -1,0 +1,172 @@
+{
+  "artifact_references": [
+    {
+      "byte_count": 17830,
+      "kind": "policy_conformance",
+      "path": "conformance_vectors.json",
+      "sha256": "b01dcfd6853a08795b5418d0079db113fdf85a094929827caeb30224fc0b9445"
+    },
+    {
+      "byte_count": 2460,
+      "kind": "formal_control",
+      "path": "../controls/agent_trust_gold/cases.json",
+      "sha256": "458c3e43b8dbdd4247ca4aa962485603244e278c8ba216e8bf95cf3795499113"
+    },
+    {
+      "byte_count": 2697,
+      "kind": "formal_control",
+      "path": "../controls/failure_isolation_matrix/cases.json",
+      "sha256": "e84641e3a4a4f3be168777f4c96daa84764d035bcad01ce2c711892c47924be5"
+    },
+    {
+      "byte_count": 2674,
+      "kind": "formal_control",
+      "path": "../controls/game_planner_vertical_e2e/cases.json",
+      "sha256": "8a4e7249dc11b58a775416cfeb5ffe0350544a919b44bb8fa8b487dce6643b54"
+    },
+    {
+      "byte_count": 2233,
+      "kind": "formal_control",
+      "path": "../controls/semantic_shadow_eval/cases.json",
+      "sha256": "7f63d494e12dcfef2e508bf908a5ae62332a38c85d139296286c13d760616c42"
+    },
+    {
+      "byte_count": 223222,
+      "kind": "fault_manifest",
+      "path": "../faults/failure_isolation_matrix/fault_manifest.json",
+      "sha256": "92fc59e08ebe6d3ade272d0cb93cab983e7f5c2fb86f3e80e2ed3dddb60d70f0"
+    },
+    {
+      "byte_count": 1777,
+      "kind": "global_budget",
+      "path": "../global_real_model_budget.json",
+      "sha256": "7ee936678b2e1f7e3ce6b477d3411876f110409c35caba4ce77b746f6111fbe3"
+    },
+    {
+      "byte_count": 18641,
+      "kind": "hard_zero_case_catalog",
+      "path": "../hard_zero/agent_trust_gold/cases.json",
+      "sha256": "3a5885558eb2948200820b223e2a91782b71f686f54f6482c7170396c9e97669"
+    },
+    {
+      "byte_count": 83207,
+      "kind": "hard_zero_case_catalog",
+      "path": "../hard_zero/failure_isolation_matrix/cases.json",
+      "sha256": "079d8bf01efb491e08c73ffa5389a2d0bf84b0abf3544f4c0bc8a48ad7dd7334"
+    },
+    {
+      "byte_count": 14401,
+      "kind": "hard_zero_case_catalog",
+      "path": "../hard_zero/game_planner_vertical_e2e/cases.json",
+      "sha256": "cf2249182646272ac3c2dca102aabd260930e96cc3b15dcbe91c53f0288ba578"
+    },
+    {
+      "byte_count": 5535,
+      "kind": "hard_zero_case_catalog",
+      "path": "../hard_zero/semantic_shadow_eval/cases.json",
+      "sha256": "c7421195678539be527ec9c6bf8edd2dae8923335967e934a59f2226781b8233"
+    },
+    {
+      "byte_count": 4987,
+      "kind": "protocol_schema",
+      "path": "../schemas/manifest.schema.json",
+      "sha256": "ed88b66317bb87568130301cbc8a314acf1b30b473d1fc48559cc79ddfeef700"
+    },
+    {
+      "byte_count": 5618,
+      "kind": "protocol_schema",
+      "path": "../schemas/report.schema.json",
+      "sha256": "c977ce5c3a394c1a2338660a47137f8ae2088d3fbc3638d4e5f1b5e8dac63101"
+    },
+    {
+      "byte_count": 7716,
+      "kind": "protocol_schema",
+      "path": "../schemas/trace.schema.json",
+      "sha256": "00748b540b2bf8266418c92fa4bf4c257eec40e7ef511b784268db20acdbb42b"
+    },
+    {
+      "byte_count": 32835,
+      "kind": "suite_contract",
+      "path": "../suites/agent_trust_gold/contract.json",
+      "sha256": "916e8429fca8da8b232e7e778b3ae54033c96dfcde774eee5eb1da7161083532"
+    },
+    {
+      "byte_count": 8134,
+      "kind": "suite_manifest",
+      "path": "../suites/agent_trust_gold/manifest.json",
+      "sha256": "060b248633d0db537041b4f963e67c02db7e2580476e04333439d5c766f51704"
+    },
+    {
+      "byte_count": 24612,
+      "kind": "suite_contract",
+      "path": "../suites/failure_isolation_matrix/contract.json",
+      "sha256": "893cde55f58d3f6f120ce69962b93a7538fa5db0691d84292dd9712e7c4af1d5"
+    },
+    {
+      "byte_count": 10104,
+      "kind": "suite_manifest",
+      "path": "../suites/failure_isolation_matrix/manifest.json",
+      "sha256": "87601045a4deb97dbcb3ec098158edad5c992ee3109c2a1cdbce769eba472c05"
+    },
+    {
+      "byte_count": 26662,
+      "kind": "suite_contract",
+      "path": "../suites/game_planner_vertical_e2e/contract.json",
+      "sha256": "9db977f78c738e0b4aad431b4cdcfbd022d0bf8bdb04316378878a23fcbc3f83"
+    },
+    {
+      "byte_count": 8607,
+      "kind": "suite_manifest",
+      "path": "../suites/game_planner_vertical_e2e/manifest.json",
+      "sha256": "5af38cf858c872b044f4001a91e4e765e374773c8c0ae026e07601d6552a066a"
+    },
+    {
+      "byte_count": 9229,
+      "kind": "suite_contract",
+      "path": "../suites/semantic_shadow_eval/contract.json",
+      "sha256": "36aee9d348fbae4235e3bb7714b414ebc0aac4acb27bf2c4da118a49f1cf50d7"
+    },
+    {
+      "byte_count": 3677,
+      "kind": "suite_manifest",
+      "path": "../suites/semantic_shadow_eval/manifest.json",
+      "sha256": "c1c7c0200508f0da04407ef97fb49f102651cb2b66fe032acd5e9690a0176fc4"
+    }
+  ],
+  "budget_accounting": {
+    "aggregate_source": "all_real_model_trace_attempts",
+    "count_error_and_retry_attempts": true,
+    "self_reported_trace_budget_is_global_authority": false,
+    "token_definition": "input_tokens_plus_output_tokens",
+    "unique_global_budget_path": "../global_real_model_budget.json"
+  },
+  "final_json_validation": {
+    "duplicate_keys_allowed": false,
+    "non_finite_numbers_allowed": false,
+    "pipeline": [
+      "utf8_decode",
+      "json.loads",
+      "pydantic.model_validate"
+    ],
+    "schema_only_validation_allowed": false,
+    "status_normalization_must_be_serialized": true
+  },
+  "run_invariants": [
+    "actual trace SHA256 set equals the report set and both are unique",
+    "suite/version/run/split/provider agree across report and every trace",
+    "report metrics and any quality primary match the frozen suite manifest",
+    "quality PASS or FAIL requires sealed split and PASS-ready frozen manifest, experiment, dataset, and scorer provenance",
+    "case_id plus attempt is unique and attempts start at one without gaps",
+    "counts are recomputed from each distinct case's final attempt",
+    "fixture CANARY traces are independently adjudicated from frozen control bytes; trace and report claims cannot substitute for control evaluation",
+    "any fixture CANARY publication requires one canonical completion cohort binding exactly the four suites, one base run, timestamp, governance tree, reports, and traces",
+    "PASS or FAIL cannot omit traces or contain skipped, unavailable, or INVALID attempts",
+    "all real-model attempts, including errors and retries, consume the one global budget"
+  ],
+  "run_layout": {
+    "no_trace_exception": "both report statuses NOT_RUN, executed_cases=0, and trace_sha256s empty",
+    "report": "report.json",
+    "trace_glob": "traces/*.json"
+  },
+  "schema_version": "formal-artifact-verification-policy/v1"
+}

@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Off-engine (no Unity) test harness for the engine-free Core of com.owcopilot.content-import.
+
+    It compiles ONLY the Core assembly's sources (noEngineReferences=true on the UPM side) plus the
+    UnityEngine-free NUnit tests, so the SAME test source that runs in Unity EditMode also runs under
+    a plain `dotnet test` on a machine with no editor. This project lives OUTSIDE the UPM package
+    (integrations/unity/offengine-tests/, not integrations/unity/com.owcopilot.content-import/) so it never touches the
+    package's gated shape (no stray obj/bin under the package, no extra .meta).
+
+    NOT RUN HERE: this repo has the .NET runtime but no .NET SDK, so `dotnet build`/`dotnet test`
+    cannot execute in this environment. The project is written and documented in the adjacent README,
+    never claimed compiled or passed. Run it where the .NET 8 SDK is installed:
+
+        dotnet test integrations/unity/offengine-tests/OWCopilot.ContentImport.OffEngine.Tests.csproj
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <AssemblyName>OWCopilot.ContentImport.OffEngine.Tests</AssemblyName>
+    <RootNamespace>OWCopilot.ContentImport.Tests</RootNamespace>
+    <!-- Only the files listed below compile; nothing is picked up implicitly. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The engine-free Core assembly (parse/resolve + the quest/dialogue runner). -->
+    <Compile Include="../com.owcopilot.content-import/Core/**/*.cs" />
+    <!-- The UnityEngine-free NUnit tests (the Editor/Runtime asmdefs are deliberately excluded). -->
+    <Compile Include="../com.owcopilot.content-import/Tests/Editor/ContentBundleCoreTests.cs" />
+    <Compile Include="../com.owcopilot.content-import/Tests/Editor/QuestRunnerCrossLangTests.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The golden fixtures, copied next to the tests so TestContext.TestDirectory/Fixtures resolves. -->
+    <None Include="../com.owcopilot.content-import/Tests/Editor/Fixtures/*.json">
+      <Link>Fixtures/%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- In Unity the same namespace is provided by com.unity.nuget.newtonsoft-json; off-engine we
+         pull the NuGet package (identical Newtonsoft.Json namespace). -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="NUnit" Version="3.14.0" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
+  </ItemGroup>
+
+</Project>

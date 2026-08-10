@@ -11,6 +11,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from ..collab import etag_for
 from ..content.hash import content_hash
 from ..content.relation_kinds import relation_kind_catalog
 from ..content.snapshot import bundle_diff, list_snapshots, load_snapshot, write_snapshot
@@ -136,8 +137,30 @@ def build_content_inventory(
             for d in bundle.dialogues.values()
         ]
         relations = [
-            {"source": rel.source, "kind": rel.kind, "target": rel.target}
+            {
+                "source": rel.source,
+                "kind": rel.kind,
+                "target": rel.target,
+                "valid_from": rel.valid_from,
+                "valid_until": rel.valid_until,
+                "metadata": rel.metadata,
+                "origin": rel.origin.value,
+                "review_status": rel.review_status.value,
+            }
             for rel in bundle.relations
+        ]
+        quest_event_refs = [
+            {
+                "id": event_ref.id,
+                "quest_id": event_ref.quest_id,
+                "event_id": event_ref.event_id,
+                "ref_kind": event_ref.ref_kind.value,
+                "note": event_ref.note,
+                "metadata": event_ref.metadata,
+                "origin": event_ref.origin.value,
+                "review_status": event_ref.review_status.value,
+            }
+            for event_ref in bundle.quest_event_refs.values()
         ]
         dialogue_trees = [
             {
@@ -154,8 +177,33 @@ def build_content_inventory(
             for tree in bundle.dialogue_trees.values()
         }
         style_guides = [
-            {"id": s.id, "body": s.body, "rules": list(s.rules)}
+            {
+                "id": s.id,
+                "body": s.body,
+                "rules": list(s.rules),
+                "origin": s.origin.value,
+                "review_status": s.review_status.value,
+            }
             for s in bundle.style_guides.values()
+        ]
+        style_rubrics = [
+            {
+                "id": rubric.id,
+                "label": rubric.label,
+                "abstract_tag": rubric.abstract_tag,
+                "version": rubric.version,
+                "frozen_at": rubric.frozen_at,
+                "author": rubric.author,
+                "elements": [
+                    element.model_dump(mode="json", exclude_none=True)
+                    for element in rubric.elements
+                ],
+                "element_count": len(rubric.elements),
+                "metadata": rubric.metadata,
+                "origin": rubric.origin.value,
+                "review_status": rubric.review_status.value,
+            }
+            for rubric in bundle.style_rubrics.values()
         ]
         return {
             "entities": entities,
@@ -167,7 +215,9 @@ def build_content_inventory(
             "dialogue_trees": dialogue_trees,
             "dialogue_tree_payloads": dialogue_tree_payloads,
             "relations": relations,
+            "quest_event_refs": quest_event_refs,
             "style_guides": style_guides,
+            "style_rubrics": style_rubrics,
             "localized_text_count": len(bundle.localized_texts),
             "graph_refs": sorted(project.graph.node_refs()),
             "cost_budget": _deterministic_cost_budget("content_inventory"),
@@ -327,7 +377,9 @@ def build_quest_view_model(
     """The full quest (objective/prereqs/stages not in the timeline payload) for the editor. $0."""
     with _project(content_root, sqlite_path) as project:
         quest = project.bundle.quests.get(quest_id)
-        return quest.model_dump(mode="json") if quest is not None else None
+        if quest is None:
+            return None
+        return {**quest.model_dump(mode="json"), "etag": etag_for(quest)}
 
 
 def build_dialogue_list_view_model(

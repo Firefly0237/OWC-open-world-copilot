@@ -1,0 +1,35 @@
+{
+  "name": "owcopilot-frontend",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "packageManager": "npm@11.6.2",
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "test": "node --test tests/*.test.mjs",
+    "test:bundle": "node tests/bundle-budget.mjs",
+    "test:browser": "node tests/browser-smoke.mjs",
+    "test:browser:real": "node tests/browser-real-backend.mjs",
+    "typecheck": "vue-tsc --noEmit",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "3d-force-graph": "^1.80.0",
+    "three": "^0.184.0",
+    "three-spritetext": "^1.10.0",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.0",
+    "puppeteer-core": "^25.3.0",
+    "typescript": "^5.7.2",
+    "vite": "^8.0.0",
+    "vue-tsc": "^2.2.0"
+  }
+}

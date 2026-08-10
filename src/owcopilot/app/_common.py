@@ -10,7 +10,7 @@ front-ends opening projects identically.
 from __future__ import annotations
 
 import contextvars
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,9 @@ from ..telemetry import deterministic_step, summarize_workflow
 PROJECT_NAMESPACE: contextvars.ContextVar[str] = contextvars.ContextVar(
     "owcopilot_project_namespace", default=""
 )
+PROJECT_TELEMETRY_SINK: contextvars.ContextVar[Callable[[list[Any]], None] | None] = (
+    contextvars.ContextVar("owcopilot_project_telemetry_sink", default=None)
+)
 
 
 @contextmanager
@@ -38,11 +41,13 @@ def open_project(content_root: str | Path, sqlite_path: str | None) -> Iterator[
     if str(runtime_path) != ":memory:":
         runtime_path.parent.mkdir(parents=True, exist_ok=True)
     project = ProjectContext.open(root, sqlite_path=runtime_path)
-    token = PROJECT_NAMESPACE.set(str(root))
+    namespace_token = PROJECT_NAMESPACE.set(str(root))
+    telemetry_token = PROJECT_TELEMETRY_SINK.set(project.sqlite_store.record_telemetry)
     try:
         yield project
     finally:
-        PROJECT_NAMESPACE.reset(token)
+        PROJECT_TELEMETRY_SINK.reset(telemetry_token)
+        PROJECT_NAMESPACE.reset(namespace_token)
         project.close()
 
 

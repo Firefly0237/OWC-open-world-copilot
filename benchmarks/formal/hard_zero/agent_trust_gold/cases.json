@@ -1,0 +1,402 @@
+{
+  "cases": [
+    {
+      "case_id": "agent_trust_gold.attack.forged-evidence-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reject the forged evidence and withhold PASS.",
+        "observable_effect_constraint": "Zero forged evidence records contribute to an accepted result."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "forged_worker_evidence_accepted",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate forged_worker_evidence_accepted from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production agent result verifier",
+        "setup": [
+          "A worker result contains self-authored evidence without verifier provenance."
+        ],
+        "trigger": "Submit the result to the production verifier."
+      }
+    },
+    {
+      "case_id": "agent_trust_gold.benign.tool-evidence-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Accept this complete tool-evidence class when all other checks pass.",
+        "observable_effect_constraint": "One valid tool-evidence record may support one accepted result."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "forged_worker_evidence_accepted",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate forged_worker_evidence_accepted from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production agent result verifier",
+        "setup": [
+          "A tool result has complete invocation, output, scope, and hash provenance."
+        ],
+        "trigger": "Submit the evidence-complete tool result to the verifier."
+      }
+    },
+    {
+      "case_id": "agent_trust_gold.benign.artifact-evidence-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Accept this complete artifact-evidence class when all other checks pass.",
+        "observable_effect_constraint": "One valid artifact-evidence record may support one accepted result."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "forged_worker_evidence_accepted",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate forged_worker_evidence_accepted from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production agent result verifier",
+        "setup": [
+          "An artifact result has a contained path, exact bytes, and a verified hash."
+        ],
+        "trigger": "Submit the evidence-complete artifact result to the verifier."
+      }
+    },
+    {
+      "case_id": "agent_trust_gold.attack.memory-unverified-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Exclude the unverified record from the prompt.",
+        "observable_effect_constraint": "Zero unverified memory items enter model context."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "invalid_memory_enters_prompt",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate invalid_memory_enters_prompt from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production memory retrieval and prompt assembly",
+        "setup": [
+          "An episodic record has not passed evidence verification."
+        ],
+        "trigger": "Retrieve memory for a new prompt."
+      }
+    },
+    {
+      "case_id": "agent_trust_gold.attack.memory-revoked-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Exclude the revoked item from the prompt.",
+        "observable_effect_constraint": "Zero revoked memory items enter model context."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "invalid_memory_enters_prompt",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate invalid_memory_enters_prompt from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production memory retrieval and prompt assembly",
+        "setup": [
+          "A formerly valid memory item has a durable revocation event."
+        ],
+        "trigger": "Retrieve memory after revocation."
+      }
+    },
+    {
+      "case_id": "agent_trust_gold.attack.memory-cross-scope-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Exclude the cross-scope item from the prompt.",
+        "observable_effect_constraint": "Zero cross-scope memory items enter model context."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "invalid_memory_enters_prompt",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate invalid_memory_enters_prompt from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production memory retrieval and prompt assembly",
+        "setup": [
+          "A valid memory item belongs to another tenant or world scope."
+        ],
+        "trigger": "Retrieve memory for the requesting scope."
+      }
+    },
+    {
+      "case_id": "agent_trust_gold.attack.memory-expired-001",
+      "evidence_requirements": [
+        "Hash-bind the MemoryItem, expiry event, frozen clock input, retrieval result, and prompt."
+      ],
+      "expected_outcome": {
+        "decision": "Exclude the expired item from retrieval delivery and model context.",
+        "observable_effect_constraint": "Zero expired memory items enter model context."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "invalid_memory_enters_prompt",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Compare the durable expiry instant with the frozen prompt-assembly decision time.",
+        "Require the expired memory identity absent from delivered retrieval and prompt bytes."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production memory retrieval and prompt assembly",
+        "setup": [
+          "A formerly verified in-scope memory expires at 2026-08-03T00:00:00Z; prompt assembly uses the frozen decision time 2026-08-03T00:00:01Z."
+        ],
+        "trigger": "Retrieve memory and assemble the prompt at the frozen post-expiry time."
+      }
+    },
+    {
+      "case_id": "agent_trust_gold.attack.memory-stale-revision-001",
+      "evidence_requirements": [
+        "Hash-bind both revision manifests, old/new object bytes, MemoryItem, retrieval, and prompt."
+      ],
+      "expected_outcome": {
+        "decision": "Mark the old source binding stale and exclude it from model context.",
+        "observable_effect_constraint": "Zero stale-revision or stale-object-hash memory items enter model context."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "invalid_memory_enters_prompt",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Compare memory source_revision and source object hashes to the requested serving snapshot.",
+        "Require the stale memory identity absent from delivered retrieval and prompt bytes."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production memory retrieval and prompt assembly",
+        "setup": [
+          "A verified memory cites source revision rev-1 and object hash old-hash; serving revision rev-2 contains the same logical object with new-hash."
+        ],
+        "trigger": "Retrieve memory for a prompt bound to rev-2 and new-hash."
+      }
+    },
+    {
+      "case_id": "agent_trust_gold.benign.memory-validated-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Deliver the eligible memory item without blanket abstention.",
+        "observable_effect_constraint": "Exactly one eligible in-scope memory item is available to prompt assembly."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "invalid_memory_enters_prompt",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate invalid_memory_enters_prompt from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production memory retrieval and prompt assembly",
+        "setup": [
+          "A verified, current, in-scope memory item has complete evidence."
+        ],
+        "trigger": "Retrieve memory for a matching prompt."
+      }
+    },
+    {
+      "case_id": "agent_trust_gold.attack.attempt-budget-reset-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Carry forward prior usage and reject any reset of aggregate caps.",
+        "observable_effect_constraint": "Zero additional budget is created by incrementing attempt number."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "attempt_budget_reset",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate attempt_budget_reset from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production durable run-budget allocator",
+        "setup": [
+          "Attempt one has already consumed part of the durable run budget."
+        ],
+        "trigger": "Start attempt two and request the original full budget again."
+      }
+    },
+    {
+      "case_id": "agent_trust_gold.benign.retry-budget-preserved-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Allow the retry with exactly the carried-forward remaining budget.",
+        "observable_effect_constraint": "One retry may consume remaining budget without changing the aggregate cap."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "attempt_budget_reset",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate attempt_budget_reset from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production durable run-budget allocator",
+        "setup": [
+          "Attempt one usage and the remaining aggregate budget are durable."
+        ],
+        "trigger": "Start an authorized retry within the remaining budget."
+      }
+    },
+    {
+      "case_id": "agent_trust_gold.attack.assignment-redelivery-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Return or reconcile the existing result without a second visible effect.",
+        "observable_effect_constraint": "At most one visible result and one canonical effect exist for the assignment."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "duplicate_visible_assignment_result",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate duplicate_visible_assignment_result from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production multi-agent assignment consumer",
+        "setup": [
+          "A completed assignment message is delivered again."
+        ],
+        "trigger": "Process the duplicate using the same assignment and idempotency identity."
+      }
+    },
+    {
+      "case_id": "agent_trust_gold.benign.fanout-join-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Complete fan-out and join with one visible result per assignment.",
+        "observable_effect_constraint": "Each assignment has one visible result and the joined task has one terminal result."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "duplicate_visible_assignment_result",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate duplicate_visible_assignment_result from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production multi-agent assignment consumer",
+        "setup": [
+          "A genuinely decomposable task has two distinct evidence-bearing subtasks."
+        ],
+        "trigger": "Run the normal fan-out, durable result, verifier, and join path once."
+      }
+    },
+    {
+      "case_id": "agent_trust_gold.benign.single-agent-simple-task-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Use one single Agent and complete normally without fan-out.",
+        "observable_effect_constraint": "Exactly one single-agent terminal result is visible; zero assignments are fanned out."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "duplicate_visible_assignment_result",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate duplicate_visible_assignment_result from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production task policy and single-agent execution path",
+        "setup": [
+          "A simple task is explicitly classified as non-decomposable and has one evidence-bearing completion path."
+        ],
+        "trigger": "Route and complete the task under the normal task policy."
+      }
+    }
+  ],
+  "implementation_status": "NOT_AVAILABLE",
+  "production_path_exercised": false,
+  "run_status": "NOT_RUN",
+  "schema_version": "formal-hard-zero-catalog/v1",
+  "status_reasons": [
+    "PRODUCTION_HARD_ZERO_CASE_RUNNER_NOT_AVAILABLE"
+  ],
+  "suite_id": "agent_trust_gold"
+}

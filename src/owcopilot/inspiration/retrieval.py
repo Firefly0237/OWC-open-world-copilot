@@ -10,6 +10,7 @@ budget — identical to the content-graph retriever, reusing its vector + fusion
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from ..llm.cache import Embedder
@@ -39,8 +40,25 @@ class ReferenceContextBuilder:
             else None
         )
 
-    def build(self, query: str, *, budget_tokens: int = 1000, limit: int = 8) -> ContextPack:
-        bm25 = [_ranking_hit(row) for row in self.store.search_reference_chunks(query, limit=limit)]
+    def build(
+        self,
+        query: str,
+        *,
+        budget_tokens: int = 1000,
+        limit: int = 8,
+        use: str | None = None,
+    ) -> ContextPack:
+        """Retrieve grounding chunks from the inspiration library.
+
+        ``use`` names what the caller intends to do with the material (see
+        :data:`~.models.REFERENCE_USES`); only sources whose ``allowed_uses`` permit it are
+        recalled. ``None`` means "browse the whole library" and is what the library UI passes —
+        every *generation* call site passes a concrete use, so the uploader's permission is what
+        decides whether a book can ground a draft."""
+        bm25 = [
+            _ranking_hit(row)
+            for row in self.store.search_reference_chunks(query, limit=limit, use=use)
+        ]
         result_lists = [bm25]
         if self.vector is not None:
             result_lists.append(self.vector.search(query, limit=limit))
@@ -52,18 +70,30 @@ class ReferenceContextBuilder:
             ranked = rerank_hits(query, fused, semantic_scores=semantic_scores)
         else:
             ranked = fused
+        # Rank by ref, then materialise display hits with correct source metadata regardless of
+        # which leg surfaced each ref (a semantic-only hit still gets its source title/index).
+        # Materialising the whole ranked pool before capping matters once `use` filters: the
+        # semantic leg does not know about allowed_uses, so a disallowed chunk it surfaced is
+        # dropped here — capping first would let it eat a slot and cost recall.
+        rows = self.store.reference_chunks_by_refs([hit.ref for hit in ranked], use=use)
         # Cap the final count by `limit`. Fusing a BM25 + vector leg (each up to `limit`) grows the
         # candidate pool on purpose — for better ranking — but the caller still asked for at most
         # `limit` hits, so honour that here rather than leaning on budget trimming alone.
-        ranked = ranked[:limit]
-        # Rank by ref, then materialise display hits with correct source metadata regardless of
-        # which leg surfaced each ref (a semantic-only hit still gets its source title/index).
-        rows = self.store.reference_chunks_by_refs([hit.ref for hit in ranked])
-        hits = [_display_hit(rows[hit.ref]) for hit in ranked if hit.ref in rows]
+        hits = [_display_hit(rows[hit.ref]) for hit in ranked if hit.ref in rows][:limit]
+        reasons: list[str] = []
+        if self.vector is not None and getattr(self.vector.embedder, "degraded", False):
+            reasons.append(
+                str(
+                    getattr(self.vector.embedder, "degradation_reason", None)
+                    or "embedder_degraded"
+                )
+            )
         return ContextPack(
             query=query,
             budget_tokens=budget_tokens,
             hits=trim_hits_to_budget(hits, budget_tokens=budget_tokens),
+            degraded=bool(reasons),
+            degradation_reasons=reasons,
         )
 
 
@@ -85,6 +115,16 @@ def _display_hit(row: sqlite3.Row) -> RetrievalHit:
     data = dict(row)
     source_title = str(data.get("source_title") or "")
     chunk_title = str(data.get("title") or "")
+    raw_chunk_metadata = data.get("metadata_json")
+    try:
+        parsed_chunk_metadata = json.loads(str(raw_chunk_metadata or "{}"))
+    except json.JSONDecodeError:
+        parsed_chunk_metadata = {}
+    chunk_metadata = (
+        {str(key): str(value) for key, value in parsed_chunk_metadata.items()}
+        if isinstance(parsed_chunk_metadata, dict)
+        else {}
+    )
     return RetrievalHit(
         ref=str(data["ref"]),
         object_type="reference_chunk",
@@ -93,9 +133,14 @@ def _display_hit(row: sqlite3.Row) -> RetrievalHit:
         score=0.0,
         source="reference",
         metadata={
+            **chunk_metadata,
             "source_id": str(data.get("source_id") or ""),
             "source_title": source_title,
             "chunk_index": str(data.get("chunk_index") or ""),
+            # 收录人声明的权利归属，跟着检索结果一路带到生成端——素材泄漏检测按它决定严格度
+            # （见 ``leakage.thresholds_for``）。取不到（外连接没配上源）时留空，检测端会按最
+            # 保守的一档处理。
+            "provenance": str(data.get("source_provenance") or ""),
         },
     )
 

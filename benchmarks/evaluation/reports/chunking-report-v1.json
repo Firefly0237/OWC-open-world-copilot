@@ -1,0 +1,96 @@
+{
+  "status": "passed",
+  "dataset_id": "owcopilot-chunking-benchmark-cases-v1",
+  "dataset_sha256": "e866dcb70b8e982140af3daa20060cab2d44735a53039c516622c1553ac624d4",
+  "executed_at": "2026-08-09T01:22:17.517946+00:00",
+  "split": {
+    "dev_documents": 3,
+    "held_out_documents": 3
+  },
+  "embedding_requested": "BAAI/bge-m3",
+  "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+  "embedding_effective": "st:BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+  "token_counter": "hf:BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+  "dev_selection": {
+    "threshold_grid": [
+      0.35,
+      0.5,
+      0.65,
+      0.8
+    ],
+    "selected_threshold": 0.5,
+    "primary_metric": "boundary_balanced_accuracy",
+    "held_out_not_used_for_selection": true
+  },
+  "held_out": {
+    "structure": {
+      "boundary_balanced_accuracy": 0.75,
+      "must_link_preservation": 0.8333333333333334,
+      "must_separate_accuracy": 0.6666666666666666,
+      "avg_chunks_per_document": 2.0,
+      "avg_tokens_per_chunk": 31.5,
+      "mean_latency_ms_per_document": 0.9521666797809303,
+      "per_document": [
+        {
+          "id": "c04",
+          "chunks": 2,
+          "must_link_pass": 1,
+          "must_link_total": 2,
+          "must_separate_pass": 0,
+          "must_separate_total": 1
+        },
+        {
+          "id": "c05",
+          "chunks": 2,
+          "must_link_pass": 2,
+          "must_link_total": 2,
+          "must_separate_pass": 1,
+          "must_separate_total": 1
+        },
+        {
+          "id": "c06",
+          "chunks": 2,
+          "must_link_pass": 2,
+          "must_link_total": 2,
+          "must_separate_pass": 1,
+          "must_separate_total": 1
+        }
+      ]
+    },
+    "semantic": {
+      "boundary_balanced_accuracy": 0.75,
+      "must_link_preservation": 0.8333333333333334,
+      "must_separate_accuracy": 0.6666666666666666,
+      "avg_chunks_per_document": 2.0,
+      "avg_tokens_per_chunk": 31.5,
+      "mean_latency_ms_per_document": 302.70763331403333,
+      "per_document": [
+        {
+          "id": "c04",
+          "chunks": 2,
+          "must_link_pass": 1,
+          "must_link_total": 2,
+          "must_separate_pass": 0,
+          "must_separate_total": 1
+        },
+        {
+          "id": "c05",
+          "chunks": 2,
+          "must_link_pass": 2,
+          "must_link_total": 2,
+          "must_separate_pass": 1,
+          "must_separate_total": 1
+        },
+        {
+          "id": "c06",
+          "chunks": 2,
+          "must_link_pass": 2,
+          "must_link_total": 2,
+          "must_separate_pass": 1,
+          "must_separate_total": 1
+        }
+      ]
+    }
+  },
+  "methodology": "Frozen boundary-regression dataset comparing structure and semantic strategies."
+}

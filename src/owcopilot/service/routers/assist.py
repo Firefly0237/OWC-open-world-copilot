@@ -11,19 +11,19 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from ...app.actions import (
     detect_contradictions_action,
     dismiss_sweep_finding_action,
+    run_draft_action,
     run_theme_sweep_action,
 )
 from ...assist.barks import BarkBatchService
-from ...assist.critic import BarkCritic, DialogueCritic, FlavorCritic, QuestCritic
+from ...assist.critic import BarkCritic, DialogueCritic, FlavorCritic
 from ...assist.dialogue_trees import DialogueTreeService, OfflineDialogueTreeProvider
-from ...assist.drafts import QuestDraftService
 from ...assist.flavor import FlavorBatchService, OfflineFlavorProvider
-from ...assist.offline import OfflineBarksProvider, OfflineQuestDraftProvider
+from ...assist.offline import OfflineBarksProvider
 from ...assist.review_queue import ReviewQueue
 from ...audit.baseline import issue_fingerprint
 from ...audit.context import AuditContext
@@ -34,9 +34,12 @@ from ...extraction import (
     apply_gap_answers,
     quests_from_beats,
 )
+from ...inspiration.models import ensure_canon_intake_allowed
 from ...telemetry import llm_step, summarize_workflow
-from ..api import _require_real_allowed, _task_gateway
+from ..api import _require_offline_allowed, _require_real_allowed, _task_gateway
 from ..dependencies import _project_root_or_404, _registered_project
+from ..intake_tokens import IntakeTokenError
+from ..profile import require_local_synchronous_extraction
 from ..schemas import (
     ContradictionScanRequest,
     ProjectBarksRequest,
@@ -67,47 +70,21 @@ def draft_project_quest(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> ProjectDraftResponse:
     request_id = str(uuid.uuid4())
-    project_context = _registered_project(project)
-    try:
-        gateway, telemetry = _task_gateway(
-            req,
-            request=request,
-            task="quest_draft",
-            offline_provider=OfflineQuestDraftProvider(),
-            namespace=project,
-        )
-        assert gateway is not None
-        critic = QuestCritic(gateway=gateway) if req.refine_rounds > 0 else None
-        result = QuestDraftService(
-            gateway=gateway,
-            context_builder=project_context.context_builder,
-            audit_runner=project_context.audit_runner,
-            bundle=project_context.bundle,
-            critic=critic,
-            max_refine_rounds=req.refine_rounds,
-        ).draft_quest(req.brief, budget_tokens=req.budget_tokens)
-        queue = ReviewQueue(project_context.sqlite_store)
-        item = queue.add_quest_draft(
-            result.quest.model_dump(mode="json", exclude_none=True),
-            issue_refs=[issue_fingerprint(issue) for issue in result.issues],
-        )
-        telemetry_summary = telemetry.summary()
-        return ProjectDraftResponse(
-            request_id=request_id,
-            project=project,
-            quest=result.quest.model_dump(mode="json", exclude_none=True),
-            issues=[issue.model_dump(mode="json") for issue in result.issues],
-            refine_trail=[r.model_dump(mode="json") for r in result.refine_trail],
-            auto_review_incomplete=result.auto_review_incomplete,
-            review_item_id=item.id,
-            telemetry=telemetry_summary,
-            cost_budget=summarize_workflow(
-                [llm_step("quest_draft", telemetry_summary)],
-                budget_usd=req.max_cost_usd,
-            ).budget.model_dump(mode="json"),
-        )
-    finally:
-        project_context.close()
+    if req.llm_mode == "real":
+        _require_real_allowed(request)
+    else:
+        _require_offline_allowed()
+    result = run_draft_action(
+        _project_root_or_404(project),
+        brief=req.brief,
+        budget_tokens=req.budget_tokens,
+        llm_mode=req.llm_mode,
+        llm_model=req.llm_model or "deepseek-v4-flash",
+        refine_rounds=req.refine_rounds,
+        max_cost_usd=req.max_cost_usd,
+        use_references=req.use_references,
+    )
+    return ProjectDraftResponse(request_id=request_id, project=project, **result)
 
 
 @router.post("/projects/{project}/assist/barks:batch", response_model=ProjectBarksResponse)
@@ -143,12 +120,14 @@ def batch_project_barks(
             review_queue=ReviewQueue(project_context.sqlite_store),
             critic=BarkCritic(gateway=gateway) if req.refine_rounds > 0 else None,
             max_refine_rounds=req.refine_rounds,
+            reference_context_builder=project_context.reference_context_builder,
         ).generate(
             speaker_ids=req.speaker_ids,
             topic=req.topic,
             variants_per_speaker=req.variants_per_speaker,
             max_chars=req.max_chars,
             allowed_entity_ids=allowed,
+            use_references=req.use_references,
         )
         telemetry_summary = telemetry.summary()
         return ProjectBarksResponse(
@@ -166,6 +145,8 @@ def batch_project_barks(
                 }
                 for rejected in result.rejected
             ],
+            inspiration_refs=result.inspiration_refs,
+            reference_report=[row.model_dump(mode="json") for row in result.reference_report],
             review_item_ids=[item.id for item in result.review_items],
             telemetry=telemetry_summary,
             cost_budget=summarize_workflow(
@@ -177,7 +158,11 @@ def batch_project_barks(
         project_context.close()
 
 
-@router.post("/projects/{project}/extractions:run", response_model=ProjectExtractionRunResponse)
+@router.post(
+    "/projects/{project}/extractions:run",
+    response_model=ProjectExtractionRunResponse,
+    dependencies=[Depends(require_local_synchronous_extraction)],
+)
 def run_project_extraction(
     project: str,
     req: ProjectExtractionRunRequest,
@@ -185,6 +170,12 @@ def run_project_extraction(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> ProjectExtractionRunResponse:
     request_id = str(uuid.uuid4())
+    # Rights gate before anything is opened or spent: this endpoint writes canon drafts, so
+    # third-party material is refused here and pointed at the inspiration library.
+    try:
+        ensure_canon_intake_allowed(req.provenance)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     project_context = _registered_project(project)
     try:
         gateway, telemetry = _task_gateway(
@@ -204,10 +195,16 @@ def run_project_extraction(
             verify_faithfulness=req.verify_faithfulness and req.llm_mode == "real",
         )
         telemetry_summary = telemetry.summary()
+        draft_payload = draft.model_dump(mode="json", exclude_none=True)
         return ProjectExtractionRunResponse(
             request_id=request_id,
             project=project,
-            draft=draft.model_dump(mode="json", exclude_none=True),
+            draft=draft_payload,
+            intake_token=request.app.state.intake_tokens.issue(
+                project=project,
+                draft=draft_payload,
+                provenance=req.provenance,
+            ),
             stats=draft.stats,
             telemetry=telemetry_summary,
             cost_budget=summarize_workflow(
@@ -222,6 +219,7 @@ def run_project_extraction(
 @router.post(
     "/projects/{project}/extractions:submit",
     response_model=ProjectExtractionSubmitResponse,
+    dependencies=[Depends(require_local_synchronous_extraction)],
 )
 def submit_project_extraction(
     project: str,
@@ -230,6 +228,14 @@ def submit_project_extraction(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> ProjectExtractionSubmitResponse:
     request_id = str(uuid.uuid4())
+    try:
+        request.app.state.intake_tokens.verify(
+            req.intake_token,
+            project=project,
+            draft=req.draft,
+        )
+    except IntakeTokenError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     try:
         parsed = ExtractionDraft.model_validate(req.draft)
     except Exception as e:
@@ -298,12 +304,14 @@ def draft_project_dialogue_tree(
             review_queue=ReviewQueue(project_context.sqlite_store),
             critic=critic,
             max_refine_rounds=req.refine_rounds,
+            reference_context_builder=project_context.reference_context_builder,
         ).generate(
             participant_ids=req.participant_ids,
             brief=req.brief,
             quest_id=req.quest_id,
             max_nodes=req.max_nodes,
             max_chars=req.max_chars,
+            use_references=req.use_references,
         )
         telemetry_summary = telemetry.summary()
         return ProjectDialogueTreeResponse(
@@ -314,6 +322,8 @@ def draft_project_dialogue_tree(
             structure_problems=result.structure_problems,
             refine_trail=[r.model_dump(mode="json") for r in result.refine_trail],
             auto_review_incomplete=result.auto_review_incomplete,
+            inspiration_refs=result.inspiration_refs,
+            reference_report=[row.model_dump(mode="json") for row in result.reference_report],
             review_item_id=result.review_item.id if result.review_item else None,
             telemetry=telemetry_summary,
             cost_budget=summarize_workflow(
@@ -349,11 +359,13 @@ def batch_project_flavor(
             review_queue=ReviewQueue(project_context.sqlite_store),
             critic=FlavorCritic(gateway=gateway) if req.refine_rounds > 0 else None,
             max_refine_rounds=req.refine_rounds,
+            reference_context_builder=project_context.reference_context_builder,
         ).generate(
             category=req.category,
             names=req.names,
             theme=req.theme,
             max_chars=req.max_chars,
+            use_references=req.use_references,
         )
         telemetry_summary = telemetry.summary()
         return ProjectFlavorResponse(
@@ -365,6 +377,8 @@ def batch_project_flavor(
                 {"name": r.name, "text": r.text, "issues": [i.code for i in r.issues]}
                 for r in result.rejected
             ],
+            inspiration_refs=result.inspiration_refs,
+            reference_report=[row.model_dump(mode="json") for row in result.reference_report],
             review_item_id=result.review_item.id if result.review_item else None,
             telemetry=telemetry_summary,
             cost_budget=summarize_workflow(
@@ -419,6 +433,7 @@ def run_theme_sweep(
         llm_mode=req.llm_mode,
         llm_model=req.llm_model,
         max_judge=req.max_judge,
+        semantic_threshold=req.semantic_threshold,
     )
     return ProjectSweepResponse(
         project=project, **{k: v for k, v in result.items() if k != "terms"}

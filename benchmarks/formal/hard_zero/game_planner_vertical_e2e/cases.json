@@ -1,0 +1,296 @@
+{
+  "cases": [
+    {
+      "case_id": "game_planner_vertical_e2e.attack.third-party-promotion-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reject or preserve licensed provenance; never promote it to own/human/approved.",
+        "observable_effect_constraint": "Zero third-party records gain own, human, or approved provenance."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "third_party_provenance_promotion",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate third_party_provenance_promotion from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production intake-to-draft provenance boundary",
+        "setup": [
+          "Intake bytes carry signed licensed third-party provenance."
+        ],
+        "trigger": "Submit a client payload that attempts to label the material own and approved."
+      }
+    },
+    {
+      "case_id": "game_planner_vertical_e2e.benign.human-own-intake-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Accept the valid same-draft own_ip provenance without false rejection.",
+        "observable_effect_constraint": "Exactly one intended own_ip draft is admitted and no provenance is rewritten."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "third_party_provenance_promotion",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate third_party_provenance_promotion from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production intake-to-draft provenance boundary",
+        "setup": [
+          "Intake bytes carry a valid server-signed own_ip provenance token."
+        ],
+        "trigger": "Submit the unchanged token and draft through the normal intake path."
+      }
+    },
+    {
+      "case_id": "game_planner_vertical_e2e.attack.reference-as-canon-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Do not use reference-only evidence to assert a canonical fact.",
+        "observable_effect_constraint": "Zero canonical claims cite the reference-only source as canonical authority."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "reference_used_as_canonical_fact",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate reference_used_as_canonical_fact from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production grounded QA evidence resolver",
+        "setup": [
+          "A reference-only source contradicts the current canonical world fact."
+        ],
+        "trigger": "Ask QA to answer using the reference as if it were canonical evidence."
+      }
+    },
+    {
+      "case_id": "game_planner_vertical_e2e.benign.canonical-answer-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Answer with a citation to the canonical object.",
+        "observable_effect_constraint": "Exactly one answer is returned with an in-scope canonical citation."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "reference_used_as_canonical_fact",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate reference_used_as_canonical_fact from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production grounded QA evidence resolver",
+        "setup": [
+          "A published canonical object contains a directly answerable fact."
+        ],
+        "trigger": "Ask the matching answerable question in the same tenant and revision."
+      }
+    },
+    {
+      "case_id": "game_planner_vertical_e2e.attack.unapproved-serving-001",
+      "evidence_requirements": [
+        "Hash-bind the ChangeSet, missing/invalid approval lookup, and rejection response.",
+        "Capture canonical revision rows and both release pointers before and after."
+      ],
+      "expected_outcome": {
+        "decision": "Reject before the ChangeSet creates a visible canonical revision or advances authoring_head; serving_head must also remain unchanged.",
+        "observable_effect_constraint": "Zero canonical revisions are created for the ChangeSet; authoring_head advances zero times; serving_head advances zero times."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "unapproved_release_visibility",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Verify the approval binding is absent or invalid for the exact ChangeSet.",
+        "Count visible canonical revisions carrying the ChangeSet identity and require zero.",
+        "Compare authoring_head before/after and require byte-identical pointer identity.",
+        "Compare serving_head before/after and require byte-identical pointer identity."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production review-publish-serving path",
+        "setup": [
+          "A ChangeSet exists without a current approval bound to its exact bytes, base, scope, operator, and parameters."
+        ],
+        "trigger": "Attempt the canonical accept transaction, then inspect canonical revisions, authoring_head, and serving_head."
+      }
+    },
+    {
+      "case_id": "game_planner_vertical_e2e.benign.approved-serving-001",
+      "evidence_requirements": [
+        "Hash-bind the approval, ChangeSet, canonical revision, and projection readiness.",
+        "Capture both pointer histories and the transaction/outbox identities."
+      ],
+      "expected_outcome": {
+        "decision": "Create exactly one canonical revision and advance authoring_head exactly once; after required projections are READY, advance serving_head exactly once.",
+        "observable_effect_constraint": "Exactly one canonical revision is created for the ChangeSet; authoring_head advances once; serving_head advances once and only after required readiness."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "unapproved_release_visibility",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Verify the approval digest and immutable ChangeSet identity match exactly.",
+        "Count canonical revisions for the ChangeSet and require exactly one.",
+        "Require exactly one authoring_head CAS from the approved base to that revision.",
+        "Require every required projection READY before exactly one serving_head CAS."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production review-publish-serving path",
+        "setup": [
+          "A ChangeSet has a current approval bound to its exact bytes, base, scope, operator, and unchanged parameters."
+        ],
+        "trigger": "Accept the ChangeSet once, complete every required projection, and advance the serving pointer through the normal readiness gate."
+      }
+    },
+    {
+      "case_id": "game_planner_vertical_e2e.attack.leakage-not-checked-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Reject acceptance until leakage is checked.",
+        "observable_effect_constraint": "Zero not_checked drafts enter the accepted state."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "unchecked_leakage_acceptance",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate unchecked_leakage_acceptance from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production draft acceptance policy",
+        "setup": [
+          "A generated draft has leakage state not_checked."
+        ],
+        "trigger": "Attempt to accept the draft."
+      }
+    },
+    {
+      "case_id": "game_planner_vertical_e2e.benign.leakage-checked-clean-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Accept the clean checked draft without false rejection.",
+        "observable_effect_constraint": "Exactly one eligible checked-clean draft enters accepted state."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "unchecked_leakage_acceptance",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate unchecked_leakage_acceptance from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production draft acceptance policy",
+        "setup": [
+          "A generated draft has a completed clean leakage result."
+        ],
+        "trigger": "Accept the otherwise valid draft."
+      }
+    },
+    {
+      "case_id": "game_planner_vertical_e2e.attack.projection-not-ready-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Keep serving the old revision until every required projection is READY.",
+        "observable_effect_constraint": "Zero serving-pointer advances occur while a required projection is not READY."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "serving_before_projection_ready",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate serving_before_projection_ready from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "attack",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production projection readiness and serving-pointer gate",
+        "setup": [
+          "A new authoring revision exists while a required projection is not READY."
+        ],
+        "trigger": "Attempt to advance and query the serving pointer."
+      }
+    },
+    {
+      "case_id": "game_planner_vertical_e2e.benign.projection-ready-001",
+      "evidence_requirements": [
+        "Hash-bind the exact stimulus, production response, and final durable-state snapshot.",
+        "Record the exact case_id, gate_id, production entrypoint, and oracle decision."
+      ],
+      "expected_outcome": {
+        "decision": "Advance to the fully projected revision without false rejection.",
+        "observable_effect_constraint": "Exactly one serving-pointer advance exposes one internally consistent revision."
+      },
+      "fault_manifest_cell_id": null,
+      "gate_id": "serving_before_projection_ready",
+      "implementation_status": "NOT_AVAILABLE",
+      "oracle_requirements": [
+        "Recompute gate serving_before_projection_ready from the final durable state and returned response.",
+        "The oracle must evaluate the named attack or benign case, not infer from absence of logs."
+      ],
+      "production_path_exercised": false,
+      "role": "matched_benign",
+      "run_status": "NOT_RUN",
+      "stimulus": {
+        "production_entrypoint": "production projection readiness and serving-pointer gate",
+        "setup": [
+          "All required projections for an approved authoring revision are READY."
+        ],
+        "trigger": "Advance the serving pointer through the normal readiness gate."
+      }
+    }
+  ],
+  "implementation_status": "NOT_AVAILABLE",
+  "production_path_exercised": false,
+  "run_status": "NOT_RUN",
+  "schema_version": "formal-hard-zero-catalog/v1",
+  "status_reasons": [
+    "PRODUCTION_HARD_ZERO_CASE_RUNNER_NOT_AVAILABLE"
+  ],
+  "suite_id": "game_planner_vertical_e2e"
+}

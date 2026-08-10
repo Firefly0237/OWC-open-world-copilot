@@ -12,9 +12,11 @@ English multi-token words (e.g. "Ironwall" → ["Iron", "wall"] = 2 tokens) are 
 can lead to silent budget overruns on large worlds.
 
 **Fallback chain (in order)**:
-1. ``transformers.AutoTokenizer.from_pretrained("BAAI/bge-m3")`` -- accurate, same
-   tokenizer the embedding model uses.  Lazy-loaded and cached per process.  Fast:
-   ``encode()`` runs in microseconds (no neural inference, no GPU).
+1. Resolve ``BAAI/bge-m3`` to its provisioned Hugging Face snapshot with
+   ``snapshot_download(..., local_files_only=True)``, then load that local directory with
+   ``transformers.AutoTokenizer``.  This is accurate, uses the embedding model's tokenizer,
+   and is cached per process.  ``encode()`` runs in microseconds (no neural inference, no GPU,
+   and no implicit network request).
 2. ``len(text) // 3`` heuristic -- for mixed CJK+Latin text ~3 chars/token is a better
    approximation than the old regex.  Only used when transformers is unavailable.
    A WARNING is emitted the first time this fallback activates so the degradation is
@@ -28,6 +30,7 @@ import warnings
 from functools import lru_cache
 from typing import Any
 
+from ..model_artifacts import model_artifact
 from .models import RetrievalHit
 
 logger = logging.getLogger(__name__)
@@ -45,9 +48,20 @@ def _load_tokenizer() -> Any | None:
     offline).  The result is cached for the lifetime of the process.
     """
     try:
+        from huggingface_hub import snapshot_download  # noqa: PLC0415
         from transformers import AutoTokenizer  # noqa: PLC0415
 
-        tok = AutoTokenizer.from_pretrained("BAAI/bge-m3")
+        # Passing a Hub model id directly can still trigger metadata lookup in some Transformers
+        # versions even with local_files_only=True. Resolve the cached snapshot first, then give
+        # AutoTokenizer a real directory so runtime accounting cannot touch the network.
+        artifact = model_artifact("embedding")
+        snapshot_path = snapshot_download(
+            repo_id=artifact.repo_id,
+            revision=artifact.revision,
+            local_files_only=True,
+            max_workers=1,
+        )
+        tok = AutoTokenizer.from_pretrained(snapshot_path, local_files_only=True)
         return tok
     except Exception as exc:  # noqa: BLE001
         logger.debug("bge-m3 tokenizer unavailable (%s); will use heuristic fallback.", exc)
@@ -80,7 +94,8 @@ def estimate_tokens(text: str) -> int:
         warnings.warn(
             "owcopilot.retrieval.budget: bge-m3 tokenizer not available; "
             "falling back to len(text)//3 heuristic for token estimation. "
-            "Install transformers and cache BAAI/bge-m3 for accurate budget trimming.",
+            "Install the tokenizer extra (`pip install -e .[tokenizer]`) and cache BAAI/bge-m3 "
+            "for accurate budget trimming.",
             stacklevel=2,
         )
         _FALLBACK_WARNED = True

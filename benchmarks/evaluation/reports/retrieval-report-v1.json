@@ -1,0 +1,101 @@
+{
+  "status": "passed",
+  "dataset_id": "owcopilot-retrieval-benchmark-qrels-v1",
+  "dataset_sha256": "f66466ff648f4f269607f22a9acfedc59ce896e6297b8cf1b1bc5ce40bea6f7a",
+  "executed_at": "2026-08-09T01:20:33.561137+00:00",
+  "split": {
+    "dev_queries": 12,
+    "held_out_queries": 12
+  },
+  "model": {
+    "embedding_requested": "BAAI/bge-m3",
+    "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "embedding_effective": "st:BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+    "embedding_dimension": 1024,
+    "reranker_requested": "BAAI/bge-reranker-v2-m3",
+    "reranker_revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+    "reranker_effective": "real_cross_encoder"
+  },
+  "dev_selection": {
+    "search_space_size": 30,
+    "primary_metric": "mrr",
+    "selected": {
+      "candidate_limit": 5,
+      "rrf_k": 20,
+      "weights": [
+        0.5,
+        0.5
+      ],
+      "dev_metrics": {
+        "mrr": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "recall_at_5": 1.0
+      }
+    },
+    "held_out_not_used_for_selection": true
+  },
+  "held_out_metrics": {
+    "bm25": {
+      "mrr": 0.0,
+      "ndcg_at_5": 0.0,
+      "recall_at_1": 0.0,
+      "recall_at_3": 0.0,
+      "recall_at_5": 0.0
+    },
+    "dense_bge_m3": {
+      "mrr": 0.9583333333333334,
+      "ndcg_at_5": 0.9692441461309548,
+      "recall_at_1": 0.9166666666666666,
+      "recall_at_3": 1.0,
+      "recall_at_5": 1.0
+    },
+    "rrf_equal": {
+      "mrr": 0.9583333333333334,
+      "ndcg_at_5": 0.9692441461309548,
+      "recall_at_1": 0.9166666666666666,
+      "recall_at_3": 1.0,
+      "recall_at_5": 1.0
+    },
+    "rrf_weighted_dev_selected": {
+      "mrr": 0.9583333333333334,
+      "ndcg_at_5": 0.9692441461309548,
+      "recall_at_1": 0.9166666666666666,
+      "recall_at_3": 1.0,
+      "recall_at_5": 1.0
+    },
+    "hybrid_lexical_semantic_rescore": {
+      "mrr": 0.9583333333333334,
+      "ndcg_at_5": 0.9692441461309548,
+      "recall_at_1": 0.9166666666666666,
+      "recall_at_3": 1.0,
+      "recall_at_5": 1.0
+    },
+    "hybrid_bge_reranker_v2_m3": {
+      "mrr": 1.0,
+      "ndcg_at_5": 1.0,
+      "recall_at_1": 1.0,
+      "recall_at_3": 1.0,
+      "recall_at_5": 1.0
+    }
+  },
+  "latency": {
+    "bm25_query": {
+      "p50_ms": 0.654,
+      "p95_ms": 1.159,
+      "mean_ms": 0.702
+    },
+    "dense_query": {
+      "p50_ms": 158.647,
+      "p95_ms": 191.725,
+      "mean_ms": 160.734
+    },
+    "neural_rerank_query": {
+      "p50_ms": 732.209,
+      "p95_ms": 2055.117,
+      "mean_ms": 841.412
+    }
+  },
+  "methodology": "Frozen synthetic regression dataset; configuration is dev-selected and reported on held-out queries."
+}

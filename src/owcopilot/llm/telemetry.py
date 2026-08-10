@@ -17,6 +17,7 @@ page is authoritative — do not hard-code long-term prices.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 # tier -> (cache_hit_input, cache_miss_input, output)  USD per 1M tokens. ILLUSTRATIVE DEFAULTS.
@@ -83,6 +84,14 @@ class CallRecord:
     # when it is non-empty, so an offline fake (which can't report it) leaves response.model unset
     # rather than echoing a request-side guess.
     response_model: str = ""
+    # Retry accounting deliberately separates our gateway loop from the provider/SDK transport
+    # budget. ``transport_attempt_cap`` is an upper bound (SDKs do not expose the actual count),
+    # never mislabeled as observed HTTP attempts.
+    gateway_invocations: int = 0
+    transport_attempt_cap: int = 0
+    success: bool = True
+    # Deliberately category-only: never persist exception prose, prompts, credentials or headers.
+    error_category: str = ""
 
     @property
     def cost_usd(self) -> float:
@@ -95,9 +104,20 @@ class CallRecord:
 @dataclass
 class TelemetryCollector:
     records: list[CallRecord] = field(default_factory=list)
+    # Optional immediate sink (the app binds SQLite while a project is open). Per-record flushing
+    # means an exception after the model call cannot bypass persistence at a success-only epilogue.
+    # Best-effort by design: observability storage must never break the model workflow itself.
+    record_sink: Callable[[list[CallRecord]], None] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def record(self, rec: CallRecord) -> None:
         self.records.append(rec)
+        if self.record_sink is not None:
+            try:
+                self.record_sink([rec])
+            except Exception:
+                pass
 
     def records_since(self, snapshot_idx: int) -> list[CallRecord]:
         """Return records appended after position snapshot_idx.
@@ -170,9 +190,12 @@ class TelemetryCollector:
                 return True
         return False
 
-    def summary(self) -> dict:
+    def summary(self) -> dict[str, int | float | bool]:
         return {
             "calls": len(self.records),
+            "failed_calls": sum(not r.success for r in self.records),
+            "gateway_invocations": sum(r.gateway_invocations for r in self.records),
+            "transport_attempt_cap": sum(r.transport_attempt_cap for r in self.records),
             "input_tokens": self.total_input_tokens,
             "output_tokens": self.total_output_tokens,
             "cache_hit_rate": round(self.cache_hit_rate, 3),

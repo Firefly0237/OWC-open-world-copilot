@@ -40,9 +40,11 @@ Parallel stage dispatch (Anthropic, *How we built our multi-agent research syste
 
     The blackboard is retained as the append-only audit + business channel. Its optimistic claim
     primitive changes ROLE here: a ``Send`` routes each ``assign_id`` directly, so the worker node
-    claims that SPECIFIC id via :meth:`AgentBlackboard.claim_assignment` — an exactly-once
-    IDEMPOTENT GATE (a re-dispatched / recovered Send for an already-run id is refused), not a
-    mailbox-drain arbiter. Each claimed task is executed by a FRESH ``WorkerAgent`` (its own
+    claims that SPECIFIC id via :meth:`AgentBlackboard.claim_assignment` — a single-claim
+    idempotency gate (a duplicate in-process Send for an already-run id is refused), not a
+    mailbox-drain arbiter. This prevents duplicate execution after a successful claim; it does not
+    provide at-least-once delivery or safe cross-process replay after a crash. Each claimed task is
+    executed by a FRESH ``WorkerAgent`` (its own
     ReActAgent = its own "context window"), so concurrent branches never clobber a shared
     transcript, and the crash guard lives INSIDE the worker node (an unhandled exception there would
     otherwise abort the whole supervisor ``invoke``). A single-Send wave (the default
@@ -63,12 +65,13 @@ import logging
 import operator
 import sqlite3
 import uuid
-from typing import TYPE_CHECKING, Annotated, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
+from ..agent.middleware import SettledCostBudget, TotalModelCallBudget, TotalToolCallBudget
 from ..agent.reflexion import ReflexionError, distill_reflection
 from ..llm.telemetry import TelemetryCollector
 from ..skills import SkillRegistry
@@ -94,6 +97,12 @@ from .verifier import VerifierAgent
 from .workers import DiagWorker, RepairWorker, WorkerAgent
 
 logger = logging.getLogger(__name__)
+
+# Hard aggregate default across decomposition, every worker/verifier ReAct path, context
+# compression and Reflexion. Per-agent limits still shape individual work; this prevents fan-out
+# from multiplying model dispatches without a session ceiling.
+DEFAULT_SESSION_MAX_MODEL_CALLS = 128
+DEFAULT_SESSION_MAX_TOOL_CALLS = 256
 
 
 class _OrchestrationState(TypedDict):
@@ -168,6 +177,17 @@ class MultiAgentSession:
         embedder: Embedder | None = None,
         # Per-call accounting for the worker/verifier chat-model calls (one shared collector).
         telemetry: TelemetryCollector | None = None,
+        # Independent tool-call cap applied to EACH worker/verifier ReAct loop.
+        per_agent_max_tool_calls: int | None = None,
+        # Backward-compatible alias. New callers should use ``per_agent_max_tool_calls`` so the
+        # scope cannot be mistaken for a session-wide budget.
+        max_tool_calls: int | None = None,
+        # One hard model-dispatch ledger shared by decomposition, all parallel workers, verifier
+        # and Reflexion. The cost gate uses settled telemetry: in-flight calls may cross the
+        # threshold, but every later dispatch is blocked.
+        session_max_model_calls: int | None = DEFAULT_SESSION_MAX_MODEL_CALLS,
+        session_max_tool_calls: int | None = DEFAULT_SESSION_MAX_TOOL_CALLS,
+        session_max_cost_usd: float | None = None,
         # T4 (scheme Y): a LangGraph checkpointer compiled onto the supervisor graph. Default None
         # ⇒ NO checkpointer, the report is byte-identical to the pre-T4 run. When attached it serves
         # IN-PROCESS resume — a clean interrupt suspend/continue (the T6 HITL substrate). Cross-
@@ -176,7 +196,7 @@ class MultiAgentSession:
         # between a claim commit and its result post can drop a task on cross-process replay (see
         # the design's §3.2). In-process suspend stops cleanly at a node boundary with the pending
         # write stored and the blackboard connection still live, so no such window opens.
-        checkpointer: BaseCheckpointSaver | None = None,
+        checkpointer: BaseCheckpointSaver[Any] | None = None,
     ) -> None:
         self._orchestrator_model = orchestrator_model
         self._model = model
@@ -184,7 +204,41 @@ class MultiAgentSession:
         self._max_workers = max_workers
         self._store = store
         self._embedder = embedder
-        self._telemetry = telemetry
+        if session_max_model_calls is not None and session_max_model_calls < 1:
+            raise ValueError("session_max_model_calls must be >= 1")
+        if session_max_tool_calls is not None and session_max_tool_calls < 1:
+            raise ValueError("session_max_tool_calls must be >= 1")
+        if session_max_cost_usd is not None and session_max_cost_usd < 0:
+            raise ValueError("session_max_cost_usd must be >= 0")
+        self._telemetry = telemetry or (
+            TelemetryCollector() if session_max_cost_usd is not None else None
+        )
+        self._session_model_budget = (
+            TotalModelCallBudget(session_max_model_calls)
+            if session_max_model_calls is not None
+            else None
+        )
+        self._session_tool_budget = (
+            TotalToolCallBudget(session_max_tool_calls)
+            if session_max_tool_calls is not None
+            else None
+        )
+        self._session_cost_budget = (
+            SettledCostBudget(session_max_cost_usd, collector=self._telemetry)
+            if session_max_cost_usd is not None
+            else None
+        )
+        if (
+            per_agent_max_tool_calls is not None
+            and max_tool_calls is not None
+            and per_agent_max_tool_calls != max_tool_calls
+        ):
+            raise ValueError(
+                "per_agent_max_tool_calls and legacy max_tool_calls disagree; provide one value"
+            )
+        self._per_agent_max_tool_calls = (
+            per_agent_max_tool_calls if per_agent_max_tool_calls is not None else max_tool_calls
+        )
         self._checkpointer = checkpointer
         # The thread_id the LAST run used (auto-minted when a checkpointer is attached and none was
         # passed); the assembly layer surfaces it.
@@ -220,25 +274,39 @@ class MultiAgentSession:
             registered_workers={"diagnosis": "diag_01", "repair_proposal": "repair_01"},
             # Bill the decompose calls into the shared collector (§1.3) — parity with the retired
             # gateway telemetry; None ⇒ decompose cost is simply not recorded.
-            telemetry=telemetry,
+            telemetry=self._telemetry,
+            shared_model_budget=self._session_model_budget,
+            shared_cost_budget=self._session_cost_budget,
         )
         self.diag_worker = DiagWorker(
             agent_id="diag_01",
             model=model,
             registry=registry,
-            telemetry=telemetry,
+            max_tool_calls=self._per_agent_max_tool_calls,
+            telemetry=self._telemetry,
+            shared_model_budget=self._session_model_budget,
+            shared_cost_budget=self._session_cost_budget,
+            shared_tool_budget=self._session_tool_budget,
         )
         self.repair_worker = RepairWorker(
             agent_id="repair_01",
             model=model,
             registry=registry,
-            telemetry=telemetry,
+            max_tool_calls=self._per_agent_max_tool_calls,
+            telemetry=self._telemetry,
+            shared_model_budget=self._session_model_budget,
+            shared_cost_budget=self._session_cost_budget,
+            shared_tool_budget=self._session_tool_budget,
         )
         self.verifier = VerifierAgent(
             agent_id="verifier_01",
             model=model,
             registry=registry,
-            telemetry=telemetry,
+            max_tool_calls=self._per_agent_max_tool_calls,
+            telemetry=self._telemetry,
+            shared_model_budget=self._session_model_budget,
+            shared_cost_budget=self._session_cost_budget,
+            shared_tool_budget=self._session_tool_budget,
         )
 
         # Worker routing table: agent_id → WorkerAgent instance. Still used by the serial
@@ -324,13 +392,15 @@ class MultiAgentSession:
         # ``synthesize`` is the terminal node and always populates ``report``; the guard keeps the
         # public return type honest (never a silent None) if the graph is ever short-circuited.
         assert report is not None, "synthesize node must populate the report"
-        return report
+        return cast(MultiAgentReport, report)
 
     # ------------------------------------------------------------------
     # Supervisor graph (LangGraph StateGraph — orchestrator-workers + sectioning)
     # ------------------------------------------------------------------
 
-    def _build_graph(self) -> CompiledStateGraph:
+    def _build_graph(
+        self,
+    ) -> CompiledStateGraph[_OrchestrationState, None, _OrchestrationState, _OrchestrationState]:
         """Wire the two-wave supervisor: plan → diag Send/JOIN → repair Send/JOIN → verify → synth.
 
         The conditional edges fan each wave out as one ``Send`` per assignment id, and the plain
@@ -360,7 +430,7 @@ class MultiAgentSession:
         # graph. A checkpointer persists the supervisor's channels for in-process resume (scheme Y).
         return g.compile(checkpointer=self._checkpointer)
 
-    def _plan_node(self, state: _OrchestrationState) -> dict:
+    def _plan_node(self, state: _OrchestrationState) -> dict[str, object]:
         """Decompose the goal, post assignments, split routed vs unrouted, recall diag reflections.
 
         Runs as a solo superstep (no concurrent siblings), so the single-threaded-safe recall of
@@ -431,12 +501,12 @@ class MultiAgentSession:
             for aid in assign_ids
         ]
 
-    def _diag_worker_node(self, arg: dict) -> dict:
+    def _diag_worker_node(self, arg: dict[str, str]) -> dict[str, list[str]]:
         """Execute one diagnosis assignment routed by ``Send`` (see ``_execute_send``)."""
         result_id = self._execute_send(arg)
         return {"diag_results": [result_id] if result_id is not None else []}
 
-    def _join_diag_node(self, state: _OrchestrationState) -> dict:
+    def _join_diag_node(self, state: _OrchestrationState) -> dict[str, list[str]]:
         """Wave-1 JOIN: fold ALL diagnosis findings into the repair assigns, recall repair memory.
 
         ④ Runs once after every diagnosis worker (superstep barrier), so repair sees the COMPLETE
@@ -486,12 +556,12 @@ class MultiAgentSession:
             for aid in assign_ids
         ]
 
-    def _repair_worker_node(self, arg: dict) -> dict:
+    def _repair_worker_node(self, arg: dict[str, str]) -> dict[str, list[str]]:
         """Execute one repair assignment routed by ``Send`` (see ``_execute_send``)."""
         result_id = self._execute_send(arg)
         return {"repair_results": [result_id] if result_id is not None else []}
 
-    def _verify_node(self, state: _OrchestrationState) -> dict:
+    def _verify_node(self, state: _OrchestrationState) -> dict[str, object]:
         """Serial verify loop over every worker result (wave 1 then wave 2, assignment order).
 
         The verifier runs its independent audit for each result, and a fail/needs_more verdict
@@ -518,7 +588,7 @@ class MultiAgentSession:
             )
         return {}
 
-    def _synthesize_node(self, state: _OrchestrationState) -> dict:
+    def _synthesize_node(self, state: _OrchestrationState) -> dict[str, MultiAgentReport]:
         """Terminal node: read all blackboard results → synthesized report (deterministic, no LLM).
 
         ② decomposition_degraded is threaded through so synthesis annotates it. Both the initial and
@@ -533,7 +603,7 @@ class MultiAgentSession:
         )
         return {"report": report}
 
-    def _execute_send(self, arg: dict) -> str | None:
+    def _execute_send(self, arg: dict[str, str]) -> str | None:
         """Run ONE ``Send``-routed assignment: idempotent-claim → fresh worker → guarded run.
 
         Returns the posted task_result msg id, or ``None`` when the claim gate refused the assign
@@ -630,7 +700,11 @@ class MultiAgentSession:
             agent_id=agent_id,
             model=self._model,
             registry=self._registry,
+            max_tool_calls=self._per_agent_max_tool_calls,
             telemetry=self._telemetry,
+            shared_model_budget=self._session_model_budget,
+            shared_cost_budget=self._session_cost_budget,
+            shared_tool_budget=self._session_tool_budget,
         )
 
     # ------------------------------------------------------------------
@@ -900,6 +974,32 @@ class MultiAgentSession:
             self.repair_worker.agent_id,
             self.verifier.agent_id,
         ]
+
+    @property
+    def session_budget(self) -> dict[str, Any]:
+        """Machine-readable aggregate budget state for the product/UI and eval artifacts."""
+        model = self._session_model_budget
+        tool = self._session_tool_budget
+        cost = self._session_cost_budget
+        return {
+            "model_calls_limit": model.limit if model is not None else None,
+            "model_calls_used": model.used if model is not None else None,
+            "model_calls_remaining": (
+                max(0, model.limit - model.used) if model is not None else None
+            ),
+            "model_calls_by_kind": dict(model.by_kind) if model is not None else {},
+            "tool_calls_limit": tool.limit if tool is not None else None,
+            "tool_calls_used": tool.used if tool is not None else None,
+            "tool_calls_remaining": (max(0, tool.limit - tool.used) if tool is not None else None),
+            "tool_calls_by_name": dict(tool.by_tool) if tool is not None else {},
+            "settled_cost_limit_usd": cost.limit_usd if cost is not None else None,
+            "settled_cost_usd": cost.settled_cost_usd if cost is not None else 0.0,
+            "cost_is_estimate": cost.cost_is_estimate if cost is not None else False,
+            "cost_gate_exhausted": cost.is_exhausted if cost is not None else False,
+            "cost_gate_semantics": "settled_cost_blocks_next_dispatch",
+            "hard_dollar_cap": False,
+            "concurrent_in_flight_cost_can_overshoot": True,
+        }
 
     def close(self) -> None:
         """Close the private SQLite connection (no-op if conn was injected externally)."""

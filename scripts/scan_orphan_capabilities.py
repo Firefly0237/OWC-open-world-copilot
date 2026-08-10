@@ -530,7 +530,7 @@ def main(argv: list[str] | None = None) -> int:
         "--out",
         type=Path,
         default=None,
-        help="报告输出路径（Markdown）；默认 docs/零调用能力扫描报告.md",
+        help="报告输出路径（Markdown）；默认 benchmarks/orphan-capabilities.md",
     )
     parser.add_argument(
         "--check",
@@ -540,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     repo_root: Path = args.repo_root.resolve()
-    out_path: Path = args.out or (repo_root / "docs" / "零调用能力扫描报告.md")
+    out_path: Path = args.out or (repo_root / "benchmarks" / "orphan-capabilities.md")
 
     res = scan(repo_root, args.allowlist.resolve())
     report = _render_markdown(res)

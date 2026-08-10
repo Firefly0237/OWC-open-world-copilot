@@ -1,5 +1,5 @@
 # AI 辅助的任务逻辑起草。
-"""WS-M · B7 — AI-assisted quest logic drafting.
+"""AI-assisted quest logic drafting.
 
 The native logic layer (WS-A) is hand-authored today. B7 lets a model *draft* the variables /
 preconditions / effects / branches, then runs the **deterministic logic audit (WS-A) as the hard

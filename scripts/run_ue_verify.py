@@ -51,6 +51,10 @@ def _run_editor(engine: Path, project: Path, script: Path, env: dict[str, str]) 
         "-nosplash",
         "-nosound",
         "-NoShaderCompile",
+        # This runner is a disposable, unattended verification process. Keep its
+        # derived data in memory so it neither depends on nor mutates a user's
+        # project/shared DDC configuration.
+        "-DDC-ForceMemoryCache",
     ]
     # UE 的输出不是本地代码页(Windows 上默认 GBK 会直接抛 UnicodeDecodeError),强制 UTF-8 + 替换
     completed = subprocess.run(

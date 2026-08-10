@@ -1,0 +1,20 @@
+[
+  {
+    "DisplayName": "Town",
+    "Name": "loc_town",
+    "Status": "active",
+    "Type": "location"
+  },
+  {
+    "Description": "斥候。",
+    "DisplayName": "玛拉",
+    "Name": "npc_mara",
+    "Status": "active",
+    "Type": "npc",
+    "resides_in": [
+      {
+        "RowName": "loc_town"
+      }
+    ]
+  }
+]

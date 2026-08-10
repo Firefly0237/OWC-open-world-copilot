@@ -1,0 +1,27 @@
+{
+    "name": "com.owcopilot.content-import.Editor.Tests",
+    "rootNamespace": "OWCopilot.ContentImport.Tests",
+    "references": [
+        "com.owcopilot.content-import",
+        "com.owcopilot.content-import.Core",
+        "com.owcopilot.content-import.Editor",
+        "Unity.Newtonsoft.Json",
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

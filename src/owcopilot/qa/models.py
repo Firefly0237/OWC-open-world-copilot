@@ -11,6 +11,16 @@ from pydantic import BaseModel, Field, field_validator
 class Citation(BaseModel):
     ref: str
     text: str = ""
+    # Optional provenance fields are additive so answers/caches written before locatable intake
+    # remain valid. ``locator`` preserves the native source coordinate; page/bbox are convenient
+    # normalized projections for the UI.
+    locator: dict[str, Any] | None = None
+    page: int | None = None
+    bbox: list[float] | None = None
+    revision: str = ""
+    source_title: str = ""
+    source_preview: str = ""
+    supported_claims: list[str] = Field(default_factory=list)
 
     @field_validator("ref", mode="before")
     @classmethod
@@ -49,6 +59,7 @@ class QAFaithfulness(BaseModel):
     score: float | None = None
     threshold: float
     unsupported_claims: list[str] = Field(default_factory=list)
+    claim_evidence: list[dict[str, Any]] = Field(default_factory=list)
     note: str = ""
 
 
@@ -60,7 +71,12 @@ class QAAnswer(BaseModel):
     unresolved_mentions: list[str] = Field(default_factory=list)
     refused: bool = False
     grounded: bool = False
+    # ``citation_existence_only`` is intentionally distinct from claim support; consumers no
+    # longer have to infer the strength of grounding from a single boolean.
+    grounding_level: str = "none"
     verification_errors: list[str] = Field(default_factory=list)
+    retrieval_degraded: bool = False
+    retrieval_degradation_reasons: list[str] = Field(default_factory=list)
     # Additive, default None: the opt-in faithfulness (entailment) annotation. Present only when the
     # gate ran; None keeps the default off-path byte-compatible for existing consumers.
     faithfulness: QAFaithfulness | None = None

@@ -1,0 +1,2205 @@
+{
+  "dialogue_trees": {
+    "t_closure": {
+      "id": "t_closure",
+      "metadata": {},
+      "nodes": {
+        "n0": {
+          "choices": [
+            {
+              "condition": "",
+              "effects": [
+                {
+                  "op": "set",
+                  "value": true,
+                  "var": "door_open"
+                }
+              ],
+              "next_node": "n1",
+              "text": "open it"
+            }
+          ],
+          "id": "n0",
+          "text": "the door"
+        },
+        "n1": {
+          "choices": [],
+          "id": "n1",
+          "text": "through"
+        }
+      },
+      "origin": "human",
+      "participants": [],
+      "quest_id": "q_closure",
+      "review_status": "approved",
+      "root_node": "n0",
+      "tags": [],
+      "title": ""
+    },
+    "t_completed": {
+      "id": "t_completed",
+      "metadata": {},
+      "nodes": {
+        "n0": {
+          "choices": [
+            {
+              "condition": "",
+              "effects": [
+                {
+                  "op": "set",
+                  "value": true,
+                  "var": "flag_met"
+                }
+              ],
+              "next_node": "n1",
+              "text": "say hello"
+            }
+          ],
+          "id": "n0",
+          "text": "greet"
+        },
+        "n1": {
+          "choices": [],
+          "id": "n1",
+          "text": "bye"
+        }
+      },
+      "origin": "human",
+      "participants": [],
+      "quest_id": "q_closure",
+      "review_status": "approved",
+      "root_node": "n0",
+      "tags": [],
+      "title": ""
+    },
+    "t_cycle": {
+      "id": "t_cycle",
+      "metadata": {},
+      "nodes": {
+        "n0": {
+          "choices": [],
+          "id": "n0",
+          "next_node": "n1",
+          "text": "a"
+        },
+        "n1": {
+          "choices": [],
+          "id": "n1",
+          "next_node": "n0",
+          "text": "b"
+        }
+      },
+      "origin": "human",
+      "participants": [],
+      "review_status": "approved",
+      "root_node": "n0",
+      "tags": [],
+      "title": ""
+    },
+    "t_dangling": {
+      "id": "t_dangling",
+      "metadata": {},
+      "nodes": {
+        "n0": {
+          "choices": [],
+          "id": "n0",
+          "next_node": "ghost",
+          "text": "lost"
+        }
+      },
+      "origin": "human",
+      "participants": [],
+      "review_status": "approved",
+      "root_node": "n0",
+      "tags": [],
+      "title": ""
+    },
+    "t_deadlock": {
+      "id": "t_deadlock",
+      "metadata": {},
+      "nodes": {
+        "n0": {
+          "choices": [
+            {
+              "condition": "gate",
+              "next_node": "n1",
+              "text": "locked"
+            }
+          ],
+          "id": "n0",
+          "text": "closed"
+        },
+        "n1": {
+          "choices": [],
+          "id": "n1",
+          "text": "unreachable"
+        }
+      },
+      "origin": "human",
+      "participants": [],
+      "review_status": "approved",
+      "root_node": "n0",
+      "tags": [],
+      "title": ""
+    }
+  },
+  "dialogues": {},
+  "entities": {},
+  "localized_texts": {},
+  "pois": {},
+  "quest_event_refs": {},
+  "quests": {
+    "q0000": {
+      "dialogue_refs": [],
+      "giver_npc": "npc_0000",
+      "id": "q0000",
+      "localization_keys": [
+        "quest.q0000.objective"
+      ],
+      "location": "loc_0000",
+      "logic": {
+        "branches": [
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s0",
+            "id": "q0000_b0_adv",
+            "outcome": "",
+            "to_stage": "q0000_s1"
+          },
+          {
+            "condition": "q0000_v1",
+            "effects": [],
+            "from_stage": "q0000_s0",
+            "id": "q0000_b0_j1",
+            "outcome": "",
+            "to_stage": "q0000_s3"
+          },
+          {
+            "condition": "q0000_v2",
+            "effects": [],
+            "from_stage": "q0000_s0",
+            "id": "q0000_b0_j2",
+            "outcome": "",
+            "to_stage": "q0000_s4"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s1",
+            "id": "q0000_b1_adv",
+            "outcome": "",
+            "to_stage": "q0000_s2"
+          },
+          {
+            "condition": "q0000_v2",
+            "effects": [],
+            "from_stage": "q0000_s1",
+            "id": "q0000_b1_j1",
+            "outcome": "",
+            "to_stage": "q0000_s4"
+          },
+          {
+            "condition": "q0000_v3",
+            "effects": [],
+            "from_stage": "q0000_s1",
+            "id": "q0000_b1_j2",
+            "outcome": "",
+            "to_stage": "q0000_s5"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s2",
+            "id": "q0000_b2_adv",
+            "outcome": "",
+            "to_stage": "q0000_s3"
+          },
+          {
+            "condition": "q0000_v3",
+            "effects": [],
+            "from_stage": "q0000_s2",
+            "id": "q0000_b2_j1",
+            "outcome": "",
+            "to_stage": "q0000_s5"
+          },
+          {
+            "condition": "q0000_v4",
+            "effects": [],
+            "from_stage": "q0000_s2",
+            "id": "q0000_b2_j2",
+            "outcome": "",
+            "to_stage": "q0000_s6"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s3",
+            "id": "q0000_b3_adv",
+            "outcome": "",
+            "to_stage": "q0000_s4"
+          },
+          {
+            "condition": "q0000_v4",
+            "effects": [],
+            "from_stage": "q0000_s3",
+            "id": "q0000_b3_j1",
+            "outcome": "",
+            "to_stage": "q0000_s6"
+          },
+          {
+            "condition": "q0000_v5",
+            "effects": [],
+            "from_stage": "q0000_s3",
+            "id": "q0000_b3_j2",
+            "outcome": "",
+            "to_stage": "q0000_s7"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s4",
+            "id": "q0000_b4_adv",
+            "outcome": "",
+            "to_stage": "q0000_s5"
+          },
+          {
+            "condition": "q0000_v5",
+            "effects": [],
+            "from_stage": "q0000_s4",
+            "id": "q0000_b4_j1",
+            "outcome": "",
+            "to_stage": "q0000_s7"
+          },
+          {
+            "condition": "q0000_v6",
+            "effects": [],
+            "from_stage": "q0000_s4",
+            "id": "q0000_b4_j2",
+            "outcome": "",
+            "to_stage": "q0000_s8"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s5",
+            "id": "q0000_b5_adv",
+            "outcome": "",
+            "to_stage": "q0000_s6"
+          },
+          {
+            "condition": "q0000_v6",
+            "effects": [],
+            "from_stage": "q0000_s5",
+            "id": "q0000_b5_j1",
+            "outcome": "",
+            "to_stage": "q0000_s8"
+          },
+          {
+            "condition": "q0000_v7",
+            "effects": [],
+            "from_stage": "q0000_s5",
+            "id": "q0000_b5_j2",
+            "outcome": "",
+            "to_stage": "q0000_s9"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s6",
+            "id": "q0000_b6_adv",
+            "outcome": "",
+            "to_stage": "q0000_s7"
+          },
+          {
+            "condition": "q0000_v7",
+            "effects": [],
+            "from_stage": "q0000_s6",
+            "id": "q0000_b6_j1",
+            "outcome": "",
+            "to_stage": "q0000_s9"
+          },
+          {
+            "condition": "q0000_v0",
+            "effects": [],
+            "from_stage": "q0000_s6",
+            "id": "q0000_b6_j2",
+            "outcome": "",
+            "to_stage": "q0000_s10"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s7",
+            "id": "q0000_b7_adv",
+            "outcome": "",
+            "to_stage": "q0000_s8"
+          },
+          {
+            "condition": "q0000_v0",
+            "effects": [],
+            "from_stage": "q0000_s7",
+            "id": "q0000_b7_j1",
+            "outcome": "",
+            "to_stage": "q0000_s10"
+          },
+          {
+            "condition": "q0000_v1",
+            "effects": [],
+            "from_stage": "q0000_s7",
+            "id": "q0000_b7_j2",
+            "outcome": "",
+            "to_stage": "q0000_s11"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s8",
+            "id": "q0000_b8_adv",
+            "outcome": "",
+            "to_stage": "q0000_s9"
+          },
+          {
+            "condition": "q0000_v1",
+            "effects": [],
+            "from_stage": "q0000_s8",
+            "id": "q0000_b8_j1",
+            "outcome": "",
+            "to_stage": "q0000_s11"
+          },
+          {
+            "condition": "q0000_v2",
+            "effects": [],
+            "from_stage": "q0000_s8",
+            "id": "q0000_b8_j2",
+            "outcome": "",
+            "to_stage": "q0000_s12"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s9",
+            "id": "q0000_b9_adv",
+            "outcome": "",
+            "to_stage": "q0000_s10"
+          },
+          {
+            "condition": "q0000_v2",
+            "effects": [],
+            "from_stage": "q0000_s9",
+            "id": "q0000_b9_j1",
+            "outcome": "",
+            "to_stage": "q0000_s12"
+          },
+          {
+            "condition": "q0000_v3",
+            "effects": [],
+            "from_stage": "q0000_s9",
+            "id": "q0000_b9_j2",
+            "outcome": "",
+            "to_stage": "q0000_s13"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s10",
+            "id": "q0000_b10_adv",
+            "outcome": "",
+            "to_stage": "q0000_s11"
+          },
+          {
+            "condition": "q0000_v3",
+            "effects": [],
+            "from_stage": "q0000_s10",
+            "id": "q0000_b10_j1",
+            "outcome": "",
+            "to_stage": "q0000_s13"
+          },
+          {
+            "condition": "q0000_v4",
+            "effects": [],
+            "from_stage": "q0000_s10",
+            "id": "q0000_b10_j2",
+            "outcome": "",
+            "to_stage": "q0000_s14"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s11",
+            "id": "q0000_b11_adv",
+            "outcome": "",
+            "to_stage": "q0000_s12"
+          },
+          {
+            "condition": "q0000_v4",
+            "effects": [],
+            "from_stage": "q0000_s11",
+            "id": "q0000_b11_j1",
+            "outcome": "",
+            "to_stage": "q0000_s14"
+          },
+          {
+            "condition": "q0000_v5",
+            "effects": [],
+            "from_stage": "q0000_s11",
+            "id": "q0000_b11_j2",
+            "outcome": "",
+            "to_stage": "q0000_s15"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s12",
+            "id": "q0000_b12_adv",
+            "outcome": "",
+            "to_stage": "q0000_s13"
+          },
+          {
+            "condition": "q0000_v5",
+            "effects": [],
+            "from_stage": "q0000_s12",
+            "id": "q0000_b12_j1",
+            "outcome": "",
+            "to_stage": "q0000_s15"
+          },
+          {
+            "condition": "q0000_v6",
+            "effects": [],
+            "from_stage": "q0000_s12",
+            "id": "q0000_b12_j2",
+            "outcome": "",
+            "to_stage": "q0000_s16"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s13",
+            "id": "q0000_b13_adv",
+            "outcome": "",
+            "to_stage": "q0000_s14"
+          },
+          {
+            "condition": "q0000_v6",
+            "effects": [],
+            "from_stage": "q0000_s13",
+            "id": "q0000_b13_j1",
+            "outcome": "",
+            "to_stage": "q0000_s16"
+          },
+          {
+            "condition": "q0000_v7",
+            "effects": [],
+            "from_stage": "q0000_s13",
+            "id": "q0000_b13_j2",
+            "outcome": "",
+            "to_stage": "q0000_s17"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s14",
+            "id": "q0000_b14_adv",
+            "outcome": "",
+            "to_stage": "q0000_s15"
+          },
+          {
+            "condition": "q0000_v7",
+            "effects": [],
+            "from_stage": "q0000_s14",
+            "id": "q0000_b14_j1",
+            "outcome": "",
+            "to_stage": "q0000_s17"
+          },
+          {
+            "condition": "q0000_v0",
+            "effects": [],
+            "from_stage": "q0000_s14",
+            "id": "q0000_b14_j2",
+            "outcome": "",
+            "to_stage": "q0000_s18"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s15",
+            "id": "q0000_b15_adv",
+            "outcome": "",
+            "to_stage": "q0000_s16"
+          },
+          {
+            "condition": "q0000_v0",
+            "effects": [],
+            "from_stage": "q0000_s15",
+            "id": "q0000_b15_j1",
+            "outcome": "",
+            "to_stage": "q0000_s18"
+          },
+          {
+            "condition": "q0000_v1",
+            "effects": [],
+            "from_stage": "q0000_s15",
+            "id": "q0000_b15_j2",
+            "outcome": "",
+            "to_stage": "q0000_s19"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s16",
+            "id": "q0000_b16_adv",
+            "outcome": "",
+            "to_stage": "q0000_s17"
+          },
+          {
+            "condition": "q0000_v1",
+            "effects": [],
+            "from_stage": "q0000_s16",
+            "id": "q0000_b16_j1",
+            "outcome": "",
+            "to_stage": "q0000_s19"
+          },
+          {
+            "condition": "q0000_v2",
+            "effects": [],
+            "from_stage": "q0000_s16",
+            "id": "q0000_b16_j2",
+            "outcome": "",
+            "to_stage": "q0000_s20"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s17",
+            "id": "q0000_b17_adv",
+            "outcome": "",
+            "to_stage": "q0000_s18"
+          },
+          {
+            "condition": "q0000_v2",
+            "effects": [],
+            "from_stage": "q0000_s17",
+            "id": "q0000_b17_j1",
+            "outcome": "",
+            "to_stage": "q0000_s20"
+          },
+          {
+            "condition": "q0000_v3",
+            "effects": [],
+            "from_stage": "q0000_s17",
+            "id": "q0000_b17_j2",
+            "outcome": "",
+            "to_stage": "q0000_s21"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s18",
+            "id": "q0000_b18_adv",
+            "outcome": "",
+            "to_stage": "q0000_s19"
+          },
+          {
+            "condition": "q0000_v3",
+            "effects": [],
+            "from_stage": "q0000_s18",
+            "id": "q0000_b18_j1",
+            "outcome": "",
+            "to_stage": "q0000_s21"
+          },
+          {
+            "condition": "q0000_v4",
+            "effects": [],
+            "from_stage": "q0000_s18",
+            "id": "q0000_b18_j2",
+            "outcome": "",
+            "to_stage": "q0000_s22"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s19",
+            "id": "q0000_b19_adv",
+            "outcome": "",
+            "to_stage": "q0000_s20"
+          },
+          {
+            "condition": "q0000_v4",
+            "effects": [],
+            "from_stage": "q0000_s19",
+            "id": "q0000_b19_j1",
+            "outcome": "",
+            "to_stage": "q0000_s22"
+          },
+          {
+            "condition": "q0000_v5",
+            "effects": [],
+            "from_stage": "q0000_s19",
+            "id": "q0000_b19_j2",
+            "outcome": "",
+            "to_stage": "q0000_s23"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s20",
+            "id": "q0000_b20_adv",
+            "outcome": "",
+            "to_stage": "q0000_s21"
+          },
+          {
+            "condition": "q0000_v5",
+            "effects": [],
+            "from_stage": "q0000_s20",
+            "id": "q0000_b20_j1",
+            "outcome": "",
+            "to_stage": "q0000_s23"
+          },
+          {
+            "condition": "q0000_v6",
+            "effects": [],
+            "from_stage": "q0000_s20",
+            "id": "q0000_b20_j2",
+            "outcome": "",
+            "to_stage": "q0000_s24"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s21",
+            "id": "q0000_b21_adv",
+            "outcome": "",
+            "to_stage": "q0000_s22"
+          },
+          {
+            "condition": "q0000_v6",
+            "effects": [],
+            "from_stage": "q0000_s21",
+            "id": "q0000_b21_j1",
+            "outcome": "",
+            "to_stage": "q0000_s24"
+          },
+          {
+            "condition": "q0000_v7",
+            "effects": [],
+            "from_stage": "q0000_s21",
+            "id": "q0000_b21_j2",
+            "outcome": "",
+            "to_stage": "q0000_s25"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s22",
+            "id": "q0000_b22_adv",
+            "outcome": "",
+            "to_stage": "q0000_s23"
+          },
+          {
+            "condition": "q0000_v7",
+            "effects": [],
+            "from_stage": "q0000_s22",
+            "id": "q0000_b22_j1",
+            "outcome": "",
+            "to_stage": "q0000_s25"
+          },
+          {
+            "condition": "q0000_v0",
+            "effects": [],
+            "from_stage": "q0000_s22",
+            "id": "q0000_b22_t2",
+            "outcome": "end_1",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s23",
+            "id": "q0000_b23_adv",
+            "outcome": "",
+            "to_stage": "q0000_s24"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s23",
+            "id": "q0000_b23_t1",
+            "outcome": "end_2",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s23",
+            "id": "q0000_b23_t2",
+            "outcome": "end_3",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s24",
+            "id": "q0000_b24_adv",
+            "outcome": "",
+            "to_stage": "q0000_s25"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s24",
+            "id": "q0000_b24_t1",
+            "outcome": "end_4",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s24",
+            "id": "q0000_b24_t2",
+            "outcome": "end_5",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s25",
+            "id": "q0000_b25_adv",
+            "outcome": "",
+            "to_stage": "q0000_s26"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s25",
+            "id": "q0000_b25_t1",
+            "outcome": "end_6",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s25",
+            "id": "q0000_b25_t2",
+            "outcome": "end_7",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s26",
+            "id": "q0000_b26_adv",
+            "outcome": "",
+            "to_stage": "q0000_s27"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s26",
+            "id": "q0000_b26_t1",
+            "outcome": "end_8",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0000_s26",
+            "id": "q0000_b26_t2",
+            "outcome": "end_9",
+            "to_stage": ""
+          }
+        ],
+        "precondition": "",
+        "stage_logic": [
+          {
+            "effects_on_complete": [
+              {
+                "op": "set",
+                "value": true,
+                "var": "q0000_v0"
+              }
+            ],
+            "precondition": "",
+            "stage_id": "q0000_s0"
+          }
+        ],
+        "unlocks": [],
+        "variables": [
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0000_v0",
+            "name": "q0000_v0",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0000_v1",
+            "name": "q0000_v1",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0000_v2",
+            "name": "q0000_v2",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0000_v3",
+            "name": "q0000_v3",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0000_v4",
+            "name": "q0000_v4",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0000_v5",
+            "name": "q0000_v5",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0000_v6",
+            "name": "q0000_v6",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0000_v7",
+            "name": "q0000_v7",
+            "type": "bool"
+          }
+        ]
+      },
+      "metadata": {},
+      "objective": "Complete quest q0000.",
+      "origin": "human",
+      "prerequisites": [],
+      "review_status": "approved",
+      "rewards": [],
+      "stages": [
+        {
+          "id": "q0000_s0",
+          "location": "loc_0000",
+          "required_entities": [
+            "npc_0000"
+          ],
+          "summary": "Stage 0 of q0000"
+        },
+        {
+          "id": "q0000_s1",
+          "location": "loc_0001",
+          "required_entities": [
+            "npc_0001"
+          ],
+          "summary": "Stage 1 of q0000"
+        },
+        {
+          "id": "q0000_s2",
+          "location": "loc_0002",
+          "required_entities": [
+            "npc_0002"
+          ],
+          "summary": "Stage 2 of q0000"
+        },
+        {
+          "id": "q0000_s3",
+          "location": "loc_0003",
+          "required_entities": [
+            "npc_0003"
+          ],
+          "summary": "Stage 3 of q0000"
+        },
+        {
+          "id": "q0000_s4",
+          "location": "loc_0004",
+          "required_entities": [
+            "npc_0004"
+          ],
+          "summary": "Stage 4 of q0000"
+        },
+        {
+          "id": "q0000_s5",
+          "location": "loc_0000",
+          "required_entities": [
+            "npc_0005"
+          ],
+          "summary": "Stage 5 of q0000"
+        },
+        {
+          "id": "q0000_s6",
+          "location": "loc_0001",
+          "required_entities": [
+            "npc_0006"
+          ],
+          "summary": "Stage 6 of q0000"
+        },
+        {
+          "id": "q0000_s7",
+          "location": "loc_0002",
+          "required_entities": [
+            "npc_0000"
+          ],
+          "summary": "Stage 7 of q0000"
+        },
+        {
+          "id": "q0000_s8",
+          "location": "loc_0003",
+          "required_entities": [
+            "npc_0001"
+          ],
+          "summary": "Stage 8 of q0000"
+        },
+        {
+          "id": "q0000_s9",
+          "location": "loc_0004",
+          "required_entities": [
+            "npc_0002"
+          ],
+          "summary": "Stage 9 of q0000"
+        },
+        {
+          "id": "q0000_s10",
+          "location": "loc_0000",
+          "required_entities": [
+            "npc_0003"
+          ],
+          "summary": "Stage 10 of q0000"
+        },
+        {
+          "id": "q0000_s11",
+          "location": "loc_0001",
+          "required_entities": [
+            "npc_0004"
+          ],
+          "summary": "Stage 11 of q0000"
+        },
+        {
+          "id": "q0000_s12",
+          "location": "loc_0002",
+          "required_entities": [
+            "npc_0005"
+          ],
+          "summary": "Stage 12 of q0000"
+        },
+        {
+          "id": "q0000_s13",
+          "location": "loc_0003",
+          "required_entities": [
+            "npc_0006"
+          ],
+          "summary": "Stage 13 of q0000"
+        },
+        {
+          "id": "q0000_s14",
+          "location": "loc_0004",
+          "required_entities": [
+            "npc_0000"
+          ],
+          "summary": "Stage 14 of q0000"
+        },
+        {
+          "id": "q0000_s15",
+          "location": "loc_0000",
+          "required_entities": [
+            "npc_0001"
+          ],
+          "summary": "Stage 15 of q0000"
+        },
+        {
+          "id": "q0000_s16",
+          "location": "loc_0001",
+          "required_entities": [
+            "npc_0002"
+          ],
+          "summary": "Stage 16 of q0000"
+        },
+        {
+          "id": "q0000_s17",
+          "location": "loc_0002",
+          "required_entities": [
+            "npc_0003"
+          ],
+          "summary": "Stage 17 of q0000"
+        },
+        {
+          "id": "q0000_s18",
+          "location": "loc_0003",
+          "required_entities": [
+            "npc_0004"
+          ],
+          "summary": "Stage 18 of q0000"
+        },
+        {
+          "id": "q0000_s19",
+          "location": "loc_0004",
+          "required_entities": [
+            "npc_0005"
+          ],
+          "summary": "Stage 19 of q0000"
+        },
+        {
+          "id": "q0000_s20",
+          "location": "loc_0000",
+          "required_entities": [
+            "npc_0006"
+          ],
+          "summary": "Stage 20 of q0000"
+        },
+        {
+          "id": "q0000_s21",
+          "location": "loc_0001",
+          "required_entities": [
+            "npc_0000"
+          ],
+          "summary": "Stage 21 of q0000"
+        },
+        {
+          "id": "q0000_s22",
+          "location": "loc_0002",
+          "required_entities": [
+            "npc_0001"
+          ],
+          "summary": "Stage 22 of q0000"
+        },
+        {
+          "id": "q0000_s23",
+          "location": "loc_0003",
+          "required_entities": [
+            "npc_0002"
+          ],
+          "summary": "Stage 23 of q0000"
+        },
+        {
+          "id": "q0000_s24",
+          "location": "loc_0004",
+          "required_entities": [
+            "npc_0003"
+          ],
+          "summary": "Stage 24 of q0000"
+        },
+        {
+          "id": "q0000_s25",
+          "location": "loc_0000",
+          "required_entities": [
+            "npc_0004"
+          ],
+          "summary": "Stage 25 of q0000"
+        },
+        {
+          "id": "q0000_s26",
+          "location": "loc_0001",
+          "required_entities": [
+            "npc_0005"
+          ],
+          "summary": "Stage 26 of q0000"
+        },
+        {
+          "id": "q0000_s27",
+          "location": "loc_0002",
+          "required_entities": [
+            "npc_0006"
+          ],
+          "summary": "Stage 27 of q0000"
+        }
+      ],
+      "tags": [],
+      "title": "Quest q0000"
+    },
+    "q0001": {
+      "dialogue_refs": [],
+      "giver_npc": "npc_0000",
+      "id": "q0001",
+      "localization_keys": [
+        "quest.q0001.objective"
+      ],
+      "location": "loc_0000",
+      "logic": {
+        "branches": [
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s0",
+            "id": "q0001_b0_adv",
+            "outcome": "",
+            "to_stage": "q0001_s1"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s0",
+            "id": "q0001_b0_j1",
+            "outcome": "",
+            "to_stage": "q0001_s3"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s0",
+            "id": "q0001_b0_j2",
+            "outcome": "",
+            "to_stage": "q0001_s4"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s1",
+            "id": "q0001_b1_adv",
+            "outcome": "",
+            "to_stage": "q0001_s2"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s1",
+            "id": "q0001_b1_j1",
+            "outcome": "",
+            "to_stage": "q0001_s4"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s1",
+            "id": "q0001_b1_j2",
+            "outcome": "",
+            "to_stage": "q0001_s5"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s2",
+            "id": "q0001_b2_adv",
+            "outcome": "",
+            "to_stage": "q0001_s3"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s2",
+            "id": "q0001_b2_j1",
+            "outcome": "",
+            "to_stage": "q0001_s5"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s2",
+            "id": "q0001_b2_j2",
+            "outcome": "",
+            "to_stage": "q0001_s6"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s3",
+            "id": "q0001_b3_adv",
+            "outcome": "",
+            "to_stage": "q0001_s4"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s3",
+            "id": "q0001_b3_j1",
+            "outcome": "",
+            "to_stage": "q0001_s6"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s3",
+            "id": "q0001_b3_j2",
+            "outcome": "",
+            "to_stage": "q0001_s7"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s4",
+            "id": "q0001_b4_adv",
+            "outcome": "",
+            "to_stage": "q0001_s5"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s4",
+            "id": "q0001_b4_j1",
+            "outcome": "",
+            "to_stage": "q0001_s7"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s4",
+            "id": "q0001_b4_j2",
+            "outcome": "",
+            "to_stage": "q0001_s8"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s5",
+            "id": "q0001_b5_adv",
+            "outcome": "",
+            "to_stage": "q0001_s6"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s5",
+            "id": "q0001_b5_j1",
+            "outcome": "",
+            "to_stage": "q0001_s8"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s5",
+            "id": "q0001_b5_j2",
+            "outcome": "",
+            "to_stage": "q0001_s9"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s6",
+            "id": "q0001_b6_adv",
+            "outcome": "",
+            "to_stage": "q0001_s7"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s6",
+            "id": "q0001_b6_j1",
+            "outcome": "",
+            "to_stage": "q0001_s9"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s6",
+            "id": "q0001_b6_j2",
+            "outcome": "",
+            "to_stage": "q0001_s10"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s7",
+            "id": "q0001_b7_adv",
+            "outcome": "",
+            "to_stage": "q0001_s8"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s7",
+            "id": "q0001_b7_j1",
+            "outcome": "",
+            "to_stage": "q0001_s10"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s7",
+            "id": "q0001_b7_j2",
+            "outcome": "",
+            "to_stage": "q0001_s11"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s8",
+            "id": "q0001_b8_adv",
+            "outcome": "",
+            "to_stage": "q0001_s9"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s8",
+            "id": "q0001_b8_j1",
+            "outcome": "",
+            "to_stage": "q0001_s11"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s8",
+            "id": "q0001_b8_j2",
+            "outcome": "",
+            "to_stage": "q0001_s12"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s9",
+            "id": "q0001_b9_adv",
+            "outcome": "",
+            "to_stage": "q0001_s10"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s9",
+            "id": "q0001_b9_j1",
+            "outcome": "",
+            "to_stage": "q0001_s12"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s9",
+            "id": "q0001_b9_j2",
+            "outcome": "",
+            "to_stage": "q0001_s13"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s10",
+            "id": "q0001_b10_adv",
+            "outcome": "",
+            "to_stage": "q0001_s11"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s10",
+            "id": "q0001_b10_j1",
+            "outcome": "",
+            "to_stage": "q0001_s13"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s10",
+            "id": "q0001_b10_j2",
+            "outcome": "",
+            "to_stage": "q0001_s14"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s11",
+            "id": "q0001_b11_adv",
+            "outcome": "",
+            "to_stage": "q0001_s12"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s11",
+            "id": "q0001_b11_j1",
+            "outcome": "",
+            "to_stage": "q0001_s14"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s11",
+            "id": "q0001_b11_j2",
+            "outcome": "",
+            "to_stage": "q0001_s15"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s12",
+            "id": "q0001_b12_adv",
+            "outcome": "",
+            "to_stage": "q0001_s13"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s12",
+            "id": "q0001_b12_j1",
+            "outcome": "",
+            "to_stage": "q0001_s15"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s12",
+            "id": "q0001_b12_j2",
+            "outcome": "",
+            "to_stage": "q0001_s16"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s13",
+            "id": "q0001_b13_adv",
+            "outcome": "",
+            "to_stage": "q0001_s14"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s13",
+            "id": "q0001_b13_j1",
+            "outcome": "",
+            "to_stage": "q0001_s16"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s13",
+            "id": "q0001_b13_j2",
+            "outcome": "",
+            "to_stage": "q0001_s17"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s14",
+            "id": "q0001_b14_adv",
+            "outcome": "",
+            "to_stage": "q0001_s15"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s14",
+            "id": "q0001_b14_j1",
+            "outcome": "",
+            "to_stage": "q0001_s17"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s14",
+            "id": "q0001_b14_t2",
+            "outcome": "end_1",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s15",
+            "id": "q0001_b15_adv",
+            "outcome": "",
+            "to_stage": "q0001_s16"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s15",
+            "id": "q0001_b15_t1",
+            "outcome": "end_2",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s15",
+            "id": "q0001_b15_t2",
+            "outcome": "end_3",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s16",
+            "id": "q0001_b16_adv",
+            "outcome": "",
+            "to_stage": "q0001_s17"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s16",
+            "id": "q0001_b16_t1",
+            "outcome": "end_4",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s16",
+            "id": "q0001_b16_t2",
+            "outcome": "end_5",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s17",
+            "id": "q0001_b17_adv",
+            "outcome": "",
+            "to_stage": "q0001_s18"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s17",
+            "id": "q0001_b17_t1",
+            "outcome": "end_6",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s17",
+            "id": "q0001_b17_t2",
+            "outcome": "end_7",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s18",
+            "id": "q0001_b18_adv",
+            "outcome": "",
+            "to_stage": "q0001_s19"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s18",
+            "id": "q0001_b18_t1",
+            "outcome": "end_8",
+            "to_stage": ""
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "q0001_s18",
+            "id": "q0001_b18_t2",
+            "outcome": "end_9",
+            "to_stage": ""
+          }
+        ],
+        "precondition": "",
+        "stage_logic": [
+          {
+            "effects_on_complete": [
+              {
+                "op": "set",
+                "value": true,
+                "var": "q0001_v0"
+              }
+            ],
+            "precondition": "",
+            "stage_id": "q0001_s0"
+          }
+        ],
+        "unlocks": [],
+        "variables": [
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0001_v0",
+            "name": "q0001_v0",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0001_v1",
+            "name": "q0001_v1",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0001_v2",
+            "name": "q0001_v2",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0001_v3",
+            "name": "q0001_v3",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0001_v4",
+            "name": "q0001_v4",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0001_v5",
+            "name": "q0001_v5",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0001_v6",
+            "name": "q0001_v6",
+            "type": "bool"
+          },
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "q0001_v7",
+            "name": "q0001_v7",
+            "type": "bool"
+          }
+        ]
+      },
+      "metadata": {},
+      "objective": "Complete quest q0001.",
+      "origin": "human",
+      "prerequisites": [
+        "q0000"
+      ],
+      "review_status": "approved",
+      "rewards": [],
+      "stages": [
+        {
+          "id": "q0001_s0",
+          "location": "loc_0000",
+          "required_entities": [
+            "npc_0000"
+          ],
+          "summary": "Stage 0 of q0001"
+        },
+        {
+          "id": "q0001_s1",
+          "location": "loc_0001",
+          "required_entities": [
+            "npc_0001"
+          ],
+          "summary": "Stage 1 of q0001"
+        },
+        {
+          "id": "q0001_s2",
+          "location": "loc_0002",
+          "required_entities": [
+            "npc_0002"
+          ],
+          "summary": "Stage 2 of q0001"
+        },
+        {
+          "id": "q0001_s3",
+          "location": "loc_0003",
+          "required_entities": [
+            "npc_0003"
+          ],
+          "summary": "Stage 3 of q0001"
+        },
+        {
+          "id": "q0001_s4",
+          "location": "loc_0004",
+          "required_entities": [
+            "npc_0004"
+          ],
+          "summary": "Stage 4 of q0001"
+        },
+        {
+          "id": "q0001_s5",
+          "location": "loc_0000",
+          "required_entities": [
+            "npc_0005"
+          ],
+          "summary": "Stage 5 of q0001"
+        },
+        {
+          "id": "q0001_s6",
+          "location": "loc_0001",
+          "required_entities": [
+            "npc_0006"
+          ],
+          "summary": "Stage 6 of q0001"
+        },
+        {
+          "id": "q0001_s7",
+          "location": "loc_0002",
+          "required_entities": [
+            "npc_0000"
+          ],
+          "summary": "Stage 7 of q0001"
+        },
+        {
+          "id": "q0001_s8",
+          "location": "loc_0003",
+          "required_entities": [
+            "npc_0001"
+          ],
+          "summary": "Stage 8 of q0001"
+        },
+        {
+          "id": "q0001_s9",
+          "location": "loc_0004",
+          "required_entities": [
+            "npc_0002"
+          ],
+          "summary": "Stage 9 of q0001"
+        },
+        {
+          "id": "q0001_s10",
+          "location": "loc_0000",
+          "required_entities": [
+            "npc_0003"
+          ],
+          "summary": "Stage 10 of q0001"
+        },
+        {
+          "id": "q0001_s11",
+          "location": "loc_0001",
+          "required_entities": [
+            "npc_0004"
+          ],
+          "summary": "Stage 11 of q0001"
+        },
+        {
+          "id": "q0001_s12",
+          "location": "loc_0002",
+          "required_entities": [
+            "npc_0005"
+          ],
+          "summary": "Stage 12 of q0001"
+        },
+        {
+          "id": "q0001_s13",
+          "location": "loc_0003",
+          "required_entities": [
+            "npc_0006"
+          ],
+          "summary": "Stage 13 of q0001"
+        },
+        {
+          "id": "q0001_s14",
+          "location": "loc_0004",
+          "required_entities": [
+            "npc_0000"
+          ],
+          "summary": "Stage 14 of q0001"
+        },
+        {
+          "id": "q0001_s15",
+          "location": "loc_0000",
+          "required_entities": [
+            "npc_0001"
+          ],
+          "summary": "Stage 15 of q0001"
+        },
+        {
+          "id": "q0001_s16",
+          "location": "loc_0001",
+          "required_entities": [
+            "npc_0002"
+          ],
+          "summary": "Stage 16 of q0001"
+        },
+        {
+          "id": "q0001_s17",
+          "location": "loc_0002",
+          "required_entities": [
+            "npc_0003"
+          ],
+          "summary": "Stage 17 of q0001"
+        },
+        {
+          "id": "q0001_s18",
+          "location": "loc_0003",
+          "required_entities": [
+            "npc_0004"
+          ],
+          "summary": "Stage 18 of q0001"
+        },
+        {
+          "id": "q0001_s19",
+          "location": "loc_0004",
+          "required_entities": [
+            "npc_0005"
+          ],
+          "summary": "Stage 19 of q0001"
+        }
+      ],
+      "tags": [],
+      "title": "Quest q0001"
+    },
+    "q_blocked": {
+      "dialogue_refs": [],
+      "id": "q_blocked",
+      "localization_keys": [],
+      "logic": {
+        "branches": [],
+        "precondition": "",
+        "stage_logic": [
+          {
+            "effects_on_complete": [],
+            "precondition": "key",
+            "stage_id": "s1"
+          }
+        ],
+        "unlocks": [],
+        "variables": [
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "key",
+            "name": "key",
+            "type": "bool"
+          }
+        ]
+      },
+      "metadata": {},
+      "objective": "",
+      "origin": "human",
+      "prerequisites": [],
+      "review_status": "approved",
+      "rewards": [],
+      "stages": [
+        {
+          "id": "s0",
+          "required_entities": [],
+          "summary": "start"
+        },
+        {
+          "id": "s1",
+          "required_entities": [],
+          "summary": "locked"
+        }
+      ],
+      "tags": [],
+      "title": "Blocked"
+    },
+    "q_closure": {
+      "dialogue_refs": [],
+      "id": "q_closure",
+      "localization_keys": [],
+      "logic": {
+        "branches": [],
+        "precondition": "",
+        "stage_logic": [
+          {
+            "effects_on_complete": [],
+            "precondition": "door_open",
+            "stage_id": "s1"
+          }
+        ],
+        "unlocks": [],
+        "variables": [
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "door_open",
+            "name": "door_open",
+            "type": "bool"
+          }
+        ]
+      },
+      "metadata": {},
+      "objective": "",
+      "origin": "human",
+      "prerequisites": [],
+      "review_status": "approved",
+      "rewards": [],
+      "stages": [
+        {
+          "id": "s0",
+          "required_entities": [],
+          "summary": "approach"
+        },
+        {
+          "id": "s1",
+          "required_entities": [],
+          "summary": "enter"
+        }
+      ],
+      "tags": [],
+      "title": "Closure"
+    },
+    "q_cycle": {
+      "dialogue_refs": [],
+      "id": "q_cycle",
+      "localization_keys": [],
+      "logic": {
+        "branches": [
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "s0",
+            "id": "b_s0_s1",
+            "outcome": "",
+            "to_stage": "s1"
+          },
+          {
+            "condition": "",
+            "effects": [],
+            "from_stage": "s1",
+            "id": "b_s1_s0",
+            "outcome": "",
+            "to_stage": "s0"
+          }
+        ],
+        "precondition": "",
+        "stage_logic": [],
+        "unlocks": [],
+        "variables": []
+      },
+      "metadata": {},
+      "objective": "",
+      "origin": "human",
+      "prerequisites": [],
+      "review_status": "approved",
+      "rewards": [],
+      "stages": [
+        {
+          "id": "s0",
+          "required_entities": [],
+          "summary": "a"
+        },
+        {
+          "id": "s1",
+          "required_entities": [],
+          "summary": "b"
+        }
+      ],
+      "tags": [],
+      "title": "Cycle"
+    },
+    "q_deadlock": {
+      "dialogue_refs": [],
+      "id": "q_deadlock",
+      "localization_keys": [],
+      "logic": {
+        "branches": [
+          {
+            "condition": "gate",
+            "effects": [],
+            "from_stage": "s0",
+            "id": "br_gated",
+            "outcome": "",
+            "to_stage": ""
+          }
+        ],
+        "precondition": "",
+        "stage_logic": [],
+        "unlocks": [],
+        "variables": [
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "gate",
+            "name": "gate",
+            "type": "bool"
+          }
+        ]
+      },
+      "metadata": {},
+      "objective": "",
+      "origin": "human",
+      "prerequisites": [],
+      "review_status": "approved",
+      "rewards": [],
+      "stages": [
+        {
+          "id": "s0",
+          "required_entities": [],
+          "summary": "stuck"
+        }
+      ],
+      "tags": [],
+      "title": "Deadlock"
+    },
+    "q_gated": {
+      "dialogue_refs": [],
+      "id": "q_gated",
+      "localization_keys": [],
+      "logic": {
+        "branches": [],
+        "precondition": "has_writ",
+        "stage_logic": [],
+        "unlocks": [],
+        "variables": [
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "has_writ",
+            "name": "has_writ",
+            "type": "bool"
+          }
+        ]
+      },
+      "metadata": {},
+      "objective": "",
+      "origin": "human",
+      "prerequisites": [],
+      "review_status": "approved",
+      "rewards": [],
+      "stages": [
+        {
+          "id": "s0",
+          "required_entities": [],
+          "summary": "present the writ"
+        },
+        {
+          "id": "s1",
+          "required_entities": [],
+          "summary": "enter"
+        }
+      ],
+      "tags": [],
+      "title": "Gated"
+    },
+    "q_linear": {
+      "dialogue_refs": [],
+      "id": "q_linear",
+      "localization_keys": [],
+      "logic": {
+        "branches": [],
+        "precondition": "",
+        "stage_logic": [
+          {
+            "effects_on_complete": [
+              {
+                "op": "set",
+                "value": true,
+                "var": "v_started"
+              }
+            ],
+            "precondition": "",
+            "stage_id": "s0"
+          }
+        ],
+        "unlocks": [],
+        "variables": [
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "v_started",
+            "name": "v_started",
+            "type": "bool"
+          }
+        ]
+      },
+      "metadata": {},
+      "objective": "",
+      "origin": "human",
+      "prerequisites": [],
+      "review_status": "approved",
+      "rewards": [],
+      "stages": [
+        {
+          "id": "s0",
+          "required_entities": [],
+          "summary": "start"
+        },
+        {
+          "id": "s1",
+          "required_entities": [],
+          "summary": "end"
+        }
+      ],
+      "tags": [],
+      "title": "Linear"
+    },
+    "q_open_gate": {
+      "dialogue_refs": [],
+      "id": "q_open_gate",
+      "localization_keys": [],
+      "logic": {
+        "branches": [],
+        "precondition": "",
+        "stage_logic": [
+          {
+            "effects_on_complete": [
+              {
+                "op": "set",
+                "value": true,
+                "var": "noted"
+              }
+            ],
+            "precondition": "",
+            "stage_id": "s0"
+          }
+        ],
+        "unlocks": [],
+        "variables": [
+          {
+            "default": false,
+            "enum_values": [],
+            "id": "noted",
+            "name": "noted",
+            "type": "bool"
+          }
+        ]
+      },
+      "metadata": {},
+      "objective": "",
+      "origin": "human",
+      "prerequisites": [],
+      "review_status": "approved",
+      "rewards": [],
+      "stages": [
+        {
+          "id": "s0",
+          "required_entities": [],
+          "summary": "walk in"
+        }
+      ],
+      "tags": [],
+      "title": "OpenGate"
+    },
+    "q_terminal": {
+      "dialogue_refs": [],
+      "id": "q_terminal",
+      "localization_keys": [],
+      "logic": {
+        "branches": [
+          {
+            "condition": "",
+            "effects": [
+              {
+                "op": "inc",
+                "value": 1,
+                "var": "rep:fac_watch"
+              }
+            ],
+            "from_stage": "s0",
+            "id": "br_win",
+            "outcome": "win",
+            "to_stage": ""
+          }
+        ],
+        "precondition": "",
+        "stage_logic": [],
+        "unlocks": [],
+        "variables": []
+      },
+      "metadata": {},
+      "objective": "",
+      "origin": "human",
+      "prerequisites": [],
+      "review_status": "approved",
+      "rewards": [],
+      "stages": [
+        {
+          "id": "s0",
+          "required_entities": [],
+          "summary": "decide"
+        }
+      ],
+      "tags": [],
+      "title": "Terminal"
+    }
+  },
+  "regions": {},
+  "relations": [],
+  "style_guides": {},
+  "terms": {}
+}

@@ -2,141 +2,255 @@
 
 # OWCopilot
 
-**面向开放世界游戏叙事与世界观构建的本地优先 AI 工作台——
-让庞大的世界观保持一致、可检索、随时可交付。**
+**面向游戏叙事内容生产的本地优先 AI 工作台。**
+
+将文稿、设计配表和数字版 PDF 转换为可追溯的世界模型，在一套工作流中完成设定检索、
+一致性检查、变更影响分析、受控 Agent 协作、提案评审与生产格式导出。
 
 [English](README.md) | 简体中文
 
-![tests](https://img.shields.io/badge/tests-1623_passing-brightgreen)
-![python](https://img.shields.io/badge/python-3.11%2B-blue)
-![frontend](https://img.shields.io/badge/frontend-Vue%203%20%2B%20Vite-42b883)
-![license](https://img.shields.io/badge/license-MIT-lightgrey)
+[![CI](https://github.com/Firefly0237/OWC-open-world-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/Firefly0237/OWC-open-world-copilot/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue)
+![Node](https://img.shields.io/badge/Node-22-339933)
+![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
-<img src="docs/images/overview.png" alt="OWCopilot 工作台 · 世界总览" width="920">
+<img src=".github/assets/overview.png" alt="OWCopilot 世界总览" width="920">
+
+**知识可追溯 · 一致性自动化 · 受控 AI 协作**
 
 </div>
 
-## 一句话说清
+## 为什么需要 OWCopilot
 
-**一个 AI 助手,但它提的每一条修改,都要先过一道机器检查才能落地。**
+大型叙事项目的世界规则通常分散在剧本、表格、任务数据、对话树和参考资料中。随着内容增长，
+团队需要花费越来越多的时间确认最新设定、追踪改动影响，并避免剧情、策划数据和引擎数据之间
+出现矛盾。
 
-剧情团队最怕两件事:**吃书**(角色前后自相矛盾)和**断链**(某条分支永远进不去,或者玩家走进某个
-状态后再也出不来)。内容上到几万条、版本迭代几十轮、几个人并行编辑时,这两件事人眼根本盯不过来。
-现有的叙事工具都在帮你**把内容写出来**,**没有一个能告诉你"这次改动把哪里弄坏了"**。
+OWCopilot 围绕这条生产链路建立统一的内容层：
 
-所以 OWCopilot 是两半 + 一条回边:
+- 摄取时保留来源定位、内容哈希与版本信息；
+- 联合词法、语义和图检索生成带引用的回答；
+- 用确定性规则检查引用、时间线、任务逻辑与内容完整性；
+- 由有界 Agent 调查问题并生成修改提案；
+- 在任务适合拆解时组织多个专职 Worker 协作；
+- 通过评审控制正典变更，并向下游工具导出内容。
 
-```
-      AI 这半                              确定性这半
- (读材料·起草·改内容·提修复)  ──────►  (34 条规则·逻辑模拟·
-                                          分支穷举·时序检查)
-        ▲                                        │
-        └────────────── 判定结果回喂 ─────────────┘
-```
+## 核心能力
 
-右半不会说谎,所以它同时是左半的**评分信号**——不需要人工标注,也不需要额外训练一个打分模型。
-会引入新错误的提案,在人看到之前就被丢弃;同一个信号还驱动一个树搜索,自动找出"改哪几处能把
-错误清干净"。
-
-## 功能特性
-
-- 🗂️ **世界内容管理** — 势力、角色、地点、任务、事件与它们之间的关系，全部以普通文件存储，
-  可用 git 做版本管理。支持从 JSON / CSV / XLSX（中文表头可识别）、Markdown 和整篇文稿导入。
-- 🛡️ **一致性检查** — 引用完整性、时间线顺序、任务逻辑（死锁、不可达阶段、未定义变量）、
-  对话条件、本地化预检等。每条问题都带定位与证据，点开即可修。
-- 🕸️ **影响分析** — 改动一个势力、角色或事件之前，先看清会波及哪些任务、对话和区域。
-- 🔮 **世界问答** — 既能查单个设定，也能问整个世界的格局，回答附带来源引用；世界里没有的
-  内容会明确告诉你缺什么，而不是编一个。
-- 🎭 **有据生成** — 从一句话生成世界初稿，或扩写区域、任务、角色、台词与对话树。生成内容
-  只引用世界中已存在的实体，并经过自动评审打磨后进入审阅队列。
-- 🤖 **智能体闭环** — 一个"边想边做"的智能体通过只读/只提议的工具面诊断世界:权限收敛到唯一
-  裁决点、失败返回**机器可读的错误码**供它自行恢复、观察结果过长时分页读取而非直接截断,并且
-  **永远改不了正典**(这是代码层面的结构性禁令,不是口头约定)。支持断点续跑与暂停等人确认。
-- ⚒️ **修复闭环** — 每个检出的问题都配有修复候选,一键应用、一键回滚。候选会先做**影子校验**:
-  在副本上应用后重跑检查,**会引入新错误的直接丢弃**;并用蒙特卡洛树搜索在修复空间里搜索,
-  以"清掉多少错误"为奖励——确定性、可复现、零成本。
-- ✦ **可视化编辑** — 可拖拽的关系星图、时间线、对话流编辑器，以及世界版本间的快照对比。
-- 📦 **交付导出** — 世界数据以带校验和的数据包导出，本地化输出 CSV / XLIFF 1.2；
-  引擎侧改过的任务行可回传进入审阅。
+| 领域 | 提供的能力 | 主要实现 |
+|---|---|---|
+| 内容摄取 | DOCX、XLSX、Markdown、JSON/CSV 和数字版 PDF 摄取，保留稳定哈希与来源定位 | [content](src/owcopilot/content/)、[PDF intake](src/owcopilot/intake/) |
+| RAG | 结构感知与语义分块、BM25 + dense + graph、weighted RRF、神经重排、上下文预算、引用与拒答 | [retrieval](src/owcopilot/retrieval/) |
+| Agent Runtime | 有界 LangChain/LangGraph ReAct、类型化工具、重试、超时、预算、无进展停止、Checkpoint 与评审暂停 | [agent](src/owcopilot/agent/)、[skills](src/owcopilot/skills/) |
+| Memory | Checkpoint 工作状态、Episodic/Reflection 检索和人审派生 Lesson Memory，各自采用独立生命周期 | [episodic memory](src/owcopilot/agent/episodic.py)、[reflection](src/owcopilot/agent/reflexion.py) |
+| MCP | 本地 stdio Server/Client，支持 tools、resources、prompts、发现与 schema 校验 | [server](src/owcopilot/mcp_server/)、[client](src/owcopilot/mcp_client/) |
+| Multi-Agent | Orchestrator–Worker–Verifier 图、作用域任务、SQLite Blackboard、CAS 认领、结果汇总与独立复核 | [multi-agent](src/owcopilot/multi_agent/) |
+| 质量与追踪 | 确定性审计、影响分析、版本化评测套件、类型化停止原因和 OpenTelemetry Span | [audit](src/owcopilot/audit/)、[evaluation](src/owcopilot/evaluation/) |
+| 交付 | Web、CLI、REST/SSE、Unreal DataTable 导出和 Unity 内容导入包 | [web](apps/web/)、[integrations](integrations/) |
 
 ## 快速开始
 
-```bash
-git clone <repo> && cd openworld
-python -m venv .venv && .venv/Scripts/pip install -e ".[dev,serve]"   # Windows
-# source .venv/bin/activate && pip install -e ".[dev,serve]"          # macOS/Linux
-# 可选：".[semantic]" 启用多语言语义检索（首次会下载一次模型）
+前置条件：Git、Python 3.11 或 3.12；只有启动 Web 工作台才需要 Node.js 22.12+。系统冒烟流程使用
+确定性离线模型，无需 API Key，也不会产生付费模型调用。
 
-# 快速自检：构建内置的双语示例世界并跑完整质量门
-.venv/Scripts/python -m owcopilot.cli.main eval-acceptance --workspace .tmp/demo
-```
+~~~powershell
+git clone https://github.com/Firefly0237/OWC-open-world-copilot.git
+cd OWC-open-world-copilot
+python -m venv .venv
 
-### 启动工作台
+# Windows PowerShell
+.\.venv\Scripts\python -m pip install --upgrade pip
+.\.venv\Scripts\python -m pip install -e ".[dev,serve,mcp,pdf,tokenizer]"
 
-```bash
-npm --prefix frontend install && npm --prefix frontend run build   # 仅首次
-.venv/Scripts/python -m uvicorn owcopilot.service.api:create_app --factory --port 8000
-# 打开 http://localhost:8000 —— 单进程；世界数据存放在 ~/.owcopilot/worlds/
-```
+# 只下载锁定 revision 的 bge-m3 tokenizer（不下载模型权重），再证明它可离线使用。
+# 根目录 model-revisions.json 与 Python 包内携带的正本 Manifest 保持一致。
+.\.venv\Scripts\python scripts\prefetch_models.py --component tokenizer
+$env:HF_HUB_OFFLINE = "1"
+$env:TRANSFORMERS_OFFLINE = "1"
+.\.venv\Scripts\python scripts\prefetch_models.py --component tokenizer --offline
 
-首次启动有新手引导逐区讲解。如果你不熟悉命令行，请同事帮忙把上面的命令跑一次即可——
-之后的所有操作都在浏览器里完成。
+# 原生工具路径
+.\.venv\Scripts\python scripts\run_system_demo.py --transport native --artifact-root .tmp\system-demo
 
-**首次运行是空的。** 通过「汇编 · 入库」导入你已有的素材（文稿、表格、Markdown），
-或在「创世 · 创作」里从一句话生成初稿（需要先接入模型）。
+# 通过本地 stdio MCP Server/Client 执行同一审计
+.\.venv\Scripts\python scripts\run_system_demo.py --transport mcp --artifact-root .tmp\system-demo
+~~~
 
-**接入你自己的模型：** 打开「设置」，选择服务商（DeepSeek / OpenAI / Anthropic / Kimi /
-智谱 / 通义 / 豆包 / 自定义），填入 API Key 并测试连接。Key 只保存在本地进程内存中、
-直连服务商。浏览、检查、审阅、导出等功能不接入模型也能完整使用。
+macOS/Linux 请把 <code>.\.venv\Scripts\python</code> 替换为
+<code>.venv/bin/python</code>，并使用 <code>/</code> 路径分隔符。
 
-## 使用方式
+成功运行后，输出 JSON 将包含：
 
-- **Web 工作台** — 主要使用方式：创建、导入、检查、问答、审阅、导出都在浏览器里完成。
-- **CLI** — `audit`、`impact`、`ask`、`draft` / `expand`、`export`、`eval-acceptance` 等；
-  JSON 输出，有未解决错误时以非零码退出，可直接接入 CI。
-- **REST API** — 按项目组织的资源化接口，长任务通过 SSE 推送进度。
-- **MCP 服务** — 把诊断 / 检索 / 提议工具集暴露给 AI 助手和智能体框架使用。
+~~~json
+{
+  "demo_status": "passed",
+  "pdf_rag": {
+    "citation_round_trip": true
+  }
+}
+~~~
 
-## 工作原理
+该命令会贯通 CLI、存储、Checkpoint、Memory、Multi-Agent 图、PDF→RAG 引用回路，以及所选的
+原生或 MCP 工具路径。参考结果见[系统演示结果](benchmarks/evidence/system-demo/README.md)。
 
-```
-  已有素材 · 新想法 · 引擎侧改动
-              ↓
-  内容中枢 —— 结构化、有版本、可检索
-              ↓
-  质量层 —— 一致性校验 · 影响分析 · 时间线与任务逻辑检查
-              ↓
-  辅助层 —— 带引用的世界问答 · 有据初稿 · 修复建议
-              ↓
-  审阅 —— 通过、修改或退回；每次变更可追溯、可回滚
-              ↓
-  交付 —— 世界数据包 · 本地化文件 · 引擎回传
-```
+上述命令就是新机器从零安装路径。Web 开发与生产式联调见
+[Web 工作台说明](apps/web/README.md)，PostgreSQL Team 部署见
+[Team 运维手册](infra/team/README.md)，真实 Provider 只按 [`.env.example`](.env.example) 显式启用。
 
-## 到底验证到什么程度
+## 系统架构
 
-本项目严格区分**"实现了"**和**"验证了"**,并且明说哪个是哪个。
+~~~mermaid
+flowchart TD
+    I["DOCX · XLSX · Markdown · 数字版 PDF"] --> P["摄取：原始字节/hash + 页/单元格/段落定位"]
+    P --> C["正典内容：本地文件/SQLite<br/>团队 revision kernel：PostgreSQL"]
+    P --> R["检索单元 + parent 关系 + provenance"]
+    R --> H["BM25 + dense vector + graph expansion"]
+    H --> F["Weighted RRF + cross-encoder rerank + token budget"]
+    F --> A["带引用问答 / 有界 ReAct Agent"]
+    M["Checkpoint 状态<br/>Episodic/Reflection + Lesson Memory"] <--> A
+    X["MCP Client ↔ stdio Server<br/>tools · resources · prompts"] <--> A
+    A --> Q{"任务适合拆解？"}
+    Q -->|是| MA["Orchestrator → scoped Workers → Verifier"]
+    Q -->|否| D["审计与影响分析"]
+    MA --> D
+    C --> D
+    D --> G["带引用回答或修改提案"]
+    G --> V["评审门"]
+    V --> C
+    A -. "预算 · 重试 · stop reason · OTel" .-> T["Trace 与评测"]
+    MA -. "assignment · result · verdict" .-> T
+~~~
 
-| 部分 | 状态 |
-|---|---|
-| 确定性检查 | 34 条规则,其中 7 条配有自动修复器;离线测试约 2380 项。 |
-| 智能体诊断闭环 | **真实模型下已验证**:5 步、0.004 美元、状态完成——它自己调用审计,并把机器输出翻译成策划能读懂的结论。 |
-| 修复搜索 | **已验证**:注入 1 个错误 → 1 轮迭代清零,花费 0 元(纯确定性路径,未调用模型)。 |
-| **虚幻引擎数据层** | **已在真实 UE 5.7.2 上验证**——数据表灌入与读回**零差异**,并由一条会启动无界面编辑器的回归测试守着。条件表达式在**导出期**就编译成结构化子句,所以引擎侧不需要表达式解析器、不需要 C++。 |
-| **确定性层到底值多少** | **不是主张,是测出来的。** 单变量对照实验(72 次真实运行、12 个植入缺陷的世界、每组 3 次):智能体手里有检查器时,真实缺陷找到 **100%**、编造 **0** 条;**把检查器拿掉**后只找到 **11.6%**、编造 **279** 条,而且在一个干净世界上**三次全部报假警**。两组置信区间不重叠。 |
-| Unity 包 | 代码完整(导入器、运行时执行器、跨语言差分夹具),但**从未编译或运行过**——按未验证对待。 |
+## 主流程如何工作
 
-**刻意写明的已知边界**:没有做过大规模基准,所以不给任何吞吐量数字;多智能体编排有架构测试但
-**没有端到端评测**;智能体目前只有命令行入口(接口层与前端未接);上下文压缩与重规划机制实现了,
-但在已记录的真实运行中**未被触发**。
+1. 摄取层保留原始哈希，以及段落、单元格、页面、文本行或边界框定位。
+2. 分块先服从文档结构，再在安全结构区域内应用语义边界。
+3. BM25、Dense Vector 和 Graph Expansion 生成候选，Weighted RRF 与 Cross-Encoder 完成排序。
+4. Context Packing 执行 Token 预算，同时保留生成引用所需的 Provenance。
+5. Agent 在重试、时限、预算和无进展控制下调用类型化原生工具或 MCP 工具。
+6. 复杂任务可以分发给作用域隔离的 Worker，Verifier 在汇总前重新执行确定性检查。
+7. 通过评审的提案才会更新正典内容，并进入引擎导出流程。
 
-设计说明、验证记录与行业对照自查见 [`docs/`](docs/) 目录。
+## 技术设计
+
+### 检索与分块
+
+结构边界用于保护标题、表格、任务步骤、对话轮次和引用定位。语义相似度只在这些安全区域内决定
+合并或切分，既保持局部意图连贯，也不跨越已知文档结构。混合检索以 BM25/Dense 等权作为冷启动，
+RRF 消除不同评分尺度的影响，再通过 dev 集选择候选深度、融合权重与重排配置，最后在 held-out 集评测。
+
+### Agent、Memory 与恢复
+
+Agent 获得限定作用域的读取、分析和提案工具。Middleware 对错误分类，对瞬时故障执行有界退避重试，
+并实施时间、Token 和无进展停止条件。Checkpoint 用于恢复活动工作流；Episodic 与 Reflection Memory
+按相关性、时效性和重要度检索相似运行；通过评审的反馈会形成可撤销的 Lesson。
+
+### MCP 与多 Agent 协作
+
+原生工具与 MCP 工具复用类型化业务 Handler。MCP 层负责协议发现、Resource/Prompt 访问、输入输出
+Schema 校验和传输故障观测。面对可分离的子问题，Orchestrator 将作用域明确的任务发布到 Blackboard，
+Worker 通过原子操作认领，Verifier 检查结果后再统一汇总；简单任务继续走单 Agent 路径。
+
+时序性质编写也采用同样的可复核设计：受限翻译、封闭世界 flag 接地、确定性组装/类型检查、回译，
+以及独立的审阅事务。实现与可执行契约分别位于
+[规约编写流水线](src/owcopilot/spec_authoring/) 与 [契约测试](tests/core/test_spec_authoring.py)。
+
+## 基准与质量
+
+| 基准 | 数据与方法 | 当前结果 |
+|---|---|---|
+| [检索](benchmarks/evaluation/reports/retrieval-report-v1.json) | 24 组冻结文档/查询；12 dev + 12 held-out；bge-m3 与 bge-reranker-v2-m3 | held-out 神经重排 MRR、nDCG@5、Recall@1：**1.0** |
+| [冻结 ContextPack 诊断](benchmarks/evaluation/reports/retrieval-diagnostics-v1.json) | 120 条冻结查询；production ContextPack recall、FP2/FP3 预算归因和配对 McNemar A/B；确定性 HashingEmbedder | `$0` **机制验证通过**；绝对指标明确不作为语义质量结论 |
+| [分块](benchmarks/evaluation/reports/chunking-report-v1.json) | 6 个边界标注文档；3 dev + 3 held-out；结构与语义两种策略 | held-out balanced accuracy：两种策略均为 **0.75** |
+| [结构复杂度](benchmarks/complexity_corpus.md) | 三档 profile 采样叙事语料依次经过 production audit、simulation、有界探索与 witness replay | 三档均未截断，witness replay 全部通过 |
+| [正式评测套件](benchmarks/formal/) | 版本化 Contract、Control、Fault、Hard-Zero 规则和产物校验 | 可执行的 Suite 与 Artifact 校验定义 |
+
+两条确定性的 `$0` 诊断无需下载模型即可复算：
+
+~~~powershell
+.\.venv\Scripts\python scripts\run_frozen_retrieval_diagnostics.py
+.\.venv\Scripts\python scripts\run_complexity_benchmark.py
+~~~
+
+安装语义与 tokenizer 依赖后可复算检索与分块报告。首次预取会下载锁定 revision 的 embedding 与
+reranker 权重，体积可能达到数 GB，且不会进入 Git；第二条命令会在断网模式下检查缓存是否完整。
+
+~~~powershell
+.\.venv\Scripts\python -m pip install -e ".[semantic,tokenizer]"
+.\.venv\Scripts\python scripts\prefetch_models.py --component all
+.\.venv\Scripts\python scripts\prefetch_models.py --component all --offline
+.\.venv\Scripts\python scripts\eval_retrieval_benchmark.py --output .tmp\retrieval-report.json
+.\.venv\Scripts\python scripts\eval_chunking_benchmark.py --output .tmp\chunking-report.json
+.\.venv\Scripts\python scripts\run_formal_evals.py --output-dir .tmp\formal-evals
+~~~
+
+真实 LLM 是独立的按需开关：安装 `.[live]`，把 `.env.example` 复制为 `.env`，配置受支持的
+Provider，设置 `OWCOPILOT_LLM_MODE=real`，并用 `OWCOPILOT_API_KEY` 保护服务。默认冒烟、测试和
+正式评测均不会调用付费 Provider。
+
+## 启动 Web 工作台
+
+前端需要 Node 22.12+。开发模式请在两个终端分别启动 API 与 Vite；Vite 会把 API 请求代理到
+8000 端口。
+
+~~~powershell
+.\.venv\Scripts\python -m uvicorn owcopilot.service.api:create_app --factory --port 8000
+npm ci --prefix apps/web
+npm run dev --prefix apps/web
+# 打开 http://localhost:5173
+~~~
+
+若要按生产方式使用单端口，请执行 `npm run build --prefix apps/web`，重启 API 后打开
+<http://localhost:8000>；也可直接执行 `docker compose up --build`。详见
+[Web README](apps/web/README.md)。PostgreSQL Team Profile 使用独立、故障关闭的
+[运维手册](infra/team/README.md)，本地快速开始不会静默开启 Team 模式。
+
+可用接口：
+
+- **Web**：摄取、浏览、审计、带引用问答、Agent 任务、评审、可视化和导出。
+- **CLI**：面向本地自动化的机器可读命令与非零失败退出码。
+- **REST/SSE**：资源化 API 与异步任务进度。
+- **MCP**：面向 MCP Host 与 Agent Consumer 的本地工具互操作。
+
+## 仓库结构
+
+~~~text
+apps/web/                    Vue 3 工作台
+src/owcopilot/agent/         Agent Runtime、Middleware 与 Memory
+src/owcopilot/retrieval/     分块、索引、融合、重排与 Context Packing
+src/owcopilot/mcp_server/    MCP Server 与共享工具 Handler
+src/owcopilot/mcp_client/    MCP Consumer、校验与 Agent Adapter
+src/owcopilot/multi_agent/   编排、Worker、Blackboard 与 Verifier
+src/owcopilot/evaluation/    验收、任务、可靠性和正式评测 Harness
+benchmarks/evaluation/       冻结检索/分块数据集与报告
+benchmarks/formal/           版本化评测 Contract 与 Control
+scripts/                     系统演示、评测与质量门禁
+tests/                       后端与集成测试
+infra/ · integrations/       部署与引擎适配
+~~~
+
+## 开发与测试
+
+~~~powershell
+.\.venv\Scripts\python -m ruff check src tests scripts
+.\.venv\Scripts\python -m mypy src/owcopilot
+.\.venv\Scripts\python -m pytest -q
+npm test --prefix apps/web
+npm run build --prefix apps/web
+~~~
+
+Windows 下可用 <code>pwsh ./scripts/ci_gate.ps1</code> 执行聚合质量门。GitHub Actions 覆盖
+Python 3.11/3.12、MCP 兼容性、PostgreSQL Migration/RLS、前端测试和容器冒烟测试。
 
 ## 技术栈
 
-Python 3.11+ · FastAPI · Pydantic v2 · NetworkX · SQLite (WAL) — Vue 3 · Vite · TypeScript，
-可视化视图为手写的确定性 SVG。兼容任意 OpenAI 风格的 LLM 服务。
+Python 3.11+ · Pydantic v2 · FastAPI · LangChain/LangGraph · SQLite/FTS5/sqlite-vec ·
+usearch HNSW · NetworkX · sentence-transformers · MCP Python SDK · PostgreSQL/Alembic ·
+OpenTelemetry · Vue 3 · Vite · TypeScript
 
 ## 许可证
 
-[MIT](LICENSE)
+本项目使用 [MIT License](LICENSE)。Bug 和功能建议请提交至
+[GitHub Issues](https://github.com/Firefly0237/OWC-open-world-copilot/issues)。贡献流程、私密安全报告与
+发布历史分别见 [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md) 和
+[CHANGELOG.md](CHANGELOG.md)。

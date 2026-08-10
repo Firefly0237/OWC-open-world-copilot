@@ -1,8 +1,8 @@
 # 配对 A/B 检索评测：McNemar 精确检验 + 多跳准入门禁（替换 4 题、分母 0/0 的旧 A/B）。
 """Paired A/B evaluation for retrieval configs: McNemar's exact test + a multi-hop admission gate.
 
-This replaces the retired prompt A/B (``benchmarks/prompt_ab_report.md`` — 4 questions, a ``0/0``
-bridge-hit denominator) with a statistically honest, paired design over the frozen ``n >= 100``
+This replaces an uninformative four-query prompt pilot (bridge-hit denominator ``0/0``) with a
+statistically honest, paired design over the frozen ``n >= 100``
 retrieval evaluation set (:mod:`owcopilot.evaluation.retrieval_dataset`):
 
 * **Paired success@k.** The *same* query is scored under configuration A and configuration B, so the

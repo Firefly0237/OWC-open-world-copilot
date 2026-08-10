@@ -9,7 +9,7 @@ DPO-style trainer 或偏好评测脚本消费。
   **critic 分数上升**锚定（`meta.rejected_score → meta.chosen_score`），或最终稿过审锚定。
 - **当前规模**：N=3（开发规模示例）。管线随创作工作流持续供给——每次带修订轮的生成都可能
   产出新对（`scripts/collect_preference_pairs.py` 可复跑，约 $0.05/轮）。
-- **正确性保证**：提取逻辑由单元测试覆盖（`tests/test_dpo_export.py`），含快照落袋、
+- **正确性保证**：提取逻辑由单元测试覆盖（`tests/evaluation/test_dpo_export.py`），含快照落袋、
   分数上升锚定、未过审终稿不出对、DPO 格式兼容。
 - **诚实注记**：N=3 只是开发规模样例，不足以支撑有统计意义的训练结论。这里展示的是
   **偏好数据导出/交接管线已跑通**，不是“模型已微调”、不是效果宣称，也没有产出新权重。

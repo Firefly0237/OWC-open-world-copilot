@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ...storage.world_lock import serialized_world_write
 from .._common import open_project as _project
 
 
@@ -39,18 +40,31 @@ def _object_ref_exists(bundle: Any, object_ref: str) -> bool:
     kind, sep, oid = object_ref.partition(":")
     if not sep or not oid:
         return False
+    if kind == "relation":
+        parts = oid.split(":", 2)
+        return len(parts) == 3 and any(
+            relation.source == parts[0]
+            and relation.kind == parts[1]
+            and relation.target == parts[2]
+            for relation in bundle.relations
+        )
     table = {
         "entity": bundle.entities,
+        "quest_event_ref": bundle.quest_event_refs,
         "quest": bundle.quests,
         "region": bundle.regions,
         "poi": bundle.pois,
         "term": bundle.terms,
-        "dialogue": bundle.dialogue_trees,
+        "dialogue": bundle.dialogues,
         "dialogue_tree": bundle.dialogue_trees,
+        "localized_text": bundle.localized_texts,
+        "style_guide": bundle.style_guides,
+        "style_rubric": bundle.style_rubrics,
     }.get(kind)
     return table is not None and oid in table
 
 
+@serialized_world_write
 def asset_attach_action(
     content_root: str | Path,
     *,
@@ -72,6 +86,7 @@ def asset_attach_action(
         return {"asset": asset.model_dump(mode="json")}
 
 
+@serialized_world_write
 def asset_detach_action(
     content_root: str | Path,
     *,

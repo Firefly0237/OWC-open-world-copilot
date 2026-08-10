@@ -19,8 +19,17 @@ from ..content.models import (
     Origin,
     ReviewStatus,
 )
+from ..inspiration.grounding import (
+    build_reference_report,
+    inspiration_prompt_section,
+    inspiration_refs_metadata,
+    retrieve_drafting_references,
+)
+from ..inspiration.report import ReferenceReportItem
+from ..inspiration.retrieval import ReferenceContextBuilder
 from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json_object
+from ..retrieval.models import ContextPack
 from ..util import slugify, unique_id
 from .calibration import critic_from_trail, primary_dim_from_trail
 from .critic import DIALOGUE_CRITIQUE_MARKER, DialogueCritic
@@ -29,6 +38,10 @@ from .lint import AssistLintIssue, lint_text
 from .refine import RefineStep, run_refine_loop
 from .review_queue import ReviewItem, ReviewQueue
 from .voice import build_voice_card
+
+#: 素材检索预算：这条链路本没有 canon 检索预算旋钮（只用 voice card，不调
+#: ``ContextPackBuilder``），取与任务草稿默认档一致的固定值（N4.3，同构 grounding 契约）。
+_INSPIRATION_BUDGET_TOKENS = 800
 
 _SYSTEM_PROMPT = (
     "You write branching game dialogue. Return ONE JSON object only (no markdown): "
@@ -60,6 +73,10 @@ class DialogueTreeResult(BaseModel):
     review_item: ReviewItem | None = None
     refine_trail: list[RefineStep] = Field(default_factory=list)
     auto_review_incomplete: bool = False
+    # 灵感库那一侧的溯源（N4.3，同构 QuestDraft/CharacterProfile）：这次对白树用到的素材 + 每条
+    # 素材的确定性泄漏重算结论。素材开关关掉（默认）时恒为空，产物与接线之前逐字节一致。
+    inspiration_refs: list[str] = Field(default_factory=list)
+    reference_report: list[ReferenceReportItem] = Field(default_factory=list)
 
 
 class DialogueTreeService:
@@ -72,10 +89,15 @@ class DialogueTreeService:
         critic: DialogueCritic | None = None,
         max_refine_rounds: int = 0,
         lessons: list[dict] | None = None,  # cross-session lesson archive (get_lessons_for_type)
+        # 灵感库检索器（N4.3）。与 QuestDraft/CharacterProfile 同构：检索器是装配期基础设施，
+        # "这次要不要吃素材"是每次调用时人自己的选择（``generate(use_references=...)``，默认关）。
+        # None = 这个调用方还没接素材，开关怎么传都是关的。
+        reference_context_builder: ReferenceContextBuilder | None = None,
     ) -> None:
         self.gateway = gateway
         self.bundle = bundle
         self.review_queue = review_queue
+        self.reference_context_builder = reference_context_builder
         # Opt-in critique→refine loop: without a critic the service is the original single shot.
         self.critic = critic
         self.max_refine_rounds = max_refine_rounds if critic is not None else 0
@@ -92,11 +114,28 @@ class DialogueTreeService:
         quest_id: str | None = None,
         max_nodes: int = 12,
         max_chars: int = 120,
+        use_references: bool = False,
     ) -> DialogueTreeResult:
+        """Compose one dialogue tree. ``use_references`` additionally grounds it on the inspiration
+        library (see ``src/owcopilot/inspiration/grounding.py``).
+        默认关；库里没有允许用于草稿的素材时照常生成。"""
         unknown = [pid for pid in participant_ids if pid not in self.bundle.entities]
         if unknown:
             raise ValueError(f"unknown participant entities: {', '.join(unknown)}")
         known_entities = set(self.bundle.entities)
+        # 检索查询：brief + 参与者名字（契约 §三），只算一次、贯穿整个 refine 循环。
+        participant_names = [
+            self.bundle.entities[pid].name
+            for pid in participant_ids
+            if self.bundle.entities[pid].name.strip()
+        ]
+        inspiration_query = " ".join(part for part in (brief, *participant_names) if part.strip())
+        inspiration_pack = retrieve_drafting_references(
+            self.reference_context_builder,
+            inspiration_query,
+            enabled=use_references,
+            budget_tokens=_INSPIRATION_BUDGET_TOKENS,
+        )
 
         def make(prior: DialogueTree | None, feedback: list[str] | None) -> DialogueTree:
             return self._compose(
@@ -107,6 +146,7 @@ class DialogueTreeService:
                 max_chars=max_chars,
                 prior=prior,
                 feedback=feedback,
+                inspiration_pack=inspiration_pack,
             )
 
         tree = make(None, None)
@@ -155,6 +195,17 @@ class DialogueTreeService:
             structure_problems=problems,
             refine_trail=trail,
             auto_review_incomplete=auto_review_incomplete,
+            inspiration_refs=inspiration_pack.refs,
+            reference_report=build_reference_report(
+                inspiration_pack,
+                # 只把这棵树交给检测：既有正典是豁免面，不是被查对象。node 台词与选项文本已经在
+                # ``draft_prose`` 的 ``_iter_prose`` 里覆盖（走 dialogue_trees 分支），不需要
+                # extra_prose。
+                draft=ContentBundle(dialogue_trees={tree.id: tree}),
+                canon=self.bundle,
+                human_input=brief,
+                used_for="对白树的灵感参考",
+            ),
         )
         if self.review_queue is not None:
             _dialogue_trail_dump = [r.model_dump(mode="json") for r in trail]
@@ -178,6 +229,7 @@ class DialogueTreeService:
         max_chars: int,
         prior: DialogueTree | None,
         feedback: list[str] | None,
+        inspiration_pack: ContextPack,
     ) -> DialogueTree:
         cards = [
             build_voice_card(self.bundle.entities[pid], self.bundle) for pid in participant_ids
@@ -198,6 +250,9 @@ class DialogueTreeService:
             f"{_SYSTEM_PROMPT}\n{lesson_section}"
             f"Character budget per line: {max_chars}. Max nodes: {max_nodes}.\n"
             f"{(lang + chr(10)) if lang else ''}Voice cards: {cards_json}"
+            # 素材是独立的一段，接在 voice cards 之后：两者绝不混进同一个 context 列表。没有素材
+            # 时这里是空串，system prompt 与接线之前逐字节一致。
+            + inspiration_prompt_section(inspiration_pack)
         )
         user = _dialogue_user_message(brief, participant_ids, prior=prior, feedback=feedback)
 
@@ -218,6 +273,7 @@ class DialogueTreeService:
                 existing_ids=set(self.bundle.dialogue_trees),
                 max_nodes=max_nodes,
                 speaker_aliases=aliases,
+                inspiration_pack=inspiration_pack,
             )
 
         raw = self.gateway.complete(task="dialogue_tree", system=system, user=user)
@@ -234,7 +290,10 @@ class DialogueTreeService:
         self, prior: DialogueTree, feedback: str, *, max_nodes: int = 12, max_chars: int = 120
     ) -> DialogueTree:
         """Regenerate the dialogue to address reviewer feedback; the prior tree carries the content
-        so retrieval grounding is unnecessary -- only the speakers and the prior matter."""
+        so retrieval grounding is unnecessary -- only the speakers and the prior matter.
+
+        素材不参与修订（与任务草稿/人设同一取舍）：修订是照人的意见改这一版，再塞一遍参考素材只会
+        把评审意见冲淡；原树若用过素材，它的 ``inspiration_refs`` 还留在 metadata 里，溯源不丢。"""
         participant_ids = [pid for pid in prior.participants if pid in self.bundle.entities]
         first_line = next(iter(prior.nodes.values())).text if prior.nodes else ""
         brief = (first_line or "改进这段对话").strip()
@@ -246,6 +305,7 @@ class DialogueTreeService:
             max_chars=max_chars,
             prior=prior,
             feedback=[feedback.strip()],
+            inspiration_pack=ContextPack(query=brief, budget_tokens=_INSPIRATION_BUDGET_TOKENS),
         )
         revised.metadata["revised_from_feedback"] = "true"
         return revised
@@ -282,6 +342,8 @@ def parse_dialogue_tree(
     existing_ids: set[str],
     max_nodes: int,
     speaker_aliases: dict[str, str] | None = None,
+    # N4.3: 素材开关关掉 / 调用方不传时是 None，metadata 不多一个键；产物与接线之前逐字节一致。
+    inspiration_pack: ContextPack | None = None,
 ) -> DialogueTree:
     payload = extract_json_object(raw)
     tree_id = _unique_id("dlg", str(payload.get("title") or brief[:24]), set(existing_ids))
@@ -324,7 +386,12 @@ def parse_dialogue_tree(
         participants=list(participant_ids),
         root_node=root,
         nodes=nodes,
-        metadata={"brief": brief},
+        metadata={
+            "brief": brief,
+            # 逗号连接的字符串，与 worldgen 同格式（inspiration.lineage 的悬空引用检查按
+            # split(",") 读）。空 dict when no material was recalled → metadata 与接线之前一致。
+            **(inspiration_refs_metadata(inspiration_pack) if inspiration_pack is not None else {}),
+        },
         origin=Origin.AI_DRAFT,
         review_status=ReviewStatus.PENDING_REVIEW,
     )

@@ -26,6 +26,7 @@ import os
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from ..errors import OWCopilotError
@@ -56,6 +57,14 @@ class CircuitOpenError(OWCopilotError, RuntimeError):
     """Raised by a circuit breaker when the circuit is open — fail fast, no call made."""
 
 
+@dataclass(frozen=True, slots=True)
+class _CallToken:
+    """The circuit generation in which a call was admitted."""
+
+    generation: int
+    is_half_open_probe: bool
+
+
 class _CircuitState:
     """The consecutive-failure / open-cooldown / half-open-trial bookkeeping for one circuit.
 
@@ -77,6 +86,8 @@ class _CircuitState:
         self._lock = threading.Lock()
         self._failures = 0
         self._opened_at: float | None = None  # None = closed
+        self._generation = 0
+        self._half_open_probe_generation: int | None = None
         self.trips = 0
 
     @property
@@ -87,46 +98,124 @@ class _CircuitState:
                 self._clock() - self._opened_at < self.reset_timeout_seconds
             )
 
-    def _guard(self) -> None:
-        """Fast-fail if the circuit is open and still cooling; a lapsed cooldown falls through as a
-        half-open trial (the guard returns and the call is allowed to run)."""
+    def _guard(self) -> _CallToken:
+        """Admit a closed call or atomically reserve the sole half-open probe."""
         with self._lock:
-            if self._opened_at is not None and (
-                self._clock() - self._opened_at < self.reset_timeout_seconds
-            ):
+            if self._opened_at is None:
+                return _CallToken(self._generation, is_half_open_probe=False)
+
+            if self._clock() - self._opened_at < self.reset_timeout_seconds:
                 raise CircuitOpenError("provider circuit is open; failing fast")
 
-    def _on_failure(self) -> None:
+            # Cooldown has elapsed. Reserve the half-open probe while still holding the same lock
+            # used by every other admission, so sync and async callers cannot both slip through.
+            if self._half_open_probe_generation == self._generation:
+                raise CircuitOpenError("provider circuit is half-open; probe already in progress")
+            self._half_open_probe_generation = self._generation
+            return _CallToken(self._generation, is_half_open_probe=True)
+
+    def _on_failure(self, token: _CallToken) -> None:
         with self._lock:
+            if token.generation != self._generation:
+                return
+
+            if token.is_half_open_probe:
+                if self._half_open_probe_generation != token.generation:
+                    return
+                # A failed probe re-opens the circuit and starts a fresh cooldown. It is a new
+                # generation, but not a new trip: the circuit never closed between the two.
+                self._half_open_probe_generation = None
+                self._failures = self.failure_threshold
+                self._opened_at = self._clock()
+                self._generation += 1
+                return
+
+            if self._opened_at is not None:
+                return
             self._failures += 1
             if self._failures >= self.failure_threshold:
-                if self._opened_at is None:  # first open — not a re-open from half-open
-                    self.trips += 1
+                self.trips += 1
                 self._opened_at = self._clock()
+                self._half_open_probe_generation = None
+                self._generation += 1
 
-    def _on_success(self) -> None:
-        with self._lock:  # a success closes the circuit and clears the streak
+    def _on_success(self, token: _CallToken) -> None:
+        with self._lock:
+            if token.generation != self._generation:
+                return
+
+            if token.is_half_open_probe:
+                if self._half_open_probe_generation != token.generation:
+                    return
+                self._half_open_probe_generation = None
+                self._failures = 0
+                self._opened_at = None
+                self._generation += 1
+                return
+
+            if self._opened_at is not None:
+                return
             self._failures = 0
-            self._opened_at = None
 
-    def run(self, fn: Callable[[], Any]) -> Any:
-        """Run *fn* under the circuit: fast-fail when open, else call and update the streak."""
-        self._guard()
+    def _on_ignored_failure(self, token: _CallToken) -> None:
+        """Release an eligible probe when the failure is outside breaker-health policy."""
+        if not token.is_half_open_probe:
+            return
+        with self._lock:
+            if (
+                token.generation == self._generation
+                and self._half_open_probe_generation == token.generation
+            ):
+                self._half_open_probe_generation = None
+
+    def run(
+        self,
+        fn: Callable[[], Any],
+        *,
+        should_count_failure: Callable[[Exception], bool] | None = None,
+    ) -> Any:
+        """Run *fn* under the circuit and update the streak for eligible failures only.
+
+        ``None`` preserves the state machine's original count-all behaviour for direct callers.
+        Provider wrappers pass an availability-only predicate so deterministic request/configuration
+        failures neither increment nor reset provider-health state.
+        """
+        token = self._guard()
         try:
             result = fn()
-        except Exception:
-            self._on_failure()
+        except Exception as exc:
+            if should_count_failure is None or should_count_failure(exc):
+                self._on_failure(token)
+            else:
+                self._on_ignored_failure(token)
             raise
-        self._on_success()
+        except BaseException:
+            # Cancellation/interrupts are not provider-health failures, but a half-open slot must
+            # not remain permanently occupied when one escapes the probe.
+            self._on_ignored_failure(token)
+            raise
+        self._on_success(token)
         return result
 
-    async def arun(self, afn: Callable[[], Awaitable[Any]]) -> Any:
+    async def arun(
+        self,
+        afn: Callable[[], Awaitable[Any]],
+        *,
+        should_count_failure: Callable[[Exception], bool] | None = None,
+    ) -> Any:
         """Async sibling of :meth:`run` — identical bookkeeping around an awaited call."""
-        self._guard()
+        token = self._guard()
         try:
             result = await afn()
-        except Exception:
-            self._on_failure()
+        except Exception as exc:
+            if should_count_failure is None or should_count_failure(exc):
+                self._on_failure(token)
+            else:
+                self._on_ignored_failure(token)
             raise
-        self._on_success()
+        except BaseException:
+            # ``asyncio.CancelledError`` is a BaseException on supported Python versions.
+            self._on_ignored_failure(token)
+            raise
+        self._on_success(token)
         return result

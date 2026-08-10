@@ -13,9 +13,20 @@
 *.egg-info/
 build/
 dist/
+.tmp/
+reports/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+# Host model/tokenizer caches never enter the context; image builds provision the pinned tokenizer
+# into a dedicated cache and verify it offline before the runtime stage.
+.cache/
+.huggingface/
+model-cache/
+models/
 # The frontend is built fresh inside the image's node stage; never ship host artifacts.
-frontend/node_modules/
-frontend/dist/
+apps/web/node_modules/
+apps/web/dist/
 
 # Editors / VCS / local scratch
 .idea/
@@ -27,5 +38,5 @@ frontend/dist/
 # Docs and tests aren't needed in the runtime image (tests run in CI, not in the container).
 tests/
 docs/
-project_docs/
 *.md
+!README.md

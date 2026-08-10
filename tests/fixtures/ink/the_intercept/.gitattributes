@@ -1,0 +1,3 @@
+# Keep the vendored ink fixture byte-for-byte (LF) regardless of core.autocrlf, so its recorded
+# sha256 stays stable across platforms/checkouts. This is upstream data, not our source.
+TheIntercept.ink -text

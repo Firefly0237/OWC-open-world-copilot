@@ -11,6 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ...content.hash import content_hash
+from ...storage.world_lock import world_write_lock
 from .._common import deterministic_cost_budget as _deterministic_cost_budget
 from .._common import open_project as _project
 from ._shared import _gateway
@@ -58,8 +60,12 @@ def run_compliance_scan_action(
             semantic_threshold=pack.semantic_threshold,
         )
         store = CaseStore(project.content_store.root)
-        cases = open_cases_from_sweep(report, store.load())
-        store.save(cases)
+        # The sweep (and especially its optional model judge) can be slow. Keep it outside the
+        # mutation lock, then merge its findings into the latest ledger while holding the lock so
+        # a concurrent assignment/rescan cannot be overwritten by an old snapshot.
+        with world_write_lock(project.content_store.root):
+            cases = open_cases_from_sweep(report, store.load())
+            store.save(cases)
         return {
             "scanned_total": report.scanned_total,
             "hits": len(report.hits),
@@ -103,12 +109,13 @@ def transition_case_action(
 
     with _project(content_root, sqlite_path) as project:
         store = CaseStore(project.content_store.root)
-        cases = store.load()
-        case = cases.get(case_id)
-        if case is None:
-            raise ValueError(f"整改案件不存在：{case_id}")
-        transition(case, CaseStatus(to), operator=operator, note=note, assignee=assignee)
-        store.save(cases)
+        with world_write_lock(project.content_store.root):
+            cases = store.load()
+            case = cases.get(case_id)
+            if case is None:
+                raise ValueError(f"整改案件不存在：{case_id}")
+            transition(case, CaseStatus(to), operator=operator, note=note, assignee=assignee)
+            store.save(cases)
         return {
             "case": case.model_dump(mode="json"),
             "cost_budget": _deterministic_cost_budget("case_transition"),
@@ -133,10 +140,16 @@ def rescan_case_action(
     use_llm = llm_mode == "real"
     with _project(content_root, sqlite_path) as project:
         store = CaseStore(project.content_store.root)
-        cases = store.load()
-        case = cases.get(case_id)
-        if case is None:
-            raise ValueError(f"整改案件不存在：{case_id}")
+        # Snapshot the case under the world lock, but never hold that lock across an optional LLM
+        # sweep. At commit time we compare both the case and canon revision; a concurrent edit is
+        # surfaced as a retry instead of silently overwriting its result or signing off stale canon.
+        with world_write_lock(project.content_store.root):
+            initial_cases = store.load()
+            initial_case = initial_cases.get(case_id)
+            if initial_case is None:
+                raise ValueError(f"整改案件不存在：{case_id}")
+            initial_case = initial_case.model_copy(deep=True)
+            canon_hash = content_hash(project.bundle)
         gateway = None
         if use_llm:
             gateway, _telemetry = _gateway(
@@ -145,8 +158,8 @@ def rescan_case_action(
                 llm_model=llm_model,
                 offline_provider=OfflineSweepJudgeProvider(),
             )
-        _case, still = rescan_case(
-            case,
+        candidate, still = rescan_case(
+            initial_case.model_copy(deep=True),
             project.bundle,
             rule_pack=pack,
             operator=operator,
@@ -154,9 +167,21 @@ def rescan_case_action(
             embedder=project.embedder,
             use_llm=use_llm,
         )
-        store.save(cases)
+        with world_write_lock(project.content_store.root):
+            latest_bundle = project.content_store.load_scoped(
+                world_id=project.world_id,
+                version=project.version,
+            )
+            if content_hash(latest_bundle) != canon_hash:
+                raise ValueError("复扫期间正典已变更，请重新复扫后再签核。")
+            cases = store.load()
+            current_case = cases.get(case_id)
+            if current_case is None or current_case != initial_case:
+                raise ValueError("复扫期间整改案件已被他人更新，请刷新后重试。")
+            cases[case_id] = candidate
+            store.save(cases)
         return {
-            "case": case.model_dump(mode="json"),
+            "case": candidate.model_dump(mode="json"),
             "still_flagged": still,
             "cost_budget": _deterministic_cost_budget("case_rescan"),
         }

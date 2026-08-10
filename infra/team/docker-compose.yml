@@ -1,0 +1,48 @@
+# owcopilot team stack: API + migration job + PostgreSQL shared canonical truth.
+services:
+  postgres:
+    image: postgres:17.10-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
+    environment:
+      POSTGRES_DB: ${OWCOPILOT_POSTGRES_DB:-owcopilot}
+      POSTGRES_USER: ${OWCOPILOT_POSTGRES_ADMIN_USER:-owcopilot_admin}
+      POSTGRES_PASSWORD: ${OWCOPILOT_POSTGRES_ADMIN_PASSWORD:?set the PostgreSQL admin password}
+      OWCOPILOT_MIGRATION_PASSWORD: ${OWCOPILOT_MIGRATION_PASSWORD:?set the migration-role password}
+      OWCOPILOT_APP_PASSWORD: ${OWCOPILOT_APP_PASSWORD:?set the runtime-role password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: infra/team/Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      OWCOPILOT_MIGRATION_DATABASE_URL: ${OWCOPILOT_MIGRATION_DATABASE_URL:?set a URL-encoded migration-role PostgreSQL URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/team/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      OWCOPILOT_JWT_SECRET: ${OWCOPILOT_JWT_SECRET:?set a long random secret}
+      OWCOPILOT_PROFILE: team
+      OWCOPILOT_TEAM_DATABASE_URL: ${OWCOPILOT_TEAM_DATABASE_URL:?set a URL-encoded runtime-role PostgreSQL URL}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
