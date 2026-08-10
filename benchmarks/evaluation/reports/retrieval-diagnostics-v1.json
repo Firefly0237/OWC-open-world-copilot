@@ -13,7 +13,8 @@
     "statement": "HashingEmbedder validates deterministic production ContextPack mechanics, FP2/FP3 failure attribution, and paired McNemar A/B plumbing only. Its absolute recall and hit rates are not evidence of semantic embedding or neural-reranker quality; use retrieval-report-v1.json for the revision-pinned real-model result."
   },
   "dataset": {
-    "artifact_sha256": "116fdc8b2743df00037b5747db0a9092b6b2c52ecb1e0997fc752fbbd8be386c",
+    "artifact_sha256": "757f5c34fbf49a29fed283204e4fd7d509ef08cb47f12967445478a18463def5",
+    "artifact_sha256_canonicalization": "utf-8-lf-v1",
     "content_digest": "a360c6fc01f86f4f3772371f9abdbdc8a97672fdb69d8d6d9b428361605b4a88",
     "path": "benchmarks/retrieval_eval_set_v1.json",
     "queries": {

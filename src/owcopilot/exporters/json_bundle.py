@@ -50,7 +50,7 @@ def export_content_bundle(
     engine = EngineTarget(target_engine)  # GENERIC base; UNREAL/UNITY add an engine-side projection
 
     content_payload = bundle.model_dump(mode="json", exclude_none=True)
-    (output / "content_bundle.json").write_text(_json(content_payload), encoding="utf-8")
+    (output / "content_bundle.json").write_bytes(_json(content_payload).encode("utf-8"))
     files = [_file_entry(output, "content_bundle.json", "content_bundle")]
 
     # Localization handoff: CSV for spreadsheet workflows + XLIFF 1.2 for CAT/TMS/agencies
@@ -126,10 +126,7 @@ def export_content_bundle(
         content_hash=content_hash(bundle),
         files=files,
     )
-    (output / "manifest.json").write_text(
-        _json(manifest.model_dump(mode="json")),
-        encoding="utf-8",
-    )
+    (output / "manifest.json").write_bytes(_json(manifest.model_dump(mode="json")).encode("utf-8"))
     return manifest
 
 

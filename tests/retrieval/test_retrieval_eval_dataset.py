@@ -25,9 +25,11 @@ from owcopilot.evaluation.retrieval_dataset import (
     RetrievalQuerySource,
     RetrievalRecallReport,
     build_retrieval_eval_dataset,
+    canonical_text_artifact_bytes,
     evaluate_retrieval_recall,
     load_frozen_dataset,
     run_retrieval_recall_eval,
+    write_frozen_dataset,
 )
 from owcopilot.llm.cache import HashingEmbedder, NoOpCache
 from owcopilot.llm.gateway import LLMGateway
@@ -175,6 +177,16 @@ def test_frozen_file_matches_live_build() -> None:
     # loudly (the whole point of a versioned, pinned eval set).
     assert FROZEN_DATASET_PATH.exists(), f"frozen set missing: {FROZEN_DATASET_PATH}"
     assert load_frozen_dataset() == build_retrieval_eval_dataset()
+
+
+def test_frozen_writer_emits_canonical_utf8_lf_bytes(tmp_path) -> None:
+    artifact = write_frozen_dataset(tmp_path / "retrieval.json")
+    raw = artifact.read_bytes()
+
+    assert raw.endswith(b"\n")
+    assert b"\r" not in raw
+    assert raw == canonical_text_artifact_bytes(raw)
+    assert load_frozen_dataset(artifact) == build_retrieval_eval_dataset()
 
 
 # --------------------------------------------------------------------------------------------------

@@ -156,10 +156,14 @@ def test_explicit_local_profile_authorizes_settings_without_loopback_inference(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("OWCOPILOT_PROFILE", "local")
-    monkeypatch.delenv("OWCOPILOT_OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OWCOPILOT_OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    for name in (
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OWCOPILOT_OPENAI_API_KEY",
+        "OWCOPILOT_OPENAI_BASE_URL",
+        "OWCOPILOT_LLM_PROVIDER",
+    ):
+        monkeypatch.setenv(name, "")
     monkeypatch.setattr(api, "_is_loopback", lambda _request: False)
     client = TestClient(create_app())
 

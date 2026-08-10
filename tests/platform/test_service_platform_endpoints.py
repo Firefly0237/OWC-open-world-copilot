@@ -171,8 +171,14 @@ def test_review_revise_over_rest_regenerates_in_place(client: TestClient) -> Non
 
 
 def test_connection_settings_and_loopback_real_gate(client: TestClient, monkeypatch) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    for name in (
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OWCOPILOT_OPENAI_API_KEY",
+        "OWCOPILOT_OPENAI_BASE_URL",
+        "OWCOPILOT_LLM_PROVIDER",
+    ):
+        monkeypatch.setenv(name, "")
     # the endpoint deliberately re-reads the repo .env (status must match what a real
     # call sees); neutralize it here so the developer's own key can't leak into the test
     monkeypatch.setattr("owcopilot.service.api.load_dotenv", lambda: None)

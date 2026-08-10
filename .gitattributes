@@ -1,2 +1,4 @@
 /infra/team/postgres/initdb/*.sh text eol=lf
+/benchmarks/**/*.json text eol=lf
+/tests/fixtures/generic_golden/** text eol=lf
 /tests/fixtures/ink/** -whitespace

@@ -4,17 +4,17 @@
     {
       "kind": "content_bundle",
       "path": "content_bundle.json",
-      "sha256": "011bb76e71e08731b15a5b2fb1367bf2454ee293ddf5352b264887f1125e6d6f"
+      "sha256": "0572cfb540983bc0bb69c7bdb3d5445ec6b26d80f19d64a2167cdd3e72c2fff6"
     },
     {
       "kind": "localization_csv",
       "path": "localized_texts.csv",
-      "sha256": "326169e9474822726a108606ff85d6b9bec818458b45ba50bc46284f3e735ebe"
+      "sha256": "fb8c3f1cbc5f799c2305279e023bb0b9c8912e102feb3ffe5ca594ff588b40a9"
     },
     {
       "kind": "localization_xliff",
       "path": "localized_texts.xlf",
-      "sha256": "e5934597972c337586cf0e8eb0758c8b9fd58cc44d3b1b226f7c5be5822938c4"
+      "sha256": "1032568102cf9bbf1e783c2cecca263588c29b76fda203cf04824595f106ad40"
     }
   ],
   "generated_at": "2026-07-10T23:11:07.930228Z",

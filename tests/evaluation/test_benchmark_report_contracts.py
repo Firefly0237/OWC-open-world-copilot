@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -10,7 +9,13 @@ from typing import Any
 from scripts.run_complexity_benchmark import build_report as build_complexity_report
 from scripts.run_frozen_retrieval_diagnostics import render_report as render_retrieval_report
 
-from owcopilot.evaluation.retrieval_dataset import FROZEN_DATASET_PATH, load_frozen_dataset
+from owcopilot.evaluation.retrieval_dataset import (
+    CANONICAL_TEXT_ARTIFACT_FORMAT,
+    FROZEN_DATASET_PATH,
+    canonical_text_artifact_bytes,
+    canonical_text_artifact_sha256,
+    load_frozen_dataset,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPLEXITY_REPORT = REPO_ROOT / "benchmarks" / "complexity_corpus.md"
@@ -42,9 +47,10 @@ def test_frozen_retrieval_report_has_canonical_provenance_and_metric_contract() 
     assert report["schema_version"] == "retrieval-diagnostics-v1"
     assert report["status"] == "mechanism_verified"
     assert report["dataset"]["content_digest"] == dataset.content_digest()
-    assert report["dataset"]["artifact_sha256"] == hashlib.sha256(
+    assert report["dataset"]["artifact_sha256"] == canonical_text_artifact_sha256(
         FROZEN_DATASET_PATH.read_bytes()
-    ).hexdigest()
+    )
+    assert report["dataset"]["artifact_sha256_canonicalization"] == CANONICAL_TEXT_ARTIFACT_FORMAT
     assert report["dataset"]["queries"] == {
         "answerable": 104,
         "by_category": {
@@ -90,3 +96,12 @@ def test_frozen_retrieval_report_has_canonical_provenance_and_metric_contract() 
         assert mcnemar["b"] == contingency["a_only_hit"]
         assert mcnemar["c"] == contingency["b_only_hit"]
         assert mcnemar["method"] == "mcnemar_exact_binomial"
+
+
+def test_canonical_text_artifact_hash_is_identical_for_lf_and_crlf() -> None:
+    lf = "第一行\nsecond line\n".encode()
+    crlf = lf.replace(b"\n", b"\r\n")
+
+    assert canonical_text_artifact_bytes(lf) == lf
+    assert canonical_text_artifact_bytes(crlf) == lf
+    assert canonical_text_artifact_sha256(crlf) == canonical_text_artifact_sha256(lf)

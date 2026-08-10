@@ -59,6 +59,18 @@ def _tool_call(name: str, args: dict[str, Any], call_id: str) -> dict[str, Any]:
     return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
 
 
+def _untrusted_reflections_payload(text: str) -> dict[str, object]:
+    marker = "UNTRUSTED_MEMORY_JSON:\n"
+    end_marker = "\nEND_UNTRUSTED_MEMORY_JSON"
+    _before, separator, remainder = text.partition(marker)
+    assert separator == marker
+    payload, separator, _after = remainder.partition(end_marker)
+    assert separator == end_marker
+    decoded = json.loads(payload)
+    assert isinstance(decoded, dict)
+    return decoded
+
+
 class _RecordingChatModel(GenericFakeChatModel):
     """Scripted fake that records the exact message list of EVERY model call.
 
@@ -496,9 +508,7 @@ def test_read_only_skill_of_scoped_registry_still_dispatches_through_the_fallbac
     scoped = scoped_registry(registry, {"peek", "stage_patch"})
     # Schema face deliberately narrower than the scope, so "peek" is unbound but in scope.
     model = scripted_chat_model([("peek", {}), "reported"])
-    agent = ReActAgent(
-        model=model, registry=scoped, max_steps=5, allowed_skills={"stage_patch"}
-    )
+    agent = ReActAgent(model=model, registry=scoped, max_steps=5, allowed_skills={"stage_patch"})
 
     result = agent.run("use the in-scope read-only skill")
 
@@ -677,8 +687,9 @@ def test_reflections_render_as_system_suffix_block() -> None:
     assert system.text == (
         _NATIVE_SYSTEM_PROMPT + "\n\n" + _reflections_block(["ran no audit", "wrong tool"])
     )
-    assert "- ran no audit" in system.text
-    assert "- wrong tool" in system.text
+    assert _untrusted_reflections_payload(system.text) == {
+        "reflections": ["ran no audit", "wrong tool"]
+    }
     # No extra user message: the first turn keeps the [system, "Goal:"] shape.
     assert [type(m) for m in first_turn] == [SystemMessage, HumanMessage]
 
@@ -694,7 +705,9 @@ def test_run_threads_reflections_into_actor_context(tmp_path) -> None:
 
     system_text = model.seen[0][0].text
     assert "Reflections from previous attempts:" in system_text
-    assert "- last time I skipped audit_project" in system_text
+    assert _untrusted_reflections_payload(system_text) == {
+        "reflections": ["last time I skipped audit_project"]
+    }
 
 
 def test_reflections_absent_on_every_turn_without_memory(tmp_path) -> None:
@@ -890,9 +903,14 @@ def test_generate_early_stopping_spends_one_extra_call_and_uses_its_answer(tmp_p
     assert len(model.seen) == 3  # 2 normal planning turns + exactly 1 finish call
     assert agent.model_calls_used == 3
     assert agent.model_calls_by_kind["generate"] == 1
-    assert sum(
-        count for kind, count in agent.model_calls_by_kind.items() if kind.startswith("planning:")
-    ) == 2
+    assert (
+        sum(
+            count
+            for kind, count in agent.model_calls_by_kind.items()
+            if kind.startswith("planning:")
+        )
+        == 2
+    )
 
 
 def test_generate_finish_obeys_shared_settled_cost_gate(tmp_path, monkeypatch) -> None:

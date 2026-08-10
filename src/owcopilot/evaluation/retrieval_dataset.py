@@ -34,6 +34,7 @@ determinism) and the *mathematical* recall@k monotonicity — never a quality th
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Sequence
 from enum import Enum
 from pathlib import Path
@@ -67,6 +68,18 @@ FROZEN_DATASET_PATH = (
     / "benchmarks"
     / f"retrieval_eval_set_{DATASET_VERSION}.json"
 )
+CANONICAL_TEXT_ARTIFACT_FORMAT = "utf-8-lf-v1"
+
+
+def canonical_text_artifact_bytes(raw: bytes) -> bytes:
+    """Return strict UTF-8 text with every line ending normalized to LF."""
+    text = raw.decode("utf-8")
+    return text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+
+
+def canonical_text_artifact_sha256(raw: bytes) -> str:
+    """Hash a text artifact after applying the versioned UTF-8/LF canonicalization."""
+    return hashlib.sha256(canonical_text_artifact_bytes(raw)).hexdigest()
 
 
 class RetrievalQueryCategory(str, Enum):
@@ -475,8 +488,10 @@ def write_frozen_dataset(path: Path | None = None) -> Path:
     """Write the frozen JSON artifact (MTEB convention). Called by tooling, not by the $0 tests."""
     target = path or FROZEN_DATASET_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        build_retrieval_eval_dataset().model_dump_json(indent=2) + "\n", encoding="utf-8"
+    target.write_bytes(
+        canonical_text_artifact_bytes(
+            (build_retrieval_eval_dataset().model_dump_json(indent=2) + "\n").encode("utf-8")
+        )
     )
     return target
 

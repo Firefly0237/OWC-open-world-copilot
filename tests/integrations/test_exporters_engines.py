@@ -23,6 +23,12 @@ from owcopilot.exporters import EngineTarget, export_content_bundle, load_export
 _GENERIC_GOLDEN = Path(__file__).resolve().parents[1] / "fixtures" / "generic_golden"
 
 
+def _canonical_fixture_bytes(path: Path) -> bytes:
+    """Read a text fixture as canonical UTF-8/LF bytes despite an older checkout's EOLs."""
+
+    return path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
 def _bundle() -> ContentBundle:
     return ContentBundle(
         entities={
@@ -122,9 +128,10 @@ def test_generic_export_byte_identical_to_golden(tmp_path: Path) -> None:
 
     export_content_bundle(_bundle(), tmp_path, target_engine=EngineTarget.GENERIC)
     for name in ("content_bundle.json", "localized_texts.csv", "localized_texts.xlf"):
-        assert (tmp_path / name).read_bytes() == (_GENERIC_GOLDEN / name).read_bytes(), (
+        assert (tmp_path / name).read_bytes() == _canonical_fixture_bytes(_GENERIC_GOLDEN / name), (
             f"{name} drifted from the frozen GENERIC golden fixture"
         )
+        assert b"\r" not in (tmp_path / name).read_bytes()
 
     produced = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     golden = json.loads((_GENERIC_GOLDEN / "manifest.json").read_text(encoding="utf-8"))
@@ -140,9 +147,9 @@ def test_unreal_target_is_a_superset_of_generic(tmp_path: Path) -> None:
     manifest = export_content_bundle(_bundle(), tmp_path, target_engine=EngineTarget.UNREAL)
 
     # The generic bundle underneath is still byte-identical to the golden fixture.
-    assert (tmp_path / "content_bundle.json").read_bytes() == (
+    assert (tmp_path / "content_bundle.json").read_bytes() == _canonical_fixture_bytes(
         _GENERIC_GOLDEN / "content_bundle.json"
-    ).read_bytes()
+    )
 
     ue_files = [f for f in manifest.files if f.path.startswith("unreal/")]
     assert {f.kind for f in ue_files} >= {"datatable", "string_table", "row_struct_header"}
@@ -208,9 +215,9 @@ def test_unity_target_is_a_superset_of_generic(tmp_path: Path) -> None:
     manifest = export_content_bundle(_bundle(), tmp_path, target_engine=EngineTarget.UNITY)
 
     # The generic bundle underneath is still byte-identical to the golden fixture — UNITY only adds.
-    assert (tmp_path / "content_bundle.json").read_bytes() == (
+    assert (tmp_path / "content_bundle.json").read_bytes() == _canonical_fixture_bytes(
         _GENERIC_GOLDEN / "content_bundle.json"
-    ).read_bytes()
+    )
 
     unity_files = [f for f in manifest.files if f.path.startswith("unity/")]
     assert [f.kind for f in unity_files] == ["unity_import_manifest"]

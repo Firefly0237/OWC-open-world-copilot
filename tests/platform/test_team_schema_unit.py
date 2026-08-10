@@ -408,6 +408,20 @@ def test_role_bootstrap_and_compose_pin_exact_postgresql_image() -> None:
     assert '"127.0.0.1:${OWCOPILOT_POSTGRES_PORT:-5432}:5432"' in local_compose
 
 
+def test_main_ci_job_installs_tokenizer_dependencies_before_the_full_suite() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    job_start = workflow.index("  test:\n")
+    job_end = workflow.index("\n  tokenizer:\n", job_start)
+    job = workflow[job_start:job_end]
+
+    install = 'pip install -e ".[serve,dev,postgres,tokenizer]"'
+    full_suite = "python -m pytest -q"
+    assert install in job
+    assert full_suite in job
+    assert job.index(install) < job.index(full_suite)
+    assert 'pip install -e ".[serve,dev,postgres]"' not in job
+
+
 def test_postgres_ci_verifies_the_running_container_against_the_pinned_digest() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     step_start = workflow.index("      - name: Start pinned PostgreSQL")

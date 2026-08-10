@@ -12,7 +12,6 @@ and paired McNemar methodology.  It is deliberately not presented as semantic-mo
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -28,10 +27,12 @@ if str(SRC_ROOT) not in sys.path:
 
 from owcopilot.evaluation.ab_compare import run_retrieval_ab_eval  # noqa: E402
 from owcopilot.evaluation.retrieval_dataset import (  # noqa: E402
+    CANONICAL_TEXT_ARTIFACT_FORMAT,
     DEFAULT_K_VALUES,
     DEFAULT_STAGED_BUDGET,
     FROZEN_DATASET_PATH,
     RetrievalEvalDataset,
+    canonical_text_artifact_sha256,
     load_frozen_dataset,
     run_retrieval_recall_eval,
     run_staged_retrieval_diagnostic,
@@ -39,8 +40,8 @@ from owcopilot.evaluation.retrieval_dataset import (  # noqa: E402
 from owcopilot.llm.cache import HashingEmbedder  # noqa: E402
 from owcopilot.util import use_utf8_stdout  # noqa: E402
 
-DEFAULT_OUTPUT = REPO_ROOT / "benchmarks" / "evaluation" / "reports" / (
-    "retrieval-diagnostics-v1.json"
+DEFAULT_OUTPUT = REPO_ROOT.joinpath(
+    "benchmarks", "evaluation", "reports", "retrieval-diagnostics-v1.json"
 )
 EXPECTED_QUERY_COUNT = 120
 
@@ -156,7 +157,8 @@ def build_report(
             "version": dataset.version,
             "seed": dataset.seed,
             "content_digest": dataset_digest,
-            "artifact_sha256": hashlib.sha256(FROZEN_DATASET_PATH.read_bytes()).hexdigest(),
+            "artifact_sha256": canonical_text_artifact_sha256(FROZEN_DATASET_PATH.read_bytes()),
+            "artifact_sha256_canonicalization": CANONICAL_TEXT_ARTIFACT_FORMAT,
             "world_content_hash": dataset.world_content_hash,
             "queries": _query_counts(dataset),
         },

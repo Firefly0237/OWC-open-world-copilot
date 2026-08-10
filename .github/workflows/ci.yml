@@ -26,10 +26,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install (serve + dev + PostgreSQL extras)
+      - name: Install (serve + dev + PostgreSQL + tokenizer extras)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[serve,dev,postgres]"
+          pip install -e ".[serve,dev,postgres,tokenizer]"
 
       - name: Ruff
         run: python -m ruff check src tests scripts
