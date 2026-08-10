@@ -429,6 +429,19 @@ def test_postgres_ci_verifies_the_running_container_against_the_pinned_digest() 
     assert "docker image inspect postgres:17.10-bookworm " not in step
 
 
+def test_postgres_ci_verifies_upgrade_against_the_configured_alembic_head() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    step_start = workflow.index("      - name: Verify empty and previous-revision Alembic upgrades")
+    step_end = workflow.index("\n      - name:", step_start + 1)
+    step = workflow[step_start:step_end]
+
+    assert 'ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()' in step
+    assert "assert expected_head is not None" in step
+    assert "assert observed_head == expected_head" in step
+    assert '== "n12_0002"' not in step
+    assert "n12_0002 unexpectedly accepted" not in step
+
+
 def test_alembic_version_is_the_only_global_read_only_exception(
     registry: dict[str, Any],
 ) -> None:

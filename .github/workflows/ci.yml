@@ -192,7 +192,7 @@ jobs:
               connection.execute(text("ALTER ROLE owcopilot_migration INHERIT"))
           PY
           if alembic upgrade head; then
-            echo "n12_0002 unexpectedly accepted an elevated migration role"
+            echo "Alembic head unexpectedly accepted an elevated migration role"
             exit 1
           fi
           python - <<'PY'
@@ -206,11 +206,18 @@ jobs:
           alembic upgrade head
           python - <<'PY'
           import os
+          from alembic.config import Config
+          from alembic.script import ScriptDirectory
           from sqlalchemy import create_engine, text
 
+          expected_head = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
+          assert expected_head is not None
           engine = create_engine(os.environ["OWCOPILOT_MIGRATION_DATABASE_URL"])
           with engine.connect() as connection:
-              assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "n12_0002"
+              observed_head = connection.execute(
+                  text("SELECT version_num FROM alembic_version")
+              ).scalar_one()
+              assert observed_head == expected_head
               assert connection.execute(text("SELECT count(*) FROM tenants WHERE slug = 'upgrade-fixture' ")).scalar_one() == 1
           PY
 
