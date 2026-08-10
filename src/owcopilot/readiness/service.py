@@ -4,7 +4,7 @@
 Pure functions over a ``ContentBundle``: zero LLM cost, no side effects, fully reproducible —
 the same backbone the audit uses, applied to completeness instead of correctness. The checklists
 below are the *standard* (规范); applying them identically to every project is the *standardization*
-(标准化). See ``project_docs/开发全过程.md``.
+(标准化)。这些不变式由本模块及对应测试共同固定。
 """
 
 from __future__ import annotations
@@ -21,7 +21,8 @@ from ..content.models import (
     RegionBrief,
     Term,
 )
-from .models import CheckResult, ItemReadiness, KindSummary, ReadinessReport
+from ..inspiration.lineage import dangling_inspiration_refs as _dangling_inspiration_refs
+from .models import CheckResult, DanglingInspirationRef, ItemReadiness, KindSummary, ReadinessReport
 
 STANDARD_VERSION = "r1"
 
@@ -189,7 +190,20 @@ def _connected_entity_ids(bundle: ContentBundle) -> set[str]:
     return ids
 
 
-def assess_readiness(bundle: ContentBundle) -> ReadinessReport:
+def assess_readiness(
+    bundle: ContentBundle, *, known_reference_chunk_ids: frozenset[str] | None = None
+) -> ReadinessReport:
+    """``known_reference_chunk_ids`` is opt-in (N2.4 / B7): when a caller supplies the inspiration
+    library's current chunk-id set, every canon object's ``inspiration_refs`` is cross-checked
+    against it and any citation that no longer resolves is reported in
+    ``ReadinessReport.dangling_inspiration_refs``. Left ``None`` (every pre-existing caller), the
+    check is skipped entirely — zero behaviour change for analytics/harness/the REST readiness
+    view. This landed here rather than as a new numbered audit rule: it is a completeness/hygiene
+    signal ("can this citation still be verified"), not a correctness judgement over the content
+    itself, and readiness already IS the additive, on-demand, non-gating surface for exactly that
+    kind of signal — a real audit rule would mean a full rule-registry entry (four-step wiring +
+    wording-test coverage + the five-place count sync) for something structurally unlike every
+    other rule (it reads reference-library state, not just the bundle)."""
     from ..content.hash import content_hash
 
     connected = _connected_entity_ids(bundle)
@@ -215,6 +229,17 @@ def assess_readiness(bundle: ContentBundle) -> ReadinessReport:
     overall = round(sum(it.score for it in items) / total, 3) if total else 1.0
     ready_rate = round(ready / total, 3) if total else 1.0
 
+    dangling = (
+        [
+            DanglingInspirationRef(object_ref=ref, dangling_refs=refs)
+            for ref, refs in sorted(
+                _dangling_inspiration_refs(bundle, known_reference_chunk_ids).items()
+            )
+        ]
+        if known_reference_chunk_ids is not None
+        else []
+    )
+
     return ReadinessReport(
         standard_version=STANDARD_VERSION,
         content_hash=content_hash(bundle),
@@ -224,6 +249,7 @@ def assess_readiness(bundle: ContentBundle) -> ReadinessReport:
         ready_rate=ready_rate,
         by_kind=_summarize_by_kind(items),
         items=items,
+        dangling_inspiration_refs=dangling,
     )
 
 

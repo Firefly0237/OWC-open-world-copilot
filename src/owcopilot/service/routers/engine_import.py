@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from ...app.actions import (
     delete_mapping_template_action,
@@ -21,6 +21,7 @@ from ...app.actions import (
     save_mapping_template_action,
 )
 from ..dependencies import _llm_mode, _manage_error, _project_root_or_404
+from ..pagination import PaginationCursorError, paginate
 from ..schemas import (
     EngineImportRequest,
     MappingTemplateRequest,
@@ -40,7 +41,11 @@ def engine_import(
 ) -> dict[str, Any]:
     """WS-K · pull engine-side quest rows back: diff vs canon, queue new/changed for review."""
     try:
-        result = import_from_engine_action(_project_root_or_404(project), quests=req.quests)
+        result = import_from_engine_action(
+            _project_root_or_404(project),
+            quests=req.quests,
+            baseline_quests=req.baseline_quests,
+        )
     except ValueError as e:
         raise _manage_error(e) from e
     return {"project": project, **result}
@@ -94,9 +99,30 @@ def import_apply(
 def recognize_mappings_list(
     project: str,
     request: Request,
+    limit: int | None = Query(default=None, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=1_000),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> dict[str, Any]:
-    return {"project": project, **list_mapping_templates_action(_project_root_or_404(project))}
+    result = list_mapping_templates_action(_project_root_or_404(project))
+    if limit is None and cursor is None:
+        # Backward compatibility for CLI/older clients: the original no-query shape is the full
+        # name -> ColumnMapping dictionary and remains byte-shape compatible.
+        return {"project": project, **result}
+
+    ordered = [
+        {"name": name, "mapping": mapping} for name, mapping in sorted(result["templates"].items())
+    ]
+    try:
+        page = paginate(ordered, limit=limit or 20, cursor=cursor)
+    except PaginationCursorError as exc:
+        raise HTTPException(status_code=409 if exc.stale else 422, detail=str(exc)) from exc
+    return {
+        "project": project,
+        "templates": {item["name"]: item["mapping"] for item in page.items},
+        "total": page.total,
+        "next_cursor": page.next_cursor,
+        "snapshot_etag": page.snapshot_etag,
+    }
 
 
 @router.post("/projects/{project}/recognize/mappings")
@@ -104,6 +130,7 @@ def recognize_mappings_save(
     project: str,
     req: MappingTemplateRequest,
     request: Request,
+    include_details: bool = Query(default=True),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> dict[str, Any]:
     try:
@@ -112,6 +139,8 @@ def recognize_mappings_save(
         )
     except ValueError as e:
         raise _manage_error(e) from e
+    if not include_details:
+        result = {key: value for key, value in result.items() if key != "templates"}
     return {"project": project, **result}
 
 
@@ -120,7 +149,10 @@ def recognize_mappings_delete(
     project: str,
     name: str,
     request: Request,
+    include_details: bool = Query(default=True),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> dict[str, Any]:
     result = delete_mapping_template_action(_project_root_or_404(project), name=name)
+    if not include_details:
+        result = {key: value for key, value in result.items() if key != "templates"}
     return {"project": project, **result}

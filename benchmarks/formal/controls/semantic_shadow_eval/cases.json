@@ -1,0 +1,75 @@
+{
+  "cases": [
+    {
+      "case_id": "semantic_shadow_eval.zero_candidate.attack.001",
+      "role": "attack",
+      "stimulus": {
+        "candidate_count": 0,
+        "candidate_risk_detected": false
+      }
+    },
+    {
+      "case_id": "semantic_shadow_eval.zero_candidate.benign.001",
+      "role": "benign",
+      "stimulus": {
+        "candidate_count": 1,
+        "candidate_risk_detected": false
+      }
+    }
+  ],
+  "data_partition": "harness_control",
+  "description": "Synthetic harness control keeping zero candidates distinct from a clean semantic result.",
+  "fixture_id": "semantic_shadow_eval.evaluator_conformance.v1",
+  "implementations": [
+    {
+      "declared_kind": "matched_good",
+      "expected_harness_status": "PASS",
+      "implementation_id": "semantic_shadow_eval.matched_good.v1",
+      "observations": [
+        {
+          "case_id": "semantic_shadow_eval.zero_candidate.attack.001",
+          "outcome": {
+            "availability_status": "NOT_AVAILABLE",
+            "candidate_state": "NO_CANDIDATE"
+          }
+        },
+        {
+          "case_id": "semantic_shadow_eval.zero_candidate.benign.001",
+          "outcome": {
+            "availability_status": "PASS",
+            "candidate_state": "CLEAN"
+          }
+        }
+      ]
+    },
+    {
+      "declared_kind": "frozen_mutant",
+      "expected_harness_status": "FAIL",
+      "implementation_id": "semantic_shadow_eval.frozen_mutant.v1",
+      "observations": [
+        {
+          "case_id": "semantic_shadow_eval.zero_candidate.attack.001",
+          "outcome": {
+            "availability_status": "PASS",
+            "candidate_state": "CLEAN"
+          }
+        },
+        {
+          "case_id": "semantic_shadow_eval.zero_candidate.benign.001",
+          "outcome": {
+            "availability_status": "PASS",
+            "candidate_state": "CLEAN"
+          }
+        }
+      ]
+    }
+  ],
+  "metric_scope": "harness",
+  "payload_sha256": "c3e242629e478d32b221ca6db32c093359c0ef91975225119d6e7795bf33c6e7",
+  "production_path_exercised": false,
+  "provider": "fixture",
+  "quality_effects_allowed": false,
+  "real_model_used": false,
+  "schema_version": "formal-control-fixture/v1",
+  "suite_id": "semantic_shadow_eval"
+}

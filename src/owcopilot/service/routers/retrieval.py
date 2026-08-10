@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
+from ...app.actions import run_ask_action
 from ...llm.gateway import LLMGateway
 from ...llm.resilience import build_real_provider
 from ...llm.router import StaticRouter
@@ -26,6 +27,7 @@ from ..dependencies import (
     _context_builder_for_bundle,
     _deterministic_cost_budget,
     _open_project_context,
+    _project_root_or_404,
 )
 from ..schemas import (
     ProjectAskRequest,
@@ -65,6 +67,8 @@ def create_context_pack(
                 project=project,
                 refs=pack.refs,
                 hits=[hit.model_dump(mode="json") for hit in pack.hits],
+                degraded=pack.degraded,
+                degradation_reasons=pack.degradation_reasons,
                 cost_budget=_deterministic_cost_budget("build_context_pack"),
             )
         finally:
@@ -78,6 +82,8 @@ def create_context_pack(
             project=project,
             refs=pack.refs,
             hits=[hit.model_dump(mode="json") for hit in pack.hits],
+            degraded=pack.degraded,
+            degradation_reasons=pack.degradation_reasons,
             cost_budget=_deterministic_cost_budget("build_context_pack"),
         )
     finally:
@@ -103,23 +109,29 @@ def ask_project(
                 "claim); for offline use faithfulness='offline' (deterministic $0 judge)."
             ),
         )
+    if req.content is None:
+        if req.llm_mode == "real":
+            _require_real_allowed(request)
+        else:
+            _require_offline_allowed()
+        result = run_ask_action(
+            _project_root_or_404(project),
+            query=req.query,
+            budget_tokens=req.budget_tokens,
+            llm_mode=req.llm_mode,
+            llm_model=req.llm_model,
+            max_cost_usd=req.max_cost_usd,
+            agentic=req.agentic,
+            faithfulness=req.faithfulness,
+            cache=request.app.state.service_cache,
+            namespace=project,
+        )
+        return ProjectAskResponse(request_id=request_id, project=project, **result)
+
     project_context = None
     store: SQLiteStore | None = None
-    if req.content is None:
-        project_context = _open_project_context(project)
-        if project_context is None:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    f"project {project!r} is not registered; configure "
-                    "OWCOPILOT_PROJECTS_JSON or send inline content"
-                ),
-            )
-        builder = project_context.qa_context_builder()
-        bundle = project_context.bundle
-    else:
-        store, builder = _context_builder_for_bundle(req.content)
-        bundle = req.content
+    store, builder = _context_builder_for_bundle(req.content)
+    bundle = req.content
 
     telemetry = TelemetryCollector()
     if req.llm_mode == "real":
@@ -130,7 +142,15 @@ def ask_project(
         ask_provider = OfflineQAProvider()
     gateway = LLMGateway(
         providers={"cheap": ask_provider},
-        router=StaticRouter(mapping={"qa_answer": "cheap", "qa_expand": "cheap"}),
+        router=StaticRouter(
+            mapping={
+                "qa_answer": "cheap",
+                "qa_expand": "cheap",
+                "agentic_rag_followup": "cheap",
+                "agentic_rag_sufficiency": "cheap",
+                "faithfulness_judge": "cheap",
+            }
+        ),
         # app-lifetime L1/L2 cache: repeated lore questions cost $0
         cache=request.app.state.service_cache,
         telemetry=telemetry,
@@ -144,6 +164,7 @@ def ask_project(
             context_builder=builder,
             bundle=bundle,
             expand=(req.llm_mode == "real"),
+            agentic=req.agentic,
             faithfulness=req.faithfulness,
         ).ask(req.query, budget_tokens=req.budget_tokens)
         telemetry_summary = telemetry.summary()
@@ -155,6 +176,8 @@ def ask_project(
             request_id=request_id,
             project=project,
             answer=answer.model_dump(mode="json"),
+            degraded=answer.retrieval_degraded,
+            degradation_reasons=answer.retrieval_degradation_reasons,
             telemetry=telemetry_summary,
             cost_budget=cost_budget.model_dump(mode="json"),
         )

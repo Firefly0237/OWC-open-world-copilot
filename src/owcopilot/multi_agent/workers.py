@@ -29,6 +29,7 @@ import logging
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from ..agent.middleware import SettledCostBudget, TotalModelCallBudget, TotalToolCallBudget
 from ..agent.react import AgentResult, ReActAgent
 from ..llm.telemetry import TelemetryCollector
 from ..skills import SkillRegistry
@@ -57,13 +58,21 @@ class WorkerAgent:
         model: BaseChatModel,
         registry: SkillRegistry,
         max_steps: int = 4,
+        max_tool_calls: int | None = None,
         telemetry: TelemetryCollector | None = None,
+        shared_model_budget: TotalModelCallBudget | None = None,
+        shared_cost_budget: SettledCostBudget | None = None,
+        shared_tool_budget: TotalToolCallBudget | None = None,
     ) -> None:
         self.agent_id = agent_id
         self._model = model
         self._registry = registry
         self._max_steps = max_steps
+        self._max_tool_calls = max_tool_calls
         self._telemetry = telemetry
+        self._shared_model_budget = shared_model_budget
+        self._shared_cost_budget = shared_cost_budget
+        self._shared_tool_budget = shared_tool_budget
         # The ReActAgent is created fresh per instance — its transcript list is private.
         # Creating it here (not inside run_task) lets tests inspect agent._transcript after
         # run_task to verify transcript isolation between two WorkerAgent instances.
@@ -84,9 +93,13 @@ class WorkerAgent:
             model=self._model,
             registry=scoped_registry(self._registry, allowed_skills),
             max_steps=max_steps if max_steps is not None else self._max_steps,
+            max_tool_calls=self._max_tool_calls,
             task=f"worker_{self.agent_id}",
             telemetry=self._telemetry,
             allowed_skills=allowed_skills,
+            shared_model_budget=self._shared_model_budget,
+            shared_cost_budget=self._shared_cost_budget,
+            shared_tool_budget=self._shared_tool_budget,
         )
 
     def build_goal(self, assign: TaskAssignPayload) -> str:
@@ -216,14 +229,22 @@ class DiagWorker(WorkerAgent):
         model: BaseChatModel,
         registry: SkillRegistry,
         max_steps: int = 4,
+        max_tool_calls: int | None = None,
         telemetry: TelemetryCollector | None = None,
+        shared_model_budget: TotalModelCallBudget | None = None,
+        shared_cost_budget: SettledCostBudget | None = None,
+        shared_tool_budget: TotalToolCallBudget | None = None,
     ) -> None:
         super().__init__(
             agent_id=agent_id,
             model=model,
             registry=registry,
             max_steps=max_steps,
+            max_tool_calls=max_tool_calls,
             telemetry=telemetry,
+            shared_model_budget=shared_model_budget,
+            shared_cost_budget=shared_cost_budget,
+            shared_tool_budget=shared_tool_budget,
         )
 
 
@@ -244,14 +265,22 @@ class RepairWorker(WorkerAgent):
         model: BaseChatModel,
         registry: SkillRegistry,
         max_steps: int = 4,
+        max_tool_calls: int | None = None,
         telemetry: TelemetryCollector | None = None,
+        shared_model_budget: TotalModelCallBudget | None = None,
+        shared_cost_budget: SettledCostBudget | None = None,
+        shared_tool_budget: TotalToolCallBudget | None = None,
     ) -> None:
         super().__init__(
             agent_id=agent_id,
             model=model,
             registry=registry,
             max_steps=max_steps,
+            max_tool_calls=max_tool_calls,
             telemetry=telemetry,
+            shared_model_budget=shared_model_budget,
+            shared_cost_budget=shared_cost_budget,
+            shared_tool_budget=shared_tool_budget,
         )
 
 

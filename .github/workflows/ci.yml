@@ -1,12 +1,15 @@
 name: CI
 
-# The whole test suite is offline, deterministic and $0 (mock/fake providers, no API keys),
-# so it is a perfect CI gate. No secrets are referenced here — the real-model and live-UE5
-# paths are manual and stay out of CI by design.
+# The main test matrix is offline, deterministic and $0. N1.2 has one separate disposable
+# PostgreSQL job so real Alembic/RLS/pool behavior is never replaced by SQLite or mocks. No model
+# keys are referenced here; real-model and live-UE5 paths remain manual.
 on:
   push:
     branches: ["**"]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -23,13 +26,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install (serve + dev extras)
+      - name: Install (serve + dev + PostgreSQL extras)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[serve,dev]"
+          pip install -e ".[serve,dev,postgres]"
 
       - name: Ruff
-        run: python -m ruff check src tests
+        run: python -m ruff check src tests scripts
 
       - name: Mypy
         run: python -m mypy src/owcopilot
@@ -43,6 +46,192 @@ jobs:
       - name: Agent-Eval JD-dimension scorecard (regression gate)
         run: python -m owcopilot.cli.main eval-agent
 
+      - name: Published-document link integrity
+        if: matrix.python-version == '3.12'
+        run: python scripts/check_markdown_links.py
+
+      - name: Frozen deterministic formal suites
+        if: matrix.python-version == '3.12'
+        run: |
+          python scripts/verify_formal_eval_artifacts.py
+          python scripts/run_formal_evals.py \
+            --output-dir .tmp/formal-evals-ci \
+            --run-id ci-formal-v1 \
+            --generated-at 2026-08-03T00:00:00Z
+
+  tokenizer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install tokenizer-only dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,tokenizer]"
+
+      - name: Provision the pinned bge-m3 tokenizer
+        run: python scripts/prefetch_models.py --component tokenizer
+
+      - name: Verify offline tokenizer accounting and fallback contract
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: |
+          python scripts/prefetch_models.py --component tokenizer --offline
+          python -m pytest -q tests/agent/test_context_budget.py
+
+  mcp:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Test the declared floor and the newest compatible v1 independently. The main job does
+        # not install the optional transport, so this prevents every real stdio test from skipping.
+        mcp-version: ["mcp==1.26.0", "mcp>=1.26,<2"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install tested MCP compatibility point
+        run: |
+          python -m pip install --upgrade pip
+          pip install "${{ matrix.mcp-version }}"
+          pip install -e ".[dev,mcp]"
+
+      - name: Run real MCP server/client protocol tests
+        run: |
+          python -m pytest -q \
+            tests/mcp/test_mcp_client.py \
+            tests/mcp/test_mcp_skill_adapter.py \
+            tests/mcp/test_mcp_stdio_e2e.py \
+            tests/mcp/test_mcp_sdk_smoke.py \
+            tests/mcp/test_mcp_server_transport.py
+
+  postgres:
+    runs-on: ubuntu-latest
+    env:
+      OWCOPILOT_POSTGRES_ADMIN_PASSWORD: owcopilot-admin-ci-only
+      OWCOPILOT_ADMIN_DATABASE_URL: postgresql+psycopg://owcopilot_admin:owcopilot-admin-ci-only@127.0.0.1:5432/owcopilot
+      OWCOPILOT_MIGRATION_PASSWORD: owcopilot-migration-ci-only
+      OWCOPILOT_APP_PASSWORD: owcopilot-app-ci-only
+      OWCOPILOT_MIGRATION_DATABASE_URL: postgresql+psycopg://owcopilot_migration:owcopilot-migration-ci-only@127.0.0.1:5432/owcopilot
+      OWCOPILOT_TEAM_DATABASE_URL: postgresql+psycopg://owcopilot_app:owcopilot-app-ci-only@127.0.0.1:5432/owcopilot
+      OWCOPILOT_JWT_SECRET: n12-ci-team-secret-not-for-production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install PostgreSQL test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[serve,dev,postgres]"
+
+      - name: Start pinned PostgreSQL
+        run: |
+          docker compose up -d postgres
+          pg_container="$(docker compose ps -q postgres)"
+          test -n "$pg_container"
+          for i in $(seq 1 60); do
+            test "$(docker inspect -f '{{.State.Health.Status}}' "$pg_container")" = healthy && break
+            sleep 1
+          done
+          test "$(docker inspect -f '{{.State.Health.Status}}' "$pg_container")" = healthy
+          docker image inspect postgres:17.10-bookworm --format '{{json .RepoDigests}}' | grep -q 'sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394'
+
+      - name: Verify empty and previous-revision Alembic upgrades
+        run: |
+          alembic upgrade head
+          alembic downgrade base
+          alembic upgrade n12_0001
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(os.environ["OWCOPILOT_MIGRATION_DATABASE_URL"])
+          with engine.begin() as connection:
+              values = {
+                  "tenant": "10101010-1010-4010-8010-101010101010",
+                  "subject": "20202020-2020-4020-8020-202020202020",
+                  "container": "30303030-3030-4030-8030-303030303030",
+              }
+              connection.execute(text("INSERT INTO tenants (tenant_id, slug, display_name) VALUES (:tenant, 'upgrade-fixture', 'Upgrade Fixture')"), values)
+              connection.execute(text("INSERT INTO memberships (tenant_id, subject_id, role, active) VALUES (:tenant, :subject, 'owner', true)"), values)
+              connection.execute(text("INSERT INTO containers (tenant_id, container_id, slug, display_name) VALUES (:tenant, :container, 'upgrade-fixture', 'Upgrade Fixture')"), values)
+          PY
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(os.environ["OWCOPILOT_ADMIN_DATABASE_URL"])
+          with engine.begin() as connection:
+              connection.execute(text("ALTER ROLE owcopilot_migration INHERIT"))
+          PY
+          if alembic upgrade head; then
+            echo "n12_0002 unexpectedly accepted an elevated migration role"
+            exit 1
+          fi
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(os.environ["OWCOPILOT_ADMIN_DATABASE_URL"])
+          with engine.begin() as connection:
+              connection.execute(text("ALTER ROLE owcopilot_migration NOINHERIT"))
+          PY
+          alembic upgrade head
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(os.environ["OWCOPILOT_MIGRATION_DATABASE_URL"])
+          with engine.connect() as connection:
+              assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "n12_0002"
+              assert connection.execute(text("SELECT count(*) FROM tenants WHERE slug = 'upgrade-fixture' ")).scalar_one() == 1
+          PY
+
+      - name: Lint schema and run real PostgreSQL acceptance
+        run: |
+          python scripts/lint_team_schema.py
+          python -m pytest -q tests/platform/test_team_pg_integration.py tests/platform/test_seed_team_scope.py
+
+      - name: Verify stopped-PostgreSQL fail closed
+        run: |
+          docker compose stop postgres
+          OWCOPILOT_PROFILE=team python - <<'PY'
+          from fastapi.testclient import TestClient
+          from owcopilot.platform.auth import mint_token
+          from owcopilot.platform.models import Principal, Role
+          from owcopilot.service.api import create_app
+
+          client = TestClient(create_app())
+          assert client.get("/health").status_code == 503
+          token = mint_token(Principal(user_id="20202020-2020-4020-8020-202020202020", tenant_id="10101010-1010-4010-8010-101010101010", role=Role.OWNER))
+          response = client.get(
+              "/team/containers/30303030-3030-4030-8030-303030303030/canonical",
+              headers={"Authorization": f"Bearer {token}"},
+          )
+          assert response.status_code == 503
+          PY
+
+      - name: PostgreSQL logs
+        if: always()
+        run: docker compose logs postgres
+
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -53,15 +242,41 @@ jobs:
         with:
           node-version: "22" # vite 8 requires Node ^20.19 || >=22.12
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Set up Python for the real FastAPI browser smoke
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install the real API and require the runner browser
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[serve]"
+          test -x /usr/bin/google-chrome
 
       - name: Install frontend deps
-        run: npm ci --prefix frontend
+        run: npm ci --prefix apps/web
+
+      - name: Frontend semantic-state controls
+        run: npm test --prefix apps/web
 
       # `npm run build` runs `vue-tsc --noEmit && vite build`, so this is the type gate too:
       # a type error (e.g. a ref-unwrap mismatch) fails CI here, which `vite build` alone would miss.
       - name: Type-check + build frontend
-        run: npm run build --prefix frontend
+        run: npm run build --prefix apps/web
+
+      - name: Frontend bundle budget
+        run: npm run test:bundle --prefix apps/web
+
+      - name: Browser smoke (desktop + mobile)
+        run: npm run test:browser --prefix apps/web
+
+      - name: Real FastAPI same-origin browser smoke
+        env:
+          PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
+        run: npm run test:browser:real --prefix apps/web
 
   docker:
     runs-on: ubuntu-latest
@@ -71,8 +286,19 @@ jobs:
       - name: Build the API image
         run: docker build -t owcopilot-api:ci .
 
-      - name: Smoke-test the container (offline /health + a real request)
+      - name: Build the formal team image
+        run: docker build -f infra/team/Dockerfile -t owcopilot-team:ci .
+
+      - name: Smoke-test the container (API + production SPA)
         run: |
+          spa_headers="$(mktemp)"
+          spa_body="$(mktemp)"
+          asset_headers="$(mktemp)"
+          cleanup() {
+            docker rm -f owcopilot >/dev/null 2>&1 || true
+            rm -f "$spa_headers" "$spa_body" "$asset_headers"
+          }
+          trap cleanup EXIT
           docker run -d --name owcopilot -p 8000:8000 owcopilot-api:ci
           for i in $(seq 1 30); do
             curl -fsS http://127.0.0.1:8000/health && break || sleep 1
@@ -82,4 +308,23 @@ jobs:
           curl -fsS -X POST http://127.0.0.1:8000/workspaces \
             -H 'Content-Type: application/json' \
             -d '{"name":"ci-smoke"}' | grep -q '"name":"ci-smoke"'
-          docker rm -f owcopilot
+          curl -fsS -D "$spa_headers" -o "$spa_body" http://127.0.0.1:8000/
+          grep -q 'id="app"' "$spa_body"
+          grep -q 'noindex, nofollow, noarchive' "$spa_body"
+          grep -qi '^cache-control: no-cache, must-revalidate' "$spa_headers"
+          grep -qi '^content-security-policy:' "$spa_headers"
+          grep -qi "frame-ancestors 'none'" "$spa_headers"
+          grep -qi '^x-content-type-options: nosniff' "$spa_headers"
+          grep -qi '^x-frame-options: DENY' "$spa_headers"
+          grep -qi '^referrer-policy: same-origin' "$spa_headers"
+          grep -qi '^permissions-policy:' "$spa_headers"
+          grep -qi '^x-robots-tag: noindex, nofollow, noarchive' "$spa_headers"
+          asset_path="$(grep -oE '/assets/[A-Za-z0-9._-]+-[A-Za-z0-9_-]{8,}\.js' "$spa_body" | sed -n '1p')"
+          test -n "$asset_path"
+          curl -fsS -H 'Accept-Encoding: gzip' -D "$asset_headers" -o /dev/null \
+            "http://127.0.0.1:8000${asset_path}"
+          grep -qi '^content-type: .*javascript' "$asset_headers"
+          grep -qi '^cache-control: public, max-age=31536000, immutable' "$asset_headers"
+          grep -qi '^content-encoding: gzip' "$asset_headers"
+          grep -qi '^vary: Accept-Encoding' "$asset_headers"
+          grep -qi '^x-content-type-options: nosniff' "$asset_headers"

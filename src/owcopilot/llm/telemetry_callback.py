@@ -1,7 +1,7 @@
 # LangChain callbacks → 自研 CallRecord 遥测桥:每次 chat model 调用落一条记录。
 # 关键:成本模型/归账语义不变(telemetry.py PRICES + records_since 快照仍是唯一口径);
 #   task 标签从 invoke config 的 metadata/tags 取(压缩调用 tags=["compact"]),默认 agent_react;
-#   失败调用不记账(与网关一致:只有成功调用产生 CallRecord)。
+#   失败调用也记脱敏类别/时延/调用上限，不存异常原文、提示词或 headers。
 """LangChain callback handler feeding the self-built per-call telemetry.
 
 The LangGraph agent loop no longer routes model calls through ``LLMGateway.complete``, so the
@@ -25,8 +25,8 @@ Field mapping (kept in lockstep with the gateway's records):
 * ``cache_hit`` — always ``False``: agent-path calls never pass the client cache (the gateway
   deliberately does not cache tool-loop calls either).
 
-A failed call (``on_llm_error``) records nothing — parity with the gateway, which raises without
-appending a record.
+A failed call (``on_llm_error``) records a zero-token row with only a stable error category and
+attempt ceiling. Exception text, request bodies and headers are deliberately never copied.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import LLMResult
 
 from .chat_model import _response_model_of, _usage_of
+from .gateway import _classify_provider_error
 from .telemetry import CallRecord, TelemetryCollector
 
 
@@ -54,11 +55,13 @@ class TelemetryCallbackHandler(BaseCallbackHandler):
         tier: str,
         model: str,
         default_task: str = "agent_react",
+        transport_attempt_cap: int = 1,
     ) -> None:
         self.collector = collector
         self.tier = tier
         self.model = model
         self.default_task = default_task
+        self.transport_attempt_cap = max(1, transport_attempt_cap)
         # run_id -> (perf-counter start, resolved task label). Locked: middleware-initiated calls
         # and (later) parallel agents may overlap on one handler instance.
         self._inflight: dict[UUID, tuple[float, str]] = {}
@@ -115,6 +118,8 @@ class TelemetryCallbackHandler(BaseCallbackHandler):
                 latency_ms=latency_ms,
                 model=self.model,
                 response_model=response_model,
+                gateway_invocations=1,
+                transport_attempt_cap=self.transport_attempt_cap,
             )
         )
 
@@ -127,9 +132,30 @@ class TelemetryCallbackHandler(BaseCallbackHandler):
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> Any:
-        # Parity with the gateway: a failed call bills nothing and records nothing.
         with self._lock:
-            self._inflight.pop(run_id, None)
+            started = self._inflight.pop(run_id, None)
+        if started is None:
+            latency_ms, task = 0.0, self.default_task
+        else:
+            latency_ms = (time.perf_counter() - started[0]) * 1000
+            task = started[1]
+        category = (
+            _classify_provider_error(error) if isinstance(error, Exception) else "provider_error"
+        )
+        self.collector.record(
+            CallRecord(
+                task=task,
+                tier=self.tier,
+                input_tokens=0,
+                output_tokens=0,
+                latency_ms=latency_ms,
+                model=self.model,
+                gateway_invocations=1,
+                transport_attempt_cap=self.transport_attempt_cap,
+                success=False,
+                error_category=category,
+            )
+        )
 
     @staticmethod
     def _message_of(response: LLMResult) -> AIMessage | None:

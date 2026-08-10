@@ -17,8 +17,8 @@ C++:
 
 Every entry point returns a :class:`RemoteResult` with a guided message on failure instead of a raw
 traceback. Connecting to a real editor over the wire is verifiable only on a real machine (see
-docs/UE_INTEGRATION.md); these functions are structured so the request/command shape is unit-tested
-offline.
+scripts/run_ue_verify.py); these functions are structured so the request/command
+shape is unit-tested offline.
 """
 
 from __future__ import annotations

@@ -9,8 +9,8 @@ Editor-only. ``import unreal`` is guarded so the file is import-safe under CI / 
 it simply does nothing). The folder picker is intentionally a project-configured path rather than a
 faked dialog API: point ``OWCOPILOT_UE_EXPORT_DIR`` at the exported ``unreal/`` directory and,
 optionally, ``OWCOPILOT_UE_TABLE_MAP`` at a JSON mapping ``{"Quests": "/Game/.../QuestTable"}``.
-The exact in-editor file-dialog / Editor Utility Widget surface is verifiable only on a real machine
-(see docs/UE_INTEGRATION.md).
+The exact in-editor file-dialog / Editor Utility Widget surface is verifiable only on a real machine;
+the repository integration boundary is summarized in ``integrations/README.md``.
 """
 
 from __future__ import annotations

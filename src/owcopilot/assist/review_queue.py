@@ -21,10 +21,12 @@ from ..storage import SQLiteStore
 class ReviewItemType(str, Enum):
     QUEST_DRAFT = "quest_draft"
     QUEST_LOGIC_DRAFT = "quest_logic_draft"  # B7: AI-drafted logic layer for an EXISTING quest
+    TEMPORAL_SPEC_DRAFT = "temporal_spec_draft"
     PATCH_CANDIDATE = "patch_candidate"
     BARK_VARIANT = "bark_variant"
     WORLD_SEED = "world_seed"
     IMPORT_DRAFT = "import_draft"
+    SYNC_DRAFT = "sync_draft"
     DIALOGUE_TREE = "dialogue_tree"
     FLAVOR_BATCH = "flavor_batch"
     CHARACTER_PROFILE = "character_profile"
@@ -115,6 +117,28 @@ class ReviewQueue:
             )
         )
 
+    def add_temporal_spec_draft(
+        self,
+        payload: dict[str, Any],
+        *,
+        issue_refs: list[str] | None = None,
+    ) -> ReviewItem:
+        """Queue a grounded temporal property for an existing quest.
+
+        ``payload`` carries the original intent, validated structural draft, deterministic
+        grounding trail, assembled spec and back-translation. Acceptance appends only that spec to
+        the quest metadata; enqueueing never mutates canon.
+        """
+        quest_id = str(payload.get("quest_id") or "unknown")
+        return self.add(
+            ReviewItem(
+                item_type=ReviewItemType.TEMPORAL_SPEC_DRAFT,
+                object_ref=f"quest:{quest_id}",
+                payload=payload,
+                issue_refs=issue_refs or [],
+            )
+        )
+
     def add_world_seed(
         self,
         payload: dict[str, Any],
@@ -145,6 +169,20 @@ class ReviewQueue:
             ReviewItem(
                 item_type=ReviewItemType.IMPORT_DRAFT,
                 object_ref=f"import_draft:{draft_id}",
+                payload=payload,
+                issue_refs=issue_refs or [],
+            )
+        )
+
+    def add_sync_draft(
+        self, payload: dict[str, Any], *, issue_refs: list[str] | None = None
+    ) -> ReviewItem:
+        """Queue a guarded merge that may update existing canon after a baseline re-check."""
+        draft_id = str(payload.get("id") or "unknown")
+        return self.add(
+            ReviewItem(
+                item_type=ReviewItemType.SYNC_DRAFT,
+                object_ref=f"sync_draft:{draft_id}",
                 payload=payload,
                 issue_refs=issue_refs or [],
             )

@@ -11,10 +11,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ...storage.world_lock import serialized_world_write
 from .._common import open_project as _project
 
 
 # >>> WS-B collaboration (assignments / comments / locks / concurrency) >>>
+@serialized_world_write
 def collab_state_action(
     content_root: str | Path,
     *,
@@ -22,10 +24,13 @@ def collab_state_action(
     sqlite_path: str | None = None,
 ) -> dict[str, Any]:
     """The collaboration ledger (assignments/comments/locks), optionally scoped to one object."""
-    from ...collab import CollabStore
+    from ...collab import CollabStore, expire_locks
 
     with _project(content_root, sqlite_path) as project:
-        state = CollabStore(project.content_store.root).load()
+        store = CollabStore(project.content_store.root)
+        state = store.load()
+        if expire_locks(state):
+            store.save(state)
         if object_ref is not None:
             return {
                 "object_ref": object_ref,
@@ -44,6 +49,7 @@ def collab_state_action(
         return state.model_dump(mode="json")
 
 
+@serialized_world_write
 def assign_action(
     content_root: str | Path,
     *,
@@ -66,6 +72,7 @@ def assign_action(
         return {"object_ref": object_ref, "assignee": assignee.strip()}
 
 
+@serialized_world_write
 def comment_action(
     content_root: str | Path,
     *,
@@ -84,6 +91,7 @@ def comment_action(
         return {"comment": comment.model_dump(mode="json")}
 
 
+@serialized_world_write
 def lock_action(
     content_root: str | Path,
     *,

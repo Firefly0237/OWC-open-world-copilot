@@ -1,0 +1,246 @@
+{
+  "allowed_providers": [
+    "fixture",
+    "scripted",
+    "real_model"
+  ],
+  "controls": [
+    {
+      "control_id": "semantic_shadow_eval.matched_good.v1",
+      "expected_harness_status": "PASS",
+      "implementation_status": "NOT_AVAILABLE",
+      "kind": "matched_good",
+      "production_path_required": true
+    },
+    {
+      "control_id": "semantic_shadow_eval.frozen_mutant.v1",
+      "expected_harness_status": "FAIL",
+      "implementation_status": "NOT_AVAILABLE",
+      "kind": "frozen_mutant",
+      "production_path_required": true
+    }
+  ],
+  "description": "Semantic shadow recall, judgement, abstention, and exact evidence attribution.",
+  "experiments": [
+    {
+      "baseline": {
+        "aggregate_budget_rule": "same_model_calls_and_input_plus_output_token_cap",
+        "baseline_id": "deterministic_canary_and_structural_review_v1",
+        "description": "Existing deterministic canaries plus structural review, without semantic judgement.",
+        "frozen_before_sealed": true,
+        "paired_by_case": true,
+        "scorer_identical_between_arms": true
+      },
+      "data_freeze": {
+        "dev": {
+          "content_sha256": null,
+          "dataset_id": "semantic_shadow_eval.semantic_review.v1.dev",
+          "origin": "authored_dev",
+          "relative_path": "benchmarks/formal/data/semantic_shadow_eval/semantic_review/dev",
+          "split": "dev",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "DEV_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "dev_may_be_promoted_to_sealed": false,
+        "near_duplicate_check_required": true,
+        "physical_separation_required": true,
+        "sealed": {
+          "content_sha256": null,
+          "dataset_id": "semantic_shadow_eval.semantic_review.v1.sealed",
+          "origin": "independent_sealed",
+          "relative_path": "benchmarks/formal/data/semantic_shadow_eval/semantic_review/sealed",
+          "split": "sealed",
+          "status": "BLOCKED_EXTERNAL_DATA",
+          "status_reasons": [
+            "REPRESENTATIVE_SEALED_CORPUS_AND_SECOND_ANNOTATOR_UNAVAILABLE"
+          ]
+        },
+        "sealed_outputs_unopened": true,
+        "world_entity_plot_cluster_split_required": true
+      },
+      "description": "Candidate retrieval and blinded judging for frozen narrative defect types.",
+      "diagnostic_metrics": [
+        {
+          "description": "Eligible defects recalled among top-K candidates.",
+          "name": "semantic_candidate_recall_at_k",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Precision of judged defects among candidates.",
+          "name": "semantic_judge_precision",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Recall of judged defects among candidates.",
+          "name": "semantic_judge_recall",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Exact supporting-locator precision.",
+          "name": "semantic_evidence_locator_precision",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Rate of explicit abstention when evidence is insufficient.",
+          "name": "semantic_abstain_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "False positives per 1,000 representative negative statements.",
+          "name": "semantic_false_positives_per_1000_statements",
+          "primary": false,
+          "scope": "quality",
+          "unit": "count_per_1000"
+        },
+        {
+          "description": "Model cost per 1,000 statements.",
+          "name": "semantic_cost_per_1000_statements",
+          "primary": false,
+          "scope": "quality",
+          "unit": "usd"
+        }
+      ],
+      "dimension": "semantic_review",
+      "experiment_id": "semantic_shadow_eval.semantic_review.v1",
+      "external_data_blockers": [
+        {
+          "blocker_id": "REPRESENTATIVE_SEALED_CORPUS_UNAVAILABLE",
+          "description": "No representative independently held sealed narrative corpus is present.",
+          "status": "BLOCKED_EXTERNAL_DATA"
+        },
+        {
+          "blocker_id": "SECOND_ANNOTATOR_UNAVAILABLE",
+          "description": "No independent second human annotator has been secured.",
+          "status": "BLOCKED_EXTERNAL_DATA"
+        },
+        {
+          "blocker_id": "DISAGREEMENT_ADJUDICATION_UNAVAILABLE",
+          "description": "No independent disagreement adjudicator or completed protocol is available.",
+          "status": "BLOCKED_EXTERNAL_DATA"
+        }
+      ],
+      "paired_budget": {
+        "actual_tokens_cost_and_latency_reported_per_arm": true,
+        "allocation_id": "evidence_verifier",
+        "charged_components": [
+          "retriever",
+          "semantic_judge"
+        ],
+        "failed_errored_and_retried_usage_counted": true,
+        "model_calls_allowed": true,
+        "same_aggregate_input_output_token_cap_between_arms": true,
+        "same_cases_between_arms": true,
+        "same_model_call_cap_between_arms": true,
+        "same_model_id_between_arms": true,
+        "same_scorer_between_arms": true
+      },
+      "positive_coverage_gates": [
+        {
+          "case_ids": [
+            "semantic.identity-knowledge.positive-001",
+            "semantic.cross-segment-state.positive-001",
+            "semantic.persona-drift.positive-001"
+          ],
+          "gate_id": "semantic_candidate_recall_coverage",
+          "metric_name": "semantic_candidate_recall_at_k",
+          "minimum_denominator": 3,
+          "minimum_rate": 0.3333333333333333,
+          "unmet_status": "NOT_RUN"
+        }
+      ],
+      "preregistered_arms": [
+        {
+          "arm_id": "semantic_review_candidate_v1",
+          "description": "Preregistered semantic_review candidate on the production path.",
+          "role": "candidate"
+        },
+        {
+          "arm_id": "deterministic_canary_and_structural_review_v1",
+          "description": "Existing deterministic canaries plus structural review, without semantic judgement.",
+          "role": "baseline"
+        }
+      ],
+      "primary_metric": {
+        "description": "Recall from eligible defect to correctly attributed defect_type and evidence refs.",
+        "name": "semantic_end_to_end_recall",
+        "primary": true,
+        "scope": "quality",
+        "unit": "ratio"
+      },
+      "scorer": {
+        "byte_identical_trace_recalculation_only": true,
+        "changes_retire_opened_sealed_version": true,
+        "implementation_status": "NOT_AVAILABLE",
+        "scorer_id": "semantic_shadow_eval.semantic_review",
+        "scorer_version": "preregistered-v1",
+        "sha256": null
+      },
+      "status": "BLOCKED_EXTERNAL_DATA",
+      "status_reasons": [
+        "REPRESENTATIVE_SEALED_CORPUS_SECOND_ANNOTATOR_AND_ADJUDICATION_UNAVAILABLE"
+      ]
+    }
+  ],
+  "fault_manifest": null,
+  "global_real_model_budget": {
+    "budget_id": "n0.3-global-real-model-budget-v1",
+    "byte_count": 1777,
+    "path": "../../global_real_model_budget.json",
+    "sha256": "7ee936678b2e1f7e3ce6b477d3411876f110409c35caba4ce77b746f6111fbe3"
+  },
+  "hard_zero_catalog": {
+    "byte_count": 5535,
+    "path": "../../hard_zero/semantic_shadow_eval/cases.json",
+    "sha256": "c7421195678539be527ec9c6bf8edd2dae8923335967e934a59f2226781b8233"
+  },
+  "hard_zero_gates": [
+    {
+      "attack_case_ids": [
+        "semantic_shadow_eval.attack.clean-world-false-positive-001",
+        "semantic_shadow_eval.attack.hard-negative-false-positive-001",
+        "semantic_shadow_eval.attack.justified-growth-false-positive-001"
+      ],
+      "benign_control_case_ids": [
+        "semantic_shadow_eval.benign.true-defect-detected-001"
+      ],
+      "benign_false_reject_metric": "semantic_clean_world_false_positive_benign_false_reject_count",
+      "description": "Clean worlds, hard negatives, and justified growth remain unflagged while defects are found.",
+      "gate_id": "semantic_clean_world_false_positive",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 3,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "semantic_clean_world_false_positive_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    }
+  ],
+  "manifest_status": "NOT_AVAILABLE",
+  "manifest_status_reasons": [
+    "SEMANTIC_SHADOW_PRODUCTION_PATH_NOT_IMPLEMENTED",
+    "PRODUCTION_QUALITY_RUNNER_NOT_AVAILABLE",
+    "REPRESENTATIVE_SEALED_CORPUS_SECOND_ANNOTATOR_AND_ADJUDICATION_UNAVAILABLE"
+  ],
+  "provider_evidence_policy": {
+    "fixture_max_scope": "harness",
+    "fixture_quality_effect_allowed": false,
+    "quality_provider": "real_model",
+    "scripted_gold_f1_is_external_quality_metric": false,
+    "scripted_max_scope": "harness"
+  },
+  "schema_version": "formal-suite-contract/v1",
+  "suite_id": "semantic_shadow_eval",
+  "suite_primary_metric": "semantic_end_to_end_recall",
+  "suite_version": "n0.3-v1"
+}

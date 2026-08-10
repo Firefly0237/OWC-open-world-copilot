@@ -14,8 +14,17 @@ import re
 from pydantic import BaseModel, Field
 
 from ..content.models import ContentBundle, Entity, EntityType, Origin, ReviewStatus
+from ..inspiration.grounding import (
+    build_reference_report,
+    inspiration_prompt_section,
+    inspiration_refs_metadata,
+    retrieve_drafting_references,
+)
+from ..inspiration.report import ReferenceReportItem
+from ..inspiration.retrieval import ReferenceContextBuilder
 from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json
+from ..retrieval.models import ContextPack
 from ..util import unique_id
 from .critic import FLAVOR_CRITIQUE_MARKER, CritiqueResult, FlavorCritic
 from .industry import FLAVOR_RUBRIC_SOURCES, industry_source_block
@@ -23,6 +32,10 @@ from .lint import AssistLintIssue, lint_text
 from .offline import _offline_quality_critique
 from .refine import run_refine_loop
 from .review_queue import ReviewItem, ReviewQueue
+
+#: 素材检索预算：这条链路没有 canon 检索预算旋钮，取与任务草稿默认档一致的固定值
+#: （N4.3，同构 grounding 契约）。
+_INSPIRATION_BUDGET_TOKENS = 800
 
 FLAVOR_CATEGORIES: dict[str, EntityType] = {
     "item": EntityType.ITEM,
@@ -62,6 +75,10 @@ class FlavorBatchResult(BaseModel):
     review_item: ReviewItem | None = None
     refine_rounds: int = 0
     auto_review_incomplete: bool = False
+    # 整批的溯源（N4.3）：这批风味文本用到的素材 + 每条素材的确定性泄漏重算结论。素材开关关掉
+    # （默认）时恒为空。
+    inspiration_refs: list[str] = Field(default_factory=list)
+    reference_report: list[ReferenceReportItem] = Field(default_factory=list)
 
 
 class FlavorBatchService:
@@ -74,10 +91,15 @@ class FlavorBatchService:
         critic: FlavorCritic | None = None,
         max_refine_rounds: int = 0,
         lessons: list[dict] | None = None,  # cross-session lesson archive (get_lessons_for_type)
+        # 灵感库检索器（N4.3）。与 QuestDraft/CharacterProfile 同构：检索器是装配期基础设施，
+        # "这次要不要吃素材"是每次调用时人自己的选择（``generate(use_references=...)``，默认关）。
+        # None = 这个调用方还没接素材，开关怎么传都是关的。
+        reference_context_builder: ReferenceContextBuilder | None = None,
     ) -> None:
         self.gateway = gateway
         self.bundle = bundle
         self.review_queue = review_queue
+        self.reference_context_builder = reference_context_builder
         # Opt-in critique→refine loop, identical pattern to characters/dialogue/barks: no critic =
         # the original single shot.
         self.critic = critic
@@ -94,7 +116,12 @@ class FlavorBatchService:
         names: list[str],
         theme: str = "",
         max_chars: int = 120,
+        use_references: bool = False,
     ) -> FlavorBatchResult:
+        """Batch-generate flavor text. ``use_references`` additionally grounds it on the
+        inspiration library (see
+        ``src/owcopilot/inspiration/grounding.py``).
+        默认关；库里没有允许用于草稿的素材时照常生成。"""
         if category not in FLAVOR_CATEGORIES:
             raise ValueError(
                 f"category must be one of {sorted(FLAVOR_CATEGORIES)}, got {category!r}"
@@ -104,12 +131,22 @@ class FlavorBatchService:
             raise ValueError("at least one name is required")
         style = self.bundle.style_guides.get("style_guide")
         style_text = style.body[:600] if style is not None else ""
-        entries = self._draft_entries(category, cleaned, theme, max_chars, style_text)
+        # 检索查询：category + theme + names（契约 §三），整批只算一次。
+        inspiration_query = " ".join(part for part in (category, theme, *cleaned) if part.strip())
+        inspiration_pack = retrieve_drafting_references(
+            self.reference_context_builder,
+            inspiration_query,
+            enabled=use_references,
+            budget_tokens=_INSPIRATION_BUDGET_TOKENS,
+        )
+        entries = self._draft_entries(
+            category, cleaned, theme, max_chars, style_text, inspiration_pack
+        )
         refine_rounds = 0
         auto_incomplete = False
         if self.critic is not None:
             entries, refine_rounds, auto_incomplete = self._refine_entries(
-                category, cleaned, theme, max_chars, style_text, entries
+                category, cleaned, theme, max_chars, style_text, entries, inspiration_pack
             )
         batch_id = (
             "flavor_"
@@ -120,6 +157,7 @@ class FlavorBatchService:
             category=category,
             refine_rounds=refine_rounds,
             auto_review_incomplete=auto_incomplete,
+            inspiration_refs=inspiration_pack.refs,
         )
         used_ids = set(self.bundle.entities)
         for entry in entries:
@@ -155,11 +193,23 @@ class FlavorBatchService:
                         "flavor_text": entry.flavor,
                         "flavor_batch_id": batch_id,
                         "theme": theme,
+                        # 空 dict when no material was recalled → metadata 与接线之前一致。
+                        **inspiration_refs_metadata(inspiration_pack),
                     },
                     origin=Origin.AI_DRAFT,
                     review_status=ReviewStatus.PENDING_REVIEW,
                 )
             )
+        result.reference_report = build_reference_report(
+            inspiration_pack,
+            # entity.description 已经在 draft_prose 的 _iter_prose 里覆盖；flavor_text 住在
+            # metadata 里，draft_prose 查不到，必须走 extra_prose。
+            draft=ContentBundle(entities={entity.id: entity for entity in result.entities}),
+            canon=self.bundle,
+            human_input=f"{theme} {' '.join(cleaned)}".strip(),
+            used_for="风味文本的灵感参考",
+            extra_prose=[entry.flavor for entry in result.accepted if entry.flavor],
+        )
         if self.review_queue is not None and result.entities:
             result.review_item = self.review_queue.add_flavor_batch(
                 {
@@ -181,6 +231,7 @@ class FlavorBatchService:
         theme: str,
         max_chars: int,
         style_text: str,
+        inspiration_pack: ContextPack,
         *,
         feedback: list[str] | None = None,
     ) -> list[FlavorEntry]:
@@ -201,6 +252,9 @@ class FlavorBatchService:
                 f"{_SYSTEM_PROMPT}\n{lesson_section}"
                 f"Category: {category}. Character budget: {max_chars}.\n"
                 f"Style guide: {style_text or '(none)'}"
+                # 素材是独立的一段，接在 style guide 之后。没有素材时是空串，system prompt 与
+                # 接线之前逐字节一致。
+                + inspiration_prompt_section(inspiration_pack)
             ),
             user=user,
         )
@@ -214,6 +268,7 @@ class FlavorBatchService:
         max_chars: int,
         style_text: str,
         entries: list[FlavorEntry],
+        inspiration_pack: ContextPack,
     ) -> tuple[list[FlavorEntry], int, bool]:
         assert self.critic is not None
 
@@ -237,7 +292,7 @@ class FlavorBatchService:
 
         def regenerate(current: list[FlavorEntry], fixes: list[str]) -> list[FlavorEntry]:
             return self._draft_entries(
-                category, names, theme, max_chars, style_text, feedback=fixes
+                category, names, theme, max_chars, style_text, inspiration_pack, feedback=fixes
             )
 
         outcome = run_refine_loop(

@@ -1,0 +1,3 @@
+Key,Locale,Text,UIMaxLen
+dlg.hello,en,Halt! Name yourself!,
+dlg.hello,zh-CN,站住，报上名来！,40

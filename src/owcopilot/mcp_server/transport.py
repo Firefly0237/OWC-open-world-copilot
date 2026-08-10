@@ -20,10 +20,12 @@ from .tools import (
     audit_project,
     build_context_pack,
     export_project,
+    flag_xref,
     impact_of,
     list_issues,
     propose_fix,
     quality_harness,
+    search_references,
 )
 
 #: URIs of the read-only Resources this server publishes (kept here so tests/docs have one source).
@@ -154,7 +156,9 @@ def create_mcp_server(name: str = "owcopilot", lifespan: Any = None) -> Any:
         audit_project,
         list_issues,
         build_context_pack,
+        search_references,
         ask_lore,
+        flag_xref,
         impact_of,
         propose_fix,
         quality_harness,

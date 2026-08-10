@@ -46,6 +46,7 @@ import os
 from functools import lru_cache
 from typing import Any
 
+from ..model_artifacts import model_artifact_for_repo
 from .models import RetrievalHit
 from .rerank import rerank_hits as _lexical_rerank_hits
 
@@ -71,19 +72,25 @@ _RERANKER_MODEL_ENV = "OWCOPILOT_RERANKER_MODEL"
 
 
 @lru_cache(maxsize=4)
-def _load_cross_encoder(model_name: str) -> Any:
+def _load_cross_encoder(model_name: str, revision: str | None = None) -> Any:
     """Load the cross-encoder model, trying FlagEmbedding then sentence-transformers.
 
     Result is cached per model name for the lifetime of the process.
     This is the first call that downloads the model (~280MB fp16); subsequent calls
     are instant.
     """
+    model_source = model_name
+    if revision is not None:
+        from huggingface_hub import snapshot_download  # noqa: PLC0415
+
+        model_source = snapshot_download(repo_id=model_name, revision=revision, max_workers=1)
+
     # Prefer FlagEmbedding's FlagReranker (official BAAI interface)
     try:
         from FlagEmbedding import FlagReranker  # noqa: PLC0415
 
         logger.info("NeuralReranker: loading %s via FlagEmbedding.FlagReranker", model_name)
-        return _FlagRerankerWrapper(FlagReranker(model_name, use_fp16=True))
+        return _FlagRerankerWrapper(FlagReranker(model_source, use_fp16=True))
     except ImportError:
         pass
 
@@ -91,7 +98,7 @@ def _load_cross_encoder(model_name: str) -> Any:
     from sentence_transformers import CrossEncoder  # noqa: PLC0415
 
     logger.info("NeuralReranker: loading %s via sentence_transformers.CrossEncoder", model_name)
-    return _STCrossEncoderWrapper(CrossEncoder(model_name))
+    return _STCrossEncoderWrapper(CrossEncoder(model_source))
 
 
 class _FlagRerankerWrapper:
@@ -145,13 +152,21 @@ class NeuralReranker:
     bit-exact across hardware variants (documented limitation).
     """
 
-    def __init__(self, model_name: str = DEFAULT_NEURAL_MODEL) -> None:
+    def __init__(
+        self, model_name: str = DEFAULT_NEURAL_MODEL, *, revision: str | None = None
+    ) -> None:
         self.model_name = model_name
+        artifact = model_artifact_for_repo(model_name)
+        self.model_revision = revision if revision is not None else (
+            artifact.revision if artifact is not None else None
+        )
         self._model: Any | None = None
+        self.degraded = False
+        self.degradation_reason: str | None = None
 
     def _ensure_model(self) -> Any:
         if self._model is None:
-            self._model = _load_cross_encoder(self.model_name)
+            self._model = _load_cross_encoder(self.model_name, self.model_revision)
         return self._model
 
     def rerank(
@@ -176,6 +191,8 @@ class NeuralReranker:
         try:
             model = self._ensure_model()
         except Exception as exc:  # noqa: BLE001
+            self.degraded = True
+            self.degradation_reason = f"neural_reranker_load_failed:{type(exc).__name__}"
             logger.warning(
                 "NeuralReranker: model %s could not load (%s); falling back to lexical re-scorer.",
                 self.model_name,
@@ -191,6 +208,8 @@ class NeuralReranker:
         try:
             scores: list[float] = model.predict(pairs)
         except Exception as exc:  # noqa: BLE001
+            self.degraded = True
+            self.degradation_reason = f"neural_reranker_predict_failed:{type(exc).__name__}"
             logger.warning(
                 "NeuralReranker: predict failed (%s); falling back to lexical re-scorer.", exc
             )
@@ -222,7 +241,7 @@ def resolve_reranker(mode: str | None = None) -> NeuralReranker | None:
     * unset/other -- same as ``lexical`` (safe CI default, $0 deterministic).
 
     ``CI`` note: CI sets ``OWCOPILOT_RERANKER=lexical`` (or leaves it unset) so tests
-    are deterministic and $0.  The neural path is exercised locally or in portfolio runs.
+    are deterministic and $0.  The neural path is exercised locally or in benchmark runs.
     """
     if mode is None:
         mode = os.getenv(_RERANKER_MODE_ENV, "lexical").strip().lower()

@@ -15,6 +15,8 @@ import json
 import os
 import time
 
+from pydantic import ValidationError
+
 from ..errors import OWCopilotError
 from .models import Principal, Role
 
@@ -72,6 +74,8 @@ def verify_token(token: str, *, secret: str | None = None) -> Principal:
         claims = json.loads(_b64url_decode(payload_b64))
     except (ValueError, json.JSONDecodeError) as exc:
         raise AuthError("令牌载荷无法解析") from exc
+    if not isinstance(claims, dict):
+        raise AuthError("令牌载荷必须是 JSON 对象")
     try:
         expires_at = int(claims.get("exp", 0))
     except (TypeError, ValueError) as exc:  # a signed-but-malformed exp is still a bad token
@@ -82,8 +86,15 @@ def verify_token(token: str, *, secret: str | None = None) -> Principal:
         role = Role(claims["role"])
     except (KeyError, ValueError) as exc:
         raise AuthError("令牌缺少有效角色") from exc
-    return Principal(
-        user_id=str(claims.get("sub", "")),
-        tenant_id=str(claims.get("tenant", "")),
-        role=role,
-    )
+    try:
+        return Principal(
+            user_id=str(claims.get("sub", "")),
+            # Keep the untrusted claim's original JSON type. Coercing numeric 123 to text
+            # would manufacture a valid-looking path segment and bypass the model boundary.
+            tenant_id=claims.get("tenant", ""),
+            role=role,
+        )
+    except ValidationError as exc:
+        # A valid signature authenticates the bytes, not their safety as an identifier. Convert
+        # the model-boundary rejection into the auth error family so HTTP gets a clean 401.
+        raise AuthError("令牌包含非法 tenant_id") from exc

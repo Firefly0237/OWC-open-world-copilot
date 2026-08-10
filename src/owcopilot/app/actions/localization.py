@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ...storage.world_lock import serialized_world_write
 from .._common import deterministic_cost_budget as _deterministic_cost_budget
 from .._common import open_project as _project
 
@@ -32,6 +33,7 @@ def localization_overview_action(
         }
 
 
+@serialized_world_write
 def loc_transition_action(
     content_root: str | Path,
     *,
@@ -51,6 +53,7 @@ def loc_transition_action(
         return {"entry": entry.model_dump(mode="json")}
 
 
+@serialized_world_write
 def loc_assign_action(
     content_root: str | Path,
     *,

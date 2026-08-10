@@ -2,7 +2,8 @@
 """Deterministic, profile-parameterized synthetic corpora for structural-complexity benchmarking.
 
 This is N2b: the generator that turns the N2a narrative-complexity profiles
-(``docs/research/complexity_profiles.json``, three tiers ``support``/``chapter``/``multiline``) into
+(``benchmarks/evidence/narrative-complexity/complexity-profiles.json``, three tiers
+``support``/``chapter``/``multiline``) into
 audit-clean, simulatable :class:`ContentBundle`s whose *structure* — quest count, branch fan-out,
 convergence, logic-variable population, cross-quest ref density, dialogue depth/width — matches each
 tier's evidence-derived parameter bands. It scales narrative STRUCTURE, the gap
@@ -83,14 +84,18 @@ from ..logic.explore import OutcomeReach, explore_quest
 from ..logic.simulate import simulate_quest
 
 _PROFILES_PATH = (
-    Path(__file__).resolve().parents[3] / "docs" / "research" / "complexity_profiles.json"
+    Path(__file__).resolve().parents[3]
+    / "benchmarks"
+    / "evidence"
+    / "narrative-complexity"
+    / "complexity-profiles.json"
 )
 
 Band = tuple[float, float]
 
 
 class ComplexityProfile(BaseModel):
-    """One tier's structural parameter bands, loaded from ``complexity_profiles.json``.
+    """One tier's structural parameter bands, loaded from ``complexity-profiles.json``.
 
     Every field is a ``[lo, hi]`` band; names mirror the N2a mapping table so the generator reads
     them with no shim. ``logic_var_ratio_{bool,int,enum}`` are the three type-share bands."""

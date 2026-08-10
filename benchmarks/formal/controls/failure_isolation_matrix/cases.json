@@ -1,0 +1,83 @@
+{
+  "cases": [
+    {
+      "case_id": "failure_isolation_matrix.boundary_fault.attack.001",
+      "role": "attack",
+      "stimulus": {
+        "expected_boundary_a": "result_persisted",
+        "expected_boundary_b": "stream_ack",
+        "fault_id": "result_persisted_before_ack"
+      }
+    },
+    {
+      "case_id": "failure_isolation_matrix.boundary_fault.benign.001",
+      "role": "benign",
+      "stimulus": {
+        "fault_id": "matched_no_fault_control"
+      }
+    }
+  ],
+  "data_partition": "harness_control",
+  "description": "Synthetic harness control for nonzero matched denominators and a precisely hit persistence boundary.",
+  "fixture_id": "failure_isolation_matrix.evaluator_conformance.v1",
+  "implementations": [
+    {
+      "declared_kind": "matched_good",
+      "expected_harness_status": "PASS",
+      "implementation_id": "failure_isolation_matrix.matched_good.v1",
+      "observations": [
+        {
+          "case_id": "failure_isolation_matrix.boundary_fault.attack.001",
+          "outcome": {
+            "boundary_a_completed": true,
+            "boundary_b_executed": false,
+            "injection_hit_count": 1,
+            "reported_attack_denominator": 1,
+            "reported_benign_denominator": 1,
+            "reported_harness_status": "PASS"
+          }
+        },
+        {
+          "case_id": "failure_isolation_matrix.boundary_fault.benign.001",
+          "outcome": {
+            "benign_control_succeeded": true,
+            "reported_harness_status": "PASS"
+          }
+        }
+      ]
+    },
+    {
+      "declared_kind": "frozen_mutant",
+      "expected_harness_status": "FAIL",
+      "implementation_id": "failure_isolation_matrix.frozen_mutant.v1",
+      "observations": [
+        {
+          "case_id": "failure_isolation_matrix.boundary_fault.attack.001",
+          "outcome": {
+            "boundary_a_completed": false,
+            "boundary_b_executed": false,
+            "injection_hit_count": 0,
+            "reported_attack_denominator": 0,
+            "reported_benign_denominator": 0,
+            "reported_harness_status": "PASS"
+          }
+        },
+        {
+          "case_id": "failure_isolation_matrix.boundary_fault.benign.001",
+          "outcome": {
+            "benign_control_succeeded": true,
+            "reported_harness_status": "PASS"
+          }
+        }
+      ]
+    }
+  ],
+  "metric_scope": "harness",
+  "payload_sha256": "79faef892c1feb2ffd60d8c779991bc14e2c69ce070ed8974c230c938c48b09b",
+  "production_path_exercised": false,
+  "provider": "fixture",
+  "quality_effects_allowed": false,
+  "real_model_used": false,
+  "schema_version": "formal-control-fixture/v1",
+  "suite_id": "failure_isolation_matrix"
+}

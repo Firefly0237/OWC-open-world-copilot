@@ -13,8 +13,10 @@ from .episodic import (
     format_history_block,
     persist_reflection,
     persist_run_embedding,
+    recall_agent_memory,
     recall_reflections,
     recall_similar_runs,
+    run_audit_signal,
 )
 from .history import persist_agent_run
 from .react import AgentResult, AgentStep, ReActAgent
@@ -31,6 +33,8 @@ __all__ = [
     "persist_agent_run",
     "persist_reflection",
     "persist_run_embedding",
+    "recall_agent_memory",
     "recall_reflections",
     "recall_similar_runs",
+    "run_audit_signal",
 ]

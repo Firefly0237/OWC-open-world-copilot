@@ -1,0 +1,905 @@
+{
+  "allowed_providers": [
+    "fixture",
+    "scripted",
+    "real_model"
+  ],
+  "controls": [
+    {
+      "control_id": "agent_trust_gold.matched_good.v1",
+      "expected_harness_status": "PASS",
+      "implementation_status": "NOT_AVAILABLE",
+      "kind": "matched_good",
+      "production_path_required": true
+    },
+    {
+      "control_id": "agent_trust_gold.frozen_mutant.v1",
+      "expected_harness_status": "FAIL",
+      "implementation_status": "NOT_AVAILABLE",
+      "kind": "frozen_mutant",
+      "production_path_required": true
+    }
+  ],
+  "description": "Planning, tools, evidence, reflection, memory, Persona, and fixed collaboration.",
+  "experiments": [
+    {
+      "baseline": {
+        "aggregate_budget_rule": "same_model_calls_and_input_plus_output_token_cap",
+        "baseline_id": "bounded_react_v1",
+        "description": "Bounded ReAct without a PlanArtifact.",
+        "frozen_before_sealed": true,
+        "paired_by_case": true,
+        "scorer_identical_between_arms": true
+      },
+      "data_freeze": {
+        "dev": {
+          "content_sha256": null,
+          "dataset_id": "agent_trust_gold.planning.v1.dev",
+          "origin": "authored_dev",
+          "relative_path": "benchmarks/formal/data/agent_trust_gold/planning/dev",
+          "split": "dev",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "DEV_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "dev_may_be_promoted_to_sealed": false,
+        "near_duplicate_check_required": true,
+        "physical_separation_required": true,
+        "sealed": {
+          "content_sha256": null,
+          "dataset_id": "agent_trust_gold.planning.v1.sealed",
+          "origin": "independent_sealed",
+          "relative_path": "benchmarks/formal/data/agent_trust_gold/planning/sealed",
+          "split": "sealed",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "SEALED_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "sealed_outputs_unopened": true,
+        "world_entity_plot_cluster_split_required": true
+      },
+      "description": "Compare bounded ReAct with thin plan-and-execute on staged tasks.",
+      "diagnostic_metrics": [
+        {
+          "description": "Plans satisfying dependency and budget contracts.",
+          "name": "planning_valid_plan_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Successful bounded replans after actionable failure.",
+          "name": "planning_replan_success_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        }
+      ],
+      "dimension": "planning",
+      "experiment_id": "agent_trust_gold.planning.v1",
+      "external_data_blockers": [],
+      "paired_budget": {
+        "actual_tokens_cost_and_latency_reported_per_arm": true,
+        "allocation_id": "evidence_verifier",
+        "charged_components": [
+          "planner",
+          "worker",
+          "verifier"
+        ],
+        "failed_errored_and_retried_usage_counted": true,
+        "model_calls_allowed": true,
+        "same_aggregate_input_output_token_cap_between_arms": true,
+        "same_cases_between_arms": true,
+        "same_model_call_cap_between_arms": true,
+        "same_model_id_between_arms": true,
+        "same_scorer_between_arms": true
+      },
+      "positive_coverage_gates": [
+        {
+          "case_ids": [
+            "planning.positive-001",
+            "planning.positive-002"
+          ],
+          "gate_id": "planning_positive_task_coverage",
+          "metric_name": "planning_valid_plan_rate",
+          "minimum_denominator": 2,
+          "minimum_rate": 0.5,
+          "unmet_status": "NOT_RUN"
+        }
+      ],
+      "preregistered_arms": [
+        {
+          "arm_id": "planning_candidate_v1",
+          "description": "Preregistered planning candidate on the production path.",
+          "role": "candidate"
+        },
+        {
+          "arm_id": "bounded_react_v1",
+          "description": "Bounded ReAct without a PlanArtifact.",
+          "role": "baseline"
+        }
+      ],
+      "primary_metric": {
+        "description": "Verifier-accepted task completion over every paired task.",
+        "name": "planning_task_completion_rate",
+        "primary": true,
+        "scope": "quality",
+        "unit": "ratio"
+      },
+      "scorer": {
+        "byte_identical_trace_recalculation_only": true,
+        "changes_retire_opened_sealed_version": true,
+        "implementation_status": "NOT_AVAILABLE",
+        "scorer_id": "agent_trust_gold.planning",
+        "scorer_version": "preregistered-v1",
+        "sha256": null
+      },
+      "status": "NOT_AVAILABLE",
+      "status_reasons": [
+        "FORMAL_PRODUCTION_PATH_OR_DATASET_NOT_AVAILABLE"
+      ]
+    },
+    {
+      "baseline": {
+        "aggregate_budget_rule": "same_model_calls_and_input_plus_output_token_cap",
+        "baseline_id": "ordinary_retry_same_feedback_v1",
+        "description": "Ordinary retry receiving the same verifier feedback and aggregate budget.",
+        "frozen_before_sealed": true,
+        "paired_by_case": true,
+        "scorer_identical_between_arms": true
+      },
+      "data_freeze": {
+        "dev": {
+          "content_sha256": null,
+          "dataset_id": "agent_trust_gold.reflection.v1.dev",
+          "origin": "authored_dev",
+          "relative_path": "benchmarks/formal/data/agent_trust_gold/reflection/dev",
+          "split": "dev",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "DEV_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "dev_may_be_promoted_to_sealed": false,
+        "near_duplicate_check_required": true,
+        "physical_separation_required": true,
+        "sealed": {
+          "content_sha256": null,
+          "dataset_id": "agent_trust_gold.reflection.v1.sealed",
+          "origin": "independent_sealed",
+          "relative_path": "benchmarks/formal/data/agent_trust_gold/reflection/sealed",
+          "split": "sealed",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "SEALED_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "sealed_outputs_unopened": true,
+        "world_entity_plot_cluster_split_required": true
+      },
+      "description": "Compare reflection retry with ordinary retry under identical feedback and budget.",
+      "diagnostic_metrics": [
+        {
+          "description": "Eligible failures receiving one retry.",
+          "name": "reflection_actionable_retry_coverage",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Retries where reflection changes plan or tool choice.",
+          "name": "reflection_plan_change_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        }
+      ],
+      "dimension": "reflection",
+      "experiment_id": "agent_trust_gold.reflection.v1",
+      "external_data_blockers": [],
+      "paired_budget": {
+        "actual_tokens_cost_and_latency_reported_per_arm": true,
+        "allocation_id": "reflection",
+        "charged_components": [
+          "worker",
+          "verifier",
+          "reflection",
+          "compression",
+          "retry"
+        ],
+        "failed_errored_and_retried_usage_counted": true,
+        "model_calls_allowed": true,
+        "same_aggregate_input_output_token_cap_between_arms": true,
+        "same_cases_between_arms": true,
+        "same_model_call_cap_between_arms": true,
+        "same_model_id_between_arms": true,
+        "same_scorer_between_arms": true
+      },
+      "positive_coverage_gates": [
+        {
+          "case_ids": [
+            "reflection.actionable.positive-001"
+          ],
+          "gate_id": "reflection_actionable_retry_coverage",
+          "metric_name": "reflection_actionable_retry_coverage",
+          "minimum_denominator": 1,
+          "minimum_rate": 1.0,
+          "unmet_status": "NOT_RUN"
+        }
+      ],
+      "preregistered_arms": [
+        {
+          "arm_id": "single_run_no_retry_v1",
+          "description": "One run with no retry, under the frozen per-case budget accounting.",
+          "role": "control"
+        },
+        {
+          "arm_id": "ordinary_retry_same_feedback_v1",
+          "description": "Ordinary retry receiving the same verifier feedback and aggregate budget.",
+          "role": "baseline"
+        },
+        {
+          "arm_id": "reflection_retry_v1",
+          "description": "One bounded Reflection retry using the same feedback, scorer, and budget.",
+          "role": "candidate"
+        }
+      ],
+      "primary_metric": {
+        "description": "Verifier-accepted completion rate for reflection retry versus ordinary retry.",
+        "name": "reflection_retry_task_completion_rate",
+        "primary": true,
+        "scope": "quality",
+        "unit": "ratio"
+      },
+      "scorer": {
+        "byte_identical_trace_recalculation_only": true,
+        "changes_retire_opened_sealed_version": true,
+        "implementation_status": "NOT_AVAILABLE",
+        "scorer_id": "agent_trust_gold.reflection",
+        "scorer_version": "preregistered-v1",
+        "sha256": null
+      },
+      "status": "NOT_AVAILABLE",
+      "status_reasons": [
+        "FORMAL_PRODUCTION_PATH_OR_DATASET_NOT_AVAILABLE"
+      ]
+    },
+    {
+      "baseline": {
+        "aggregate_budget_rule": "same_model_calls_and_input_plus_output_token_cap",
+        "baseline_id": "memory_off_v1",
+        "description": "Memory disabled in an isolated run namespace.",
+        "frozen_before_sealed": true,
+        "paired_by_case": true,
+        "scorer_identical_between_arms": true
+      },
+      "data_freeze": {
+        "dev": {
+          "content_sha256": null,
+          "dataset_id": "agent_trust_gold.memory.v1.dev",
+          "origin": "authored_dev",
+          "relative_path": "benchmarks/formal/data/agent_trust_gold/memory/dev",
+          "split": "dev",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "DEV_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "dev_may_be_promoted_to_sealed": false,
+        "near_duplicate_check_required": true,
+        "physical_separation_required": true,
+        "sealed": {
+          "content_sha256": null,
+          "dataset_id": "agent_trust_gold.memory.v1.sealed",
+          "origin": "independent_sealed",
+          "relative_path": "benchmarks/formal/data/agent_trust_gold/memory/sealed",
+          "split": "sealed",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "SEALED_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "sealed_outputs_unopened": true,
+        "world_entity_plot_cluster_split_required": true
+      },
+      "description": "Compare validated memory on/off without cross-run contamination.",
+      "diagnostic_metrics": [
+        {
+          "description": "Validated useful memory delivered to prompt.",
+          "name": "memory_delivered_positive_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Invalid memory entering a prompt.",
+          "name": "memory_invalid_prompt_entry_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        }
+      ],
+      "dimension": "memory",
+      "experiment_id": "agent_trust_gold.memory.v1",
+      "external_data_blockers": [],
+      "paired_budget": {
+        "actual_tokens_cost_and_latency_reported_per_arm": true,
+        "allocation_id": "memory",
+        "charged_components": [
+          "retriever",
+          "worker",
+          "verifier"
+        ],
+        "failed_errored_and_retried_usage_counted": true,
+        "model_calls_allowed": true,
+        "same_aggregate_input_output_token_cap_between_arms": true,
+        "same_cases_between_arms": true,
+        "same_model_call_cap_between_arms": true,
+        "same_model_id_between_arms": true,
+        "same_scorer_between_arms": true
+      },
+      "positive_coverage_gates": [
+        {
+          "case_ids": [
+            "memory.validated.positive-001"
+          ],
+          "gate_id": "memory_delivered_positive_coverage",
+          "metric_name": "memory_delivered_positive_rate",
+          "minimum_denominator": 1,
+          "minimum_rate": 1.0,
+          "unmet_status": "NOT_RUN"
+        }
+      ],
+      "preregistered_arms": [
+        {
+          "arm_id": "memory_off_v1",
+          "description": "Memory disabled in an isolated run namespace.",
+          "role": "baseline"
+        },
+        {
+          "arm_id": "direct_evidence_context_v1",
+          "description": "Direct validated evidence context without durable memory retrieval.",
+          "role": "control"
+        },
+        {
+          "arm_id": "validated_memory_v1",
+          "description": "Validated, scoped, unexpired, current-revision memory retrieval.",
+          "role": "candidate"
+        }
+      ],
+      "primary_metric": {
+        "description": "Verifier-accepted completion with validated memory versus memory off.",
+        "name": "memory_on_task_completion_rate",
+        "primary": true,
+        "scope": "quality",
+        "unit": "ratio"
+      },
+      "scorer": {
+        "byte_identical_trace_recalculation_only": true,
+        "changes_retire_opened_sealed_version": true,
+        "implementation_status": "NOT_AVAILABLE",
+        "scorer_id": "agent_trust_gold.memory",
+        "scorer_version": "preregistered-v1",
+        "sha256": null
+      },
+      "status": "NOT_AVAILABLE",
+      "status_reasons": [
+        "FORMAL_PRODUCTION_PATH_OR_DATASET_NOT_AVAILABLE"
+      ]
+    },
+    {
+      "baseline": {
+        "aggregate_budget_rule": "same_model_calls_and_input_plus_output_token_cap",
+        "baseline_id": "single_agent_equal_budget_v1",
+        "description": "Single agent with the same model, tools, model-call cap, and aggregate token cap.",
+        "frozen_before_sealed": true,
+        "paired_by_case": true,
+        "scorer_identical_between_arms": true
+      },
+      "data_freeze": {
+        "dev": {
+          "content_sha256": null,
+          "dataset_id": "agent_trust_gold.multi_agent.v1.dev",
+          "origin": "authored_dev",
+          "relative_path": "benchmarks/formal/data/agent_trust_gold/multi_agent/dev",
+          "split": "dev",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "DEV_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "dev_may_be_promoted_to_sealed": false,
+        "near_duplicate_check_required": true,
+        "physical_separation_required": true,
+        "sealed": {
+          "content_sha256": null,
+          "dataset_id": "agent_trust_gold.multi_agent.v1.sealed",
+          "origin": "independent_sealed",
+          "relative_path": "benchmarks/formal/data/agent_trust_gold/multi_agent/sealed",
+          "split": "sealed",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "SEALED_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "sealed_outputs_unopened": true,
+        "world_entity_plot_cluster_split_required": true
+      },
+      "description": "Compare fixed orchestrator-worker-verifier fan-out with a single agent.",
+      "diagnostic_metrics": [
+        {
+          "description": "Decomposable tasks completing fan-out and join.",
+          "name": "multi_agent_fanout_join_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Assignments with exactly one visible result.",
+          "name": "multi_agent_unique_result_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        }
+      ],
+      "dimension": "multi_agent",
+      "experiment_id": "agent_trust_gold.multi_agent.v1",
+      "external_data_blockers": [],
+      "paired_budget": {
+        "actual_tokens_cost_and_latency_reported_per_arm": true,
+        "allocation_id": "multi_agent",
+        "charged_components": [
+          "orchestrator",
+          "worker",
+          "verifier",
+          "compression",
+          "retry"
+        ],
+        "failed_errored_and_retried_usage_counted": true,
+        "model_calls_allowed": true,
+        "same_aggregate_input_output_token_cap_between_arms": true,
+        "same_cases_between_arms": true,
+        "same_model_call_cap_between_arms": true,
+        "same_model_id_between_arms": true,
+        "same_scorer_between_arms": true
+      },
+      "positive_coverage_gates": [
+        {
+          "case_ids": [
+            "multi-agent.decomposable.positive-001"
+          ],
+          "gate_id": "multi_agent_fanout_join_coverage",
+          "metric_name": "multi_agent_fanout_join_rate",
+          "minimum_denominator": 1,
+          "minimum_rate": 1.0,
+          "unmet_status": "NOT_RUN"
+        }
+      ],
+      "preregistered_arms": [
+        {
+          "arm_id": "multi_agent_candidate_v1",
+          "description": "Preregistered multi_agent candidate on the production path.",
+          "role": "candidate"
+        },
+        {
+          "arm_id": "single_agent_equal_budget_v1",
+          "description": "Single agent with the same model, tools, model-call cap, and aggregate token cap.",
+          "role": "baseline"
+        }
+      ],
+      "primary_metric": {
+        "description": "Unique verifier-accepted completion rate under equal aggregate budget.",
+        "name": "multi_agent_task_completion_rate",
+        "primary": true,
+        "scope": "quality",
+        "unit": "ratio"
+      },
+      "scorer": {
+        "byte_identical_trace_recalculation_only": true,
+        "changes_retire_opened_sealed_version": true,
+        "implementation_status": "NOT_AVAILABLE",
+        "scorer_id": "agent_trust_gold.multi_agent",
+        "scorer_version": "preregistered-v1",
+        "sha256": null
+      },
+      "status": "NOT_AVAILABLE",
+      "status_reasons": [
+        "FORMAL_PRODUCTION_PATH_OR_DATASET_NOT_AVAILABLE"
+      ]
+    },
+    {
+      "baseline": {
+        "aggregate_budget_rule": "same_model_calls_and_input_plus_output_token_cap",
+        "baseline_id": "direct_bounded_react_tool_use_v1",
+        "description": "Bounded ReAct using the same tools without the new task-policy controls.",
+        "frozen_before_sealed": true,
+        "paired_by_case": true,
+        "scorer_identical_between_arms": true
+      },
+      "data_freeze": {
+        "dev": {
+          "content_sha256": null,
+          "dataset_id": "agent_trust_gold.tool_use.v1.dev",
+          "origin": "authored_dev",
+          "relative_path": "benchmarks/formal/data/agent_trust_gold/tool_use/dev",
+          "split": "dev",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "DEV_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "dev_may_be_promoted_to_sealed": false,
+        "near_duplicate_check_required": true,
+        "physical_separation_required": true,
+        "sealed": {
+          "content_sha256": null,
+          "dataset_id": "agent_trust_gold.tool_use.v1.sealed",
+          "origin": "independent_sealed",
+          "relative_path": "benchmarks/formal/data/agent_trust_gold/tool_use/sealed",
+          "split": "sealed",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "SEALED_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "sealed_outputs_unopened": true,
+        "world_entity_plot_cluster_split_required": true
+      },
+      "description": "Evaluate production-path tool selection, arguments, effects, and evidence.",
+      "diagnostic_metrics": [
+        {
+          "description": "Precision of selected production tools.",
+          "name": "tool_selection_precision",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Recall of required production tools.",
+          "name": "tool_selection_recall",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Exact rubric-valid tool argument rate.",
+          "name": "tool_argument_correctness_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Required effects covered by trusted evidence.",
+          "name": "tool_evidence_coverage",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Tool tasks completing a valid action.",
+          "name": "tool_completed_action_coverage",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        }
+      ],
+      "dimension": "tool_use",
+      "experiment_id": "agent_trust_gold.tool_use.v1",
+      "external_data_blockers": [],
+      "paired_budget": {
+        "actual_tokens_cost_and_latency_reported_per_arm": true,
+        "allocation_id": "evidence_verifier",
+        "charged_components": [
+          "worker",
+          "verifier"
+        ],
+        "failed_errored_and_retried_usage_counted": true,
+        "model_calls_allowed": true,
+        "same_aggregate_input_output_token_cap_between_arms": true,
+        "same_cases_between_arms": true,
+        "same_model_call_cap_between_arms": true,
+        "same_model_id_between_arms": true,
+        "same_scorer_between_arms": true
+      },
+      "positive_coverage_gates": [
+        {
+          "case_ids": [
+            "tool-use.positive-001",
+            "tool-use.positive-002"
+          ],
+          "gate_id": "tool_use_positive_action_coverage",
+          "metric_name": "tool_completed_action_coverage",
+          "minimum_denominator": 2,
+          "minimum_rate": 0.5,
+          "unmet_status": "NOT_RUN"
+        }
+      ],
+      "preregistered_arms": [
+        {
+          "arm_id": "tool_use_candidate_v1",
+          "description": "Preregistered tool_use candidate on the production path.",
+          "role": "candidate"
+        },
+        {
+          "arm_id": "direct_bounded_react_tool_use_v1",
+          "description": "Bounded ReAct using the same tools without the new task-policy controls.",
+          "role": "baseline"
+        }
+      ],
+      "primary_metric": {
+        "description": "Verifier-accepted task completion on tool-requiring tasks.",
+        "name": "tool_use_task_completion_rate",
+        "primary": true,
+        "scope": "quality",
+        "unit": "ratio"
+      },
+      "scorer": {
+        "byte_identical_trace_recalculation_only": true,
+        "changes_retire_opened_sealed_version": true,
+        "implementation_status": "NOT_AVAILABLE",
+        "scorer_id": "agent_trust_gold.tool_use",
+        "scorer_version": "preregistered-v1",
+        "sha256": null
+      },
+      "status": "NOT_AVAILABLE",
+      "status_reasons": [
+        "FORMAL_PRODUCTION_PATH_OR_DATASET_NOT_AVAILABLE"
+      ]
+    },
+    {
+      "baseline": {
+        "aggregate_budget_rule": "same_model_calls_and_input_plus_output_token_cap",
+        "baseline_id": "single_pass_without_persona_rubric_v1",
+        "description": "Single-pass grounded generation without the Persona review rubric.",
+        "frozen_before_sealed": true,
+        "paired_by_case": true,
+        "scorer_identical_between_arms": true
+      },
+      "data_freeze": {
+        "dev": {
+          "content_sha256": null,
+          "dataset_id": "agent_trust_gold.persona.v1.dev",
+          "origin": "authored_dev",
+          "relative_path": "benchmarks/formal/data/agent_trust_gold/persona/dev",
+          "split": "dev",
+          "status": "NOT_AVAILABLE",
+          "status_reasons": [
+            "DEV_DATASET_NOT_YET_FROZEN"
+          ]
+        },
+        "dev_may_be_promoted_to_sealed": false,
+        "near_duplicate_check_required": true,
+        "physical_separation_required": true,
+        "sealed": {
+          "content_sha256": null,
+          "dataset_id": "agent_trust_gold.persona.v1.sealed",
+          "origin": "independent_sealed",
+          "relative_path": "benchmarks/formal/data/agent_trust_gold/persona/sealed",
+          "split": "sealed",
+          "status": "BLOCKED_EXTERNAL_DATA",
+          "status_reasons": [
+            "REPRESENTATIVE_SEALED_CORPUS_AND_SECOND_ANNOTATOR_UNAVAILABLE"
+          ]
+        },
+        "sealed_outputs_unopened": true,
+        "world_entity_plot_cluster_split_required": true
+      },
+      "description": "Blinded review of character consistency and identity/knowledge boundaries.",
+      "diagnostic_metrics": [
+        {
+          "description": "Statements consistent with frozen character facts.",
+          "name": "persona_consistency_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Knowledge-boundary violation rate.",
+          "name": "persona_knowledge_boundary_violation_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Unjustified cross-scene Persona drift rate.",
+          "name": "persona_drift_rate",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        },
+        {
+          "description": "Fraction producing a reviewable response.",
+          "name": "persona_output_coverage",
+          "primary": false,
+          "scope": "quality",
+          "unit": "ratio"
+        }
+      ],
+      "dimension": "persona",
+      "experiment_id": "agent_trust_gold.persona.v1",
+      "external_data_blockers": [
+        {
+          "blocker_id": "REPRESENTATIVE_SEALED_CORPUS_UNAVAILABLE",
+          "description": "No representative independently held sealed narrative corpus is present.",
+          "status": "BLOCKED_EXTERNAL_DATA"
+        },
+        {
+          "blocker_id": "SECOND_ANNOTATOR_UNAVAILABLE",
+          "description": "No independent second human annotator has been secured.",
+          "status": "BLOCKED_EXTERNAL_DATA"
+        },
+        {
+          "blocker_id": "DISAGREEMENT_ADJUDICATION_UNAVAILABLE",
+          "description": "No independent disagreement adjudicator or completed protocol is available.",
+          "status": "BLOCKED_EXTERNAL_DATA"
+        }
+      ],
+      "paired_budget": {
+        "actual_tokens_cost_and_latency_reported_per_arm": true,
+        "allocation_id": "evidence_verifier",
+        "charged_components": [
+          "generator",
+          "verifier"
+        ],
+        "failed_errored_and_retried_usage_counted": true,
+        "model_calls_allowed": true,
+        "same_aggregate_input_output_token_cap_between_arms": true,
+        "same_cases_between_arms": true,
+        "same_model_call_cap_between_arms": true,
+        "same_model_id_between_arms": true,
+        "same_scorer_between_arms": true
+      },
+      "positive_coverage_gates": [
+        {
+          "case_ids": [
+            "persona.positive-001",
+            "persona.positive-002"
+          ],
+          "gate_id": "persona_non_refusal_coverage",
+          "metric_name": "persona_output_coverage",
+          "minimum_denominator": 2,
+          "minimum_rate": 0.5,
+          "unmet_status": "NOT_RUN"
+        }
+      ],
+      "preregistered_arms": [
+        {
+          "arm_id": "persona_candidate_v1",
+          "description": "Preregistered persona candidate on the production path.",
+          "role": "candidate"
+        },
+        {
+          "arm_id": "single_pass_without_persona_rubric_v1",
+          "description": "Single-pass grounded generation without the Persona review rubric.",
+          "role": "baseline"
+        }
+      ],
+      "primary_metric": {
+        "description": "Blinded independent accept rate over representative Persona tasks.",
+        "name": "persona_blinded_accept_rate",
+        "primary": true,
+        "scope": "quality",
+        "unit": "ratio"
+      },
+      "scorer": {
+        "byte_identical_trace_recalculation_only": true,
+        "changes_retire_opened_sealed_version": true,
+        "implementation_status": "NOT_AVAILABLE",
+        "scorer_id": "agent_trust_gold.persona",
+        "scorer_version": "preregistered-v1",
+        "sha256": null
+      },
+      "status": "BLOCKED_EXTERNAL_DATA",
+      "status_reasons": [
+        "REPRESENTATIVE_SEALED_CORPUS_SECOND_ANNOTATOR_AND_ADJUDICATION_UNAVAILABLE"
+      ]
+    }
+  ],
+  "fault_manifest": null,
+  "global_real_model_budget": {
+    "budget_id": "n0.3-global-real-model-budget-v1",
+    "byte_count": 1777,
+    "path": "../../global_real_model_budget.json",
+    "sha256": "7ee936678b2e1f7e3ce6b477d3411876f110409c35caba4ce77b746f6111fbe3"
+  },
+  "hard_zero_catalog": {
+    "byte_count": 18641,
+    "path": "../../hard_zero/agent_trust_gold/cases.json",
+    "sha256": "3a5885558eb2948200820b223e2a91782b71f686f54f6482c7170396c9e97669"
+  },
+  "hard_zero_gates": [
+    {
+      "attack_case_ids": [
+        "agent_trust_gold.attack.forged-evidence-001"
+      ],
+      "benign_control_case_ids": [
+        "agent_trust_gold.benign.tool-evidence-001",
+        "agent_trust_gold.benign.artifact-evidence-001"
+      ],
+      "benign_false_reject_metric": "forged_worker_evidence_accepted_benign_false_reject_count",
+      "description": "Forged worker evidence must be rejected; two trusted evidence classes remain accepted.",
+      "gate_id": "forged_worker_evidence_accepted",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 1,
+      "minimum_benign_denominator": 2,
+      "violation_metric": "forged_worker_evidence_accepted_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "agent_trust_gold.attack.memory-unverified-001",
+        "agent_trust_gold.attack.memory-revoked-001",
+        "agent_trust_gold.attack.memory-cross-scope-001",
+        "agent_trust_gold.attack.memory-expired-001",
+        "agent_trust_gold.attack.memory-stale-revision-001"
+      ],
+      "benign_control_case_ids": [
+        "agent_trust_gold.benign.memory-validated-001"
+      ],
+      "benign_false_reject_metric": "invalid_memory_enters_prompt_benign_false_reject_count",
+      "description": "Unverified, revoked, expired, stale, or cross-scope memory cannot enter a prompt.",
+      "gate_id": "invalid_memory_enters_prompt",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 5,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "invalid_memory_enters_prompt_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "agent_trust_gold.attack.attempt-budget-reset-001"
+      ],
+      "benign_control_case_ids": [
+        "agent_trust_gold.benign.retry-budget-preserved-001"
+      ],
+      "benign_false_reject_metric": "attempt_budget_reset_benign_false_reject_count",
+      "description": "A new attempt cannot reset consumed budget; a within-budget retry remains usable.",
+      "gate_id": "attempt_budget_reset",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 1,
+      "minimum_benign_denominator": 1,
+      "violation_metric": "attempt_budget_reset_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    },
+    {
+      "attack_case_ids": [
+        "agent_trust_gold.attack.assignment-redelivery-001"
+      ],
+      "benign_control_case_ids": [
+        "agent_trust_gold.benign.fanout-join-001",
+        "agent_trust_gold.benign.single-agent-simple-task-001"
+      ],
+      "benign_false_reject_metric": "duplicate_visible_assignment_result_benign_false_reject_count",
+      "description": "Redelivery cannot create two visible results; a decomposable task completes one fan-out/join and a simple nondecomposable task completes with one single agent.",
+      "gate_id": "duplicate_visible_assignment_result",
+      "maximum_benign_false_rejects": 0,
+      "maximum_violations": 0,
+      "minimum_attack_denominator": 1,
+      "minimum_benign_denominator": 2,
+      "violation_metric": "duplicate_visible_assignment_result_violation_count",
+      "zero_denominator_status": "NOT_RUN"
+    }
+  ],
+  "manifest_status": "NOT_AVAILABLE",
+  "manifest_status_reasons": [
+    "FORMAL_AGENT_TRUST_PATH_NOT_IMPLEMENTED",
+    "PRODUCTION_QUALITY_RUNNER_NOT_AVAILABLE",
+    "SUBJECTIVE_PERSONA_BLOCKED_EXTERNAL_DATA"
+  ],
+  "provider_evidence_policy": {
+    "fixture_max_scope": "harness",
+    "fixture_quality_effect_allowed": false,
+    "quality_provider": "real_model",
+    "scripted_gold_f1_is_external_quality_metric": false,
+    "scripted_max_scope": "harness"
+  },
+  "schema_version": "formal-suite-contract/v1",
+  "suite_id": "agent_trust_gold",
+  "suite_primary_metric": "planning_task_completion_rate",
+  "suite_version": "n0.3-v1"
+}

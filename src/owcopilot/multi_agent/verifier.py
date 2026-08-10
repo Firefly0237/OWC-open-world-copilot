@@ -37,6 +37,12 @@ from typing import Any, Literal
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from ..agent.middleware import (
+    SettledCostBudget,
+    TotalModelCallBudget,
+    TotalToolBudgetExceeded,
+    TotalToolCallBudget,
+)
 from ..agent.react import AgentResult, ReActAgent
 from ..llm.telemetry import TelemetryCollector
 from ..skills import SkillError, SkillRegistry
@@ -64,7 +70,11 @@ class VerifierAgent:
         # ≥4 so the offline ReAct script (audit→context→harness→Final Answer) can finish;
         # the deterministic path below is the real authority regardless of this budget.
         max_steps: int = 5,
+        max_tool_calls: int | None = None,
         telemetry: TelemetryCollector | None = None,
+        shared_model_budget: TotalModelCallBudget | None = None,
+        shared_cost_budget: SettledCostBudget | None = None,
+        shared_tool_budget: TotalToolCallBudget | None = None,
     ) -> None:
         self.agent_id = agent_id
         self._model = model
@@ -73,7 +83,11 @@ class VerifierAgent:
         # hidden from the exposed tool schema).  See skill_scope.scoped_registry.
         self._registry = scoped_registry(registry, _VERIFIER_SKILLS)
         self._max_steps = max_steps
+        self._max_tool_calls = max_tool_calls
         self._telemetry = telemetry
+        self._shared_model_budget = shared_model_budget
+        self._shared_cost_budget = shared_cost_budget
+        self._shared_tool_budget = shared_tool_budget
         # Fresh independent ReActAgent — its transcript is not shared with any worker.
         self.agent: ReActAgent = self._make_agent()
 
@@ -82,9 +96,13 @@ class VerifierAgent:
             model=self._model,
             registry=self._registry,
             max_steps=self._max_steps,
+            max_tool_calls=self._max_tool_calls,
             task=f"verifier_{self.agent_id}",
             telemetry=self._telemetry,
             allowed_skills=set(_VERIFIER_SKILLS),  # minimal deterministic tools
+            shared_model_budget=self._shared_model_budget,
+            shared_cost_budget=self._shared_cost_budget,
+            shared_tool_budget=self._shared_tool_budget,
         )
 
     def verify(
@@ -222,6 +240,11 @@ class VerifierAgent:
         """
         if "audit_project" not in self._registry:
             return None, "no-audit-tool"
+        if self._shared_tool_budget is not None:
+            try:
+                self._shared_tool_budget.spend("audit_project")
+            except TotalToolBudgetExceeded:
+                return None, "session-tool-budget-exhausted"
         try:
             result: dict[str, Any] = self._registry.run("audit_project", {})
         except SkillError:

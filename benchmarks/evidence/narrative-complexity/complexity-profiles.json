@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "intercept_n1": {
+      "kind": "corpus",
+      "url": "https://github.com/inkle/the-intercept"
+    },
+    "witcher_qdd": {
+      "kind": "gdc-talk-summary",
+      "url": "https://gamerant.com/cd-projekt-red-witcher-cyberpunk-2077-quest-design-how/"
+    },
+    "detroit_chapters": {
+      "kind": "walkthrough",
+      "url": "https://www.powerpyx.com/detroit-become-human-full-walkthrough-all-chapters/"
+    },
+    "detroit_endings": {
+      "kind": "walkthrough",
+      "url": "https://royalcdkeys.com/blogs/news/detroit-become-human-walkthrough-all-endings-guide-2025"
+    },
+    "bg3_endings": {
+      "kind": "news",
+      "url": "https://www.pcgamer.com/baldurs-gate-3-has-17000-variations-on-its-ending-a-number-that-gives-me-a-headache-just-thinking-about-it/"
+    },
+    "bg3_wordcount": {
+      "kind": "news",
+      "url": "https://gamingbolt.com/baldurs-gate-3-script-is-roughly-2-million-words-long-new-origin-character-revealed"
+    }
+  },
+  "profiles": {
+    "support": {
+      "label": "support(支撑级)",
+      "anchor": "benchmarks/ink_losslessness.md and tests/fixtures/ink/the_intercept/",
+      "derived_from": [
+        "intercept_n1"
+      ],
+      "assumed": {
+        "dialogue_tree_depth": true
+      },
+      "params": {
+        "quest_count": [1, 3],
+        "stages_per_quest": [15, 30],
+        "branch_factor": [3, 4],
+        "convergence_rate": [0.8, 0.95],
+        "logic_var_count": [21, 27],
+        "logic_var_ratio": {
+          "bool": [0.75, 0.85],
+          "int": [0.05, 0.15],
+          "enum": [0.05, 0.15]
+        },
+        "cross_quest_ref_density": [0.0, 0.5],
+        "dialogue_tree_depth": [6, 15],
+        "dialogue_tree_width": [2, 4],
+        "conditional_choice_ratio": [0.15, 0.2]
+      }
+    },
+    "chapter": {
+      "label": "chapter(章节级)",
+      "derived_from": [
+        "witcher_qdd",
+        "detroit_chapters"
+      ],
+      "assumed": {
+        "quest_count": true,
+        "branch_factor": true,
+        "convergence_rate": true,
+        "logic_var_count": true,
+        "logic_var_ratio": true,
+        "cross_quest_ref_density": true,
+        "dialogue_tree_depth": true,
+        "dialogue_tree_width": true,
+        "conditional_choice_ratio": true
+      },
+      "params": {
+        "quest_count": [3, 12],
+        "stages_per_quest": [8, 25],
+        "branch_factor": [2, 4],
+        "convergence_rate": [0.4, 0.7],
+        "logic_var_count": [20, 80],
+        "logic_var_ratio": {
+          "bool": [0.55, 0.75],
+          "int": [0.1, 0.25],
+          "enum": [0.1, 0.25]
+        },
+        "cross_quest_ref_density": [0.5, 3.0],
+        "dialogue_tree_depth": [5, 12],
+        "dialogue_tree_width": [2, 4],
+        "conditional_choice_ratio": [0.2, 0.4]
+      }
+    },
+    "multiline": {
+      "label": "multiline(多线级)",
+      "derived_from": [
+        "detroit_chapters",
+        "detroit_endings",
+        "bg3_endings",
+        "bg3_wordcount"
+      ],
+      "assumed": {
+        "quest_count": true,
+        "stages_per_quest": true,
+        "branch_factor": true,
+        "convergence_rate": true,
+        "logic_var_count": true,
+        "logic_var_ratio": true,
+        "cross_quest_ref_density": true,
+        "dialogue_tree_depth": true,
+        "dialogue_tree_width": true,
+        "conditional_choice_ratio": true
+      },
+      "params": {
+        "quest_count": [30, 150],
+        "stages_per_quest": [6, 25],
+        "branch_factor": [2, 5],
+        "convergence_rate": [0.1, 0.4],
+        "logic_var_count": [100, 2000],
+        "logic_var_ratio": {
+          "bool": [0.45, 0.65],
+          "int": [0.15, 0.3],
+          "enum": [0.15, 0.3]
+        },
+        "cross_quest_ref_density": [2.0, 10.0],
+        "dialogue_tree_depth": [8, 25],
+        "dialogue_tree_width": [2, 6],
+        "conditional_choice_ratio": [0.3, 0.6]
+      }
+    }
+  }
+}

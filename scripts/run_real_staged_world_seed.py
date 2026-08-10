@@ -142,7 +142,7 @@ def _single_shot(content_root: Path, model: str) -> dict[str, Any]:
             user=_brief_user_message(brief),
         )
         payload = parse_world_seed_payload(raw)
-        bundle = _bundle_from_payload(
+        bundle, _conversion_report = _bundle_from_payload(
             payload,
             draft_id="single_shot",
             brief=brief,
@@ -150,7 +150,14 @@ def _single_shot(content_root: Path, model: str) -> dict[str, Any]:
             inspiration_pack=inspiration_pack,
             project_pack=project_pack,
         )
-        _ = _reference_report(payload, inspiration_pack, brief)
+        _ = _reference_report(
+            payload,
+            inspiration_pack,
+            brief.reference_mode,
+            draft=bundle,
+            canon=ContentBundle(),
+            human_input=_brief_user_message(brief),
+        )
         summary = telemetry.summary()
         return {
             "bundle": bundle.model_dump(mode="json", exclude_none=True),
@@ -358,12 +365,18 @@ def _aggregate(fidelities: list[dict[str, Any]]) -> dict[str, Any]:
 def _run_once(workspace: Path, run_id: str, sample: int, model: str) -> dict[str, Any]:
     single_root = workspace / run_id / f"single_{sample}"
     ContentStore(single_root).save(ContentBundle())
-    add_reference_action(single_root, title="ref", text=REFERENCE_TEXT, allowed_uses=["structure"])
+    # allowed_uses is a retrieval filter (B3): world seeding recalls with use="inspiration", so a
+    # reference labelled "structure" only would not ground the run this benchmark is measuring.
+    add_reference_action(
+        single_root, title="ref", text=REFERENCE_TEXT, allowed_uses=["inspiration", "structure"]
+    )
     single = _single_shot(single_root, model)
 
     staged_root = workspace / run_id / f"staged_{sample}"
     ContentStore(staged_root).save(ContentBundle())
-    add_reference_action(staged_root, title="ref", text=REFERENCE_TEXT, allowed_uses=["structure"])
+    add_reference_action(
+        staged_root, title="ref", text=REFERENCE_TEXT, allowed_uses=["inspiration", "structure"]
+    )
     staged = _staged(staged_root, model)
 
     return {

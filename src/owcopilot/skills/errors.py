@@ -42,8 +42,37 @@ class ErrorCode(str, Enum):
     INVALID_ARG = "INVALID_ARG"  # arguments missing / wrong type / wrong enum / wrong shape
     EMPTY_RESULT = "EMPTY_RESULT"  # ran but matched nothing — broaden the query or conclude
     CONFLICT = "CONFLICT"  # the action is not allowed in this state/policy (do not repeat it)
+    RUN_CONTRACT_MISMATCH = "RUN_CONTRACT_MISMATCH"  # resume tried to change frozen limits/policy
+    NO_PROGRESS = "NO_PROGRESS"  # exact repeat returned the same observation twice; change course
     BUDGET_EXCEEDED = "BUDGET_EXCEEDED"  # a cost/step budget is exhausted — stop and conclude now
+    EXTERNAL_TIMEOUT = "EXTERNAL_TIMEOUT"  # downstream timed out before a known completion
+    EXTERNAL_UNAVAILABLE = "EXTERNAL_UNAVAILABLE"  # dependency/transport is unavailable
+    EXTERNAL_PROTOCOL = "EXTERNAL_PROTOCOL"  # schema/protocol/result contract is not trustworthy
+    OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"  # dispatch may have happened; replay needs idempotency
     INTERNAL = "INTERNAL"  # an unclassified internal failure (the catch-all)
+
+
+class ExternalSkillError(RuntimeError):
+    """Sanitized failure raised by a checked external-tool boundary.
+
+    ``retryable`` is a policy fact established at the boundary, not a suggestion inferred by the
+    model. ``outcome_unknown`` is kept separate because a lost acknowledgement after dispatch is
+    materially different from a connection failure before dispatch: replay is safe only when the
+    tool contract is idempotent (or an idempotency key/reconciliation path exists).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: ErrorCode,
+        retryable: bool = False,
+        outcome_unknown: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.retryable = bool(retryable)
+        self.outcome_unknown = bool(outcome_unknown)
 
 
 def classify_error(exc: BaseException) -> ErrorCode:
@@ -59,6 +88,8 @@ def classify_error(exc: BaseException) -> ErrorCode:
     input-shape errors (``KeyError`` / ``ValueError`` / ``TypeError``) → ``INVALID_ARG``, anything
     else → ``INTERNAL``.
     """
+    if isinstance(exc, ExternalSkillError):
+        return exc.error_code
     if isinstance(exc, SkillNotFoundError):
         return ErrorCode.NOT_FOUND
     if isinstance(exc, SkillConflictError):
@@ -76,7 +107,13 @@ def classify_error(exc: BaseException) -> ErrorCode:
     return ErrorCode.INTERNAL
 
 
-def error_envelope(error_code: ErrorCode, message: str) -> dict[str, Any]:
+def error_envelope(
+    error_code: ErrorCode,
+    message: str,
+    *,
+    retryable: bool | None = None,
+    outcome_unknown: bool | None = None,
+) -> dict[str, Any]:
     """The canonical FAILURE envelope dict: ``{status, error_code, message}`` (no ``data``).
 
     The caller serializes it with the same canonical serializer as a success observation, so an
@@ -85,4 +122,15 @@ def error_envelope(error_code: ErrorCode, message: str) -> dict[str, Any]:
     an error round as a compaction checkpoint (``context_compressor`` protects ``\\bError\\s*:``
     turns from being summarized away), so preserving it keeps that behaviour intact.
     """
-    return {"status": "error", "error_code": error_code.value, "message": message}
+    envelope: dict[str, Any] = {
+        "status": "error",
+        "error_code": error_code.value,
+        "message": message,
+    }
+    # Preserve existing envelope byte shape for internal/local errors. External boundaries carry
+    # both booleans explicitly so the recovery policy never guesses replay safety from prose.
+    if retryable is not None:
+        envelope["retryable"] = bool(retryable)
+    if outcome_unknown is not None:
+        envelope["outcome_unknown"] = bool(outcome_unknown)
+    return envelope

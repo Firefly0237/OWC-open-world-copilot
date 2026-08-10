@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+: "${POSTGRES_USER:?POSTGRES_USER is required}"
+: "${POSTGRES_DB:?POSTGRES_DB is required}"
+: "${OWCOPILOT_MIGRATION_PASSWORD:?OWCOPILOT_MIGRATION_PASSWORD is required}"
+: "${OWCOPILOT_APP_PASSWORD:?OWCOPILOT_APP_PASSWORD is required}"
+
+psql --set=ON_ERROR_STOP=1 \
+  --username "${POSTGRES_USER}" \
+  --dbname "${POSTGRES_DB}" \
+  --set=migration_password="${OWCOPILOT_MIGRATION_PASSWORD}" \
+  --set=app_password="${OWCOPILOT_APP_PASSWORD}" <<'SQL'
+SELECT format(
+  'CREATE ROLE owcopilot_migration LOGIN PASSWORD %L NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS',
+  :'migration_password'
+)
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'owcopilot_migration')
+\gexec
+
+SELECT format(
+  'CREATE ROLE owcopilot_app LOGIN PASSWORD %L NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS',
+  :'app_password'
+)
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'owcopilot_app')
+\gexec
+
+ALTER ROLE owcopilot_migration LOGIN PASSWORD :'migration_password'
+  NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE owcopilot_app LOGIN PASSWORD :'app_password'
+  NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+
+REVOKE owcopilot_migration FROM owcopilot_app;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+REVOKE ALL ON SCHEMA public FROM owcopilot_app;
+GRANT USAGE, CREATE ON SCHEMA public TO owcopilot_migration;
+GRANT USAGE ON SCHEMA public TO owcopilot_app;
+SQL

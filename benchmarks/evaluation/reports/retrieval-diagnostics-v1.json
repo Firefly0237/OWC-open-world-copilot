@@ -1,0 +1,649 @@
+{
+  "checks": {
+    "fp3_not_above_fp2": true,
+    "frozen_query_count_is_120": true,
+    "hashing_embedder_is_explicit": true,
+    "mcnemar_uses_paired_denominator": true,
+    "recall_denominator_matches_answerable": true,
+    "runner_dataset_hashes_match": true
+  },
+  "claim_boundary": {
+    "real_model_report": "benchmarks/evaluation/reports/retrieval-report-v1.json",
+    "semantic_quality_claim": false,
+    "statement": "HashingEmbedder validates deterministic production ContextPack mechanics, FP2/FP3 failure attribution, and paired McNemar A/B plumbing only. Its absolute recall and hit rates are not evidence of semantic embedding or neural-reranker quality; use retrieval-report-v1.json for the revision-pinned real-model result."
+  },
+  "dataset": {
+    "artifact_sha256": "116fdc8b2743df00037b5747db0a9092b6b2c52ecb1e0997fc752fbbd8be386c",
+    "content_digest": "a360c6fc01f86f4f3772371f9abdbdc8a97672fdb69d8d6d9b428361605b4a88",
+    "path": "benchmarks/retrieval_eval_set_v1.json",
+    "queries": {
+      "answerable": 104,
+      "by_category": {
+        "indirect": 24,
+        "paraphrase": 50,
+        "unanswerable": 16,
+        "verbatim": 30
+      },
+      "by_locale": {
+        "en": 60,
+        "zh-CN": 60
+      },
+      "total": 120,
+      "unanswerable": 16
+    },
+    "seed": 14,
+    "version": "v1",
+    "world_content_hash": "784ea3f613af2ecb4a825c0d286bda6bc5b2d16c38475413d2d2b03c4dcb009d"
+  },
+  "execution": {
+    "cost_usd": 0.0,
+    "embedder": "HashingEmbedder",
+    "embedder_model_id": "hashing-1024",
+    "model_calls": 0,
+    "network_calls": 0,
+    "production_path": "ProjectContext -> ContextPackBuilder",
+    "reranker": "lexical",
+    "runners": [
+      "run_retrieval_recall_eval",
+      "run_staged_retrieval_diagnostic",
+      "run_retrieval_ab_eval"
+    ]
+  },
+  "fp2_fp3": {
+    "budget_tokens": 800,
+    "by_category": {
+      "indirect": {
+        "budget_trim_loss": 0.4166,
+        "fp2_pool_hit_rate": 0.8333,
+        "fp2_pool_hits": 20,
+        "fp2_wilson_ci": [
+          0.6415,
+          0.9332
+        ],
+        "fp3_pack_hit_rate": 0.4167,
+        "fp3_pack_hits": 10,
+        "fp3_wilson_ci": [
+          0.2447,
+          0.6117
+        ],
+        "label": "indirect",
+        "n": 24
+      },
+      "paraphrase": {
+        "budget_trim_loss": 0.02,
+        "fp2_pool_hit_rate": 0.76,
+        "fp2_pool_hits": 38,
+        "fp2_wilson_ci": [
+          0.6259,
+          0.857
+        ],
+        "fp3_pack_hit_rate": 0.74,
+        "fp3_pack_hits": 37,
+        "fp3_wilson_ci": [
+          0.6045,
+          0.8413
+        ],
+        "label": "paraphrase",
+        "n": 50
+      },
+      "verbatim": {
+        "budget_trim_loss": 0.0,
+        "fp2_pool_hit_rate": 1.0,
+        "fp2_pool_hits": 30,
+        "fp2_wilson_ci": [
+          0.8865,
+          1.0
+        ],
+        "fp3_pack_hit_rate": 1.0,
+        "fp3_pack_hits": 30,
+        "fp3_wilson_ci": [
+          0.8865,
+          1.0
+        ],
+        "label": "verbatim",
+        "n": 30
+      }
+    },
+    "by_locale": {
+      "en": {
+        "budget_trim_loss": 0.1539,
+        "fp2_pool_hit_rate": 0.7885,
+        "fp2_pool_hits": 41,
+        "fp2_wilson_ci": [
+          0.6597,
+          0.8776
+        ],
+        "fp3_pack_hit_rate": 0.6346,
+        "fp3_pack_hits": 33,
+        "fp3_wilson_ci": [
+          0.4987,
+          0.752
+        ],
+        "label": "en",
+        "n": 52
+      },
+      "zh-CN": {
+        "budget_trim_loss": 0.0576,
+        "fp2_pool_hit_rate": 0.9038,
+        "fp2_pool_hits": 47,
+        "fp2_wilson_ci": [
+          0.7939,
+          0.9582
+        ],
+        "fp3_pack_hit_rate": 0.8462,
+        "fp3_pack_hits": 44,
+        "fp3_wilson_ci": [
+          0.7248,
+          0.9199
+        ],
+        "label": "zh-CN",
+        "n": 52
+      }
+    },
+    "dataset_hash": "a360c6fc01f86f4f3772371f9abdbdc8a97672fdb69d8d6d9b428361605b4a88",
+    "excluded_unanswerable": 16,
+    "overall": {
+      "budget_trim_loss": 0.1058,
+      "fp2_pool_hit_rate": 0.8462,
+      "fp2_pool_hits": 88,
+      "fp2_wilson_ci": [
+        0.7646,
+        0.903
+      ],
+      "fp3_pack_hit_rate": 0.7404,
+      "fp3_pack_hits": 77,
+      "fp3_wilson_ci": [
+        0.6486,
+        0.815
+      ],
+      "label": "overall",
+      "n": 104
+    },
+    "pool_limit": 10,
+    "scored_queries": 104,
+    "version": "v1"
+  },
+  "paired_mcnemar_ab": {
+    "admission": {
+      "admitted_ids": [
+        "id-000",
+        "id-001",
+        "id-002",
+        "id-003",
+        "id-004",
+        "id-005",
+        "id-006",
+        "id-007",
+        "id-008",
+        "id-009",
+        "id-010",
+        "id-011",
+        "id-012",
+        "id-013",
+        "id-014",
+        "id-015",
+        "id-016",
+        "id-017",
+        "id-018",
+        "id-019",
+        "id-020",
+        "id-021",
+        "id-022",
+        "id-023"
+      ],
+      "n_admitted": 24,
+      "n_multihop": 24,
+      "n_rejected": 0,
+      "rejected": []
+    },
+    "arm_a": "bm25_only",
+    "arm_b": "hybrid_rerank",
+    "by_category_primary": {
+      "indirect": {
+        "arm_a_success_rate": 0.125,
+        "arm_b_success_rate": 0.0,
+        "contingency": {
+          "a_only_hit": 3,
+          "arm_a_hits": 3,
+          "arm_b_hits": 0,
+          "b_only_hit": 0,
+          "both_hit": 0,
+          "both_miss": 21,
+          "n": 24
+        },
+        "k": 1,
+        "label": "indirect",
+        "mcnemar": {
+          "alpha": 0.05,
+          "b": 3,
+          "c": 0,
+          "chi_square_cc": null,
+          "method": "mcnemar_exact_binomial",
+          "n_discordant": 3,
+          "p_value": 0.25,
+          "significant": false
+        },
+        "n": 24
+      },
+      "paraphrase": {
+        "arm_a_success_rate": 0.5,
+        "arm_b_success_rate": 0.56,
+        "contingency": {
+          "a_only_hit": 2,
+          "arm_a_hits": 25,
+          "arm_b_hits": 28,
+          "b_only_hit": 5,
+          "both_hit": 23,
+          "both_miss": 20,
+          "n": 50
+        },
+        "k": 1,
+        "label": "paraphrase",
+        "mcnemar": {
+          "alpha": 0.05,
+          "b": 2,
+          "c": 5,
+          "chi_square_cc": null,
+          "method": "mcnemar_exact_binomial",
+          "n_discordant": 7,
+          "p_value": 0.453125,
+          "significant": false
+        },
+        "n": 50
+      },
+      "verbatim": {
+        "arm_a_success_rate": 0.8667,
+        "arm_b_success_rate": 1.0,
+        "contingency": {
+          "a_only_hit": 0,
+          "arm_a_hits": 26,
+          "arm_b_hits": 30,
+          "b_only_hit": 4,
+          "both_hit": 26,
+          "both_miss": 0,
+          "n": 30
+        },
+        "k": 1,
+        "label": "verbatim",
+        "mcnemar": {
+          "alpha": 0.05,
+          "b": 0,
+          "c": 4,
+          "chi_square_cc": null,
+          "method": "mcnemar_exact_binomial",
+          "n_discordant": 4,
+          "p_value": 0.125,
+          "significant": false
+        },
+        "n": 30
+      }
+    },
+    "corpus_size": 364,
+    "dataset_hash": "a360c6fc01f86f4f3772371f9abdbdc8a97672fdb69d8d6d9b428361605b4a88",
+    "dataset_version": "v1",
+    "embedder": "HashingEmbedder",
+    "k_values": [
+      1,
+      3,
+      5,
+      10
+    ],
+    "n_paired": 104,
+    "note": "Paired success@k over the frozen eval set (embedder=HashingEmbedder); McNemar exact binomial p-values. Under HashingEmbedder the absolute hit-rates are not a semantic-quality claim (methodology demo); inject a semantic embedder for a live number.",
+    "overall_by_k": {
+      "1": {
+        "arm_a_success_rate": 0.5192,
+        "arm_b_success_rate": 0.5577,
+        "contingency": {
+          "a_only_hit": 5,
+          "arm_a_hits": 54,
+          "arm_b_hits": 58,
+          "b_only_hit": 9,
+          "both_hit": 49,
+          "both_miss": 41,
+          "n": 104
+        },
+        "k": 1,
+        "label": "overall",
+        "mcnemar": {
+          "alpha": 0.05,
+          "b": 5,
+          "c": 9,
+          "chi_square_cc": null,
+          "method": "mcnemar_exact_binomial",
+          "n_discordant": 14,
+          "p_value": 0.42395,
+          "significant": false
+        },
+        "n": 104
+      },
+      "10": {
+        "arm_a_success_rate": 0.7019,
+        "arm_b_success_rate": 0.7115,
+        "contingency": {
+          "a_only_hit": 4,
+          "arm_a_hits": 73,
+          "arm_b_hits": 74,
+          "b_only_hit": 5,
+          "both_hit": 69,
+          "both_miss": 26,
+          "n": 104
+        },
+        "k": 10,
+        "label": "overall",
+        "mcnemar": {
+          "alpha": 0.05,
+          "b": 4,
+          "c": 5,
+          "chi_square_cc": null,
+          "method": "mcnemar_exact_binomial",
+          "n_discordant": 9,
+          "p_value": 1.0,
+          "significant": false
+        },
+        "n": 104
+      },
+      "3": {
+        "arm_a_success_rate": 0.5962,
+        "arm_b_success_rate": 0.6058,
+        "contingency": {
+          "a_only_hit": 4,
+          "arm_a_hits": 62,
+          "arm_b_hits": 63,
+          "b_only_hit": 5,
+          "both_hit": 58,
+          "both_miss": 37,
+          "n": 104
+        },
+        "k": 3,
+        "label": "overall",
+        "mcnemar": {
+          "alpha": 0.05,
+          "b": 4,
+          "c": 5,
+          "chi_square_cc": null,
+          "method": "mcnemar_exact_binomial",
+          "n_discordant": 9,
+          "p_value": 1.0,
+          "significant": false
+        },
+        "n": 104
+      },
+      "5": {
+        "arm_a_success_rate": 0.6442,
+        "arm_b_success_rate": 0.6731,
+        "contingency": {
+          "a_only_hit": 5,
+          "arm_a_hits": 67,
+          "arm_b_hits": 70,
+          "b_only_hit": 8,
+          "both_hit": 62,
+          "both_miss": 29,
+          "n": 104
+        },
+        "k": 5,
+        "label": "overall",
+        "mcnemar": {
+          "alpha": 0.05,
+          "b": 5,
+          "c": 8,
+          "chi_square_cc": null,
+          "method": "mcnemar_exact_binomial",
+          "n_discordant": 13,
+          "p_value": 0.581055,
+          "significant": false
+        },
+        "n": 104
+      }
+    },
+    "primary": {
+      "arm_a_success_rate": 0.5192,
+      "arm_b_success_rate": 0.5577,
+      "contingency": {
+        "a_only_hit": 5,
+        "arm_a_hits": 54,
+        "arm_b_hits": 58,
+        "b_only_hit": 9,
+        "both_hit": 49,
+        "both_miss": 41,
+        "n": 104
+      },
+      "k": 1,
+      "label": "overall",
+      "mcnemar": {
+        "alpha": 0.05,
+        "b": 5,
+        "c": 9,
+        "chi_square_cc": null,
+        "method": "mcnemar_exact_binomial",
+        "n_discordant": 14,
+        "p_value": 0.42395,
+        "significant": false
+      },
+      "n": 104
+    },
+    "primary_k": 1
+  },
+  "recall": {
+    "by_category": {
+      "indirect": {
+        "label": "indirect",
+        "n": 24,
+        "recall_at_k": {
+          "1": 0.0,
+          "10": 0.4167,
+          "3": 0.1667,
+          "5": 0.3333
+        },
+        "success_at_k": {
+          "1": 0,
+          "10": 10,
+          "3": 4,
+          "5": 8
+        },
+        "wilson_ci_at_k": {
+          "1": [
+            0.0,
+            0.138
+          ],
+          "10": [
+            0.2447,
+            0.6117
+          ],
+          "3": [
+            0.0668,
+            0.3585
+          ],
+          "5": [
+            0.1797,
+            0.5329
+          ]
+        }
+      },
+      "paraphrase": {
+        "label": "paraphrase",
+        "n": 50,
+        "recall_at_k": {
+          "1": 0.56,
+          "10": 0.68,
+          "3": 0.58,
+          "5": 0.64
+        },
+        "success_at_k": {
+          "1": 28,
+          "10": 34,
+          "3": 29,
+          "5": 32
+        },
+        "wilson_ci_at_k": {
+          "1": [
+            0.4231,
+            0.6884
+          ],
+          "10": [
+            0.5419,
+            0.7924
+          ],
+          "3": [
+            0.4423,
+            0.7063
+          ],
+          "5": [
+            0.5014,
+            0.7586
+          ]
+        }
+      },
+      "verbatim": {
+        "label": "verbatim",
+        "n": 30,
+        "recall_at_k": {
+          "1": 1.0,
+          "10": 1.0,
+          "3": 1.0,
+          "5": 1.0
+        },
+        "success_at_k": {
+          "1": 30,
+          "10": 30,
+          "3": 30,
+          "5": 30
+        },
+        "wilson_ci_at_k": {
+          "1": [
+            0.8865,
+            1.0
+          ],
+          "10": [
+            0.8865,
+            1.0
+          ],
+          "3": [
+            0.8865,
+            1.0
+          ],
+          "5": [
+            0.8865,
+            1.0
+          ]
+        }
+      }
+    },
+    "by_locale": {
+      "en": {
+        "label": "en",
+        "n": 52,
+        "recall_at_k": {
+          "1": 0.5192,
+          "10": 0.5962,
+          "3": 0.5385,
+          "5": 0.5769
+        },
+        "success_at_k": {
+          "1": 27,
+          "10": 31,
+          "3": 28,
+          "5": 30
+        },
+        "wilson_ci_at_k": {
+          "1": [
+            0.3869,
+            0.649
+          ],
+          "10": [
+            0.4607,
+            0.7184
+          ],
+          "3": [
+            0.405,
+            0.6666
+          ],
+          "5": [
+            0.4419,
+            0.7013
+          ]
+        }
+      },
+      "zh-CN": {
+        "label": "zh-CN",
+        "n": 52,
+        "recall_at_k": {
+          "1": 0.5962,
+          "10": 0.8269,
+          "3": 0.6731,
+          "5": 0.7692
+        },
+        "success_at_k": {
+          "1": 31,
+          "10": 43,
+          "3": 35,
+          "5": 40
+        },
+        "wilson_ci_at_k": {
+          "1": [
+            0.4607,
+            0.7184
+          ],
+          "10": [
+            0.7027,
+            0.9062
+          ],
+          "3": [
+            0.5376,
+            0.7848
+          ],
+          "5": [
+            0.6387,
+            0.8628
+          ]
+        }
+      }
+    },
+    "dataset_hash": "a360c6fc01f86f4f3772371f9abdbdc8a97672fdb69d8d6d9b428361605b4a88",
+    "excluded_unanswerable": 16,
+    "k_values": [
+      1,
+      3,
+      5,
+      10
+    ],
+    "overall": {
+      "label": "overall",
+      "n": 104,
+      "recall_at_k": {
+        "1": 0.5577,
+        "10": 0.7115,
+        "3": 0.6058,
+        "5": 0.6731
+      },
+      "success_at_k": {
+        "1": 58,
+        "10": 74,
+        "3": 63,
+        "5": 70
+      },
+      "wilson_ci_at_k": {
+        "1": [
+          0.4619,
+          0.6494
+        ],
+        "10": [
+          0.6182,
+          0.7898
+        ],
+        "3": [
+          0.5097,
+          0.6943
+        ],
+        "5": [
+          0.5782,
+          0.7557
+        ]
+      }
+    },
+    "scored_queries": 104,
+    "version": "v1"
+  },
+  "schema_version": "retrieval-diagnostics-v1",
+  "status": "mechanism_verified"
+}

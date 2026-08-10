@@ -31,8 +31,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from ..errors import OWCopilotError
-from ..llm.gateway import offline_llm_allowed
+from ..llm.gateway import offline_llm_allowed, provider_transport_attempt_cap
 from ..llm.telemetry_callback import TelemetryCallbackHandler
+from .middleware import SettledCostBudgetExceeded, TotalModelBudgetExceeded
 from .react import _AGENT_TIER, ReActAgent, _model_id_of
 
 
@@ -77,9 +78,16 @@ def distill_reflection(*, agent: ReActAgent, goal: str, trial_index: int, feedba
                     tier=_AGENT_TIER,
                     model=_model_id_of(agent.model),
                     default_task=agent.task,
+                    transport_attempt_cap=provider_transport_attempt_cap(agent.model),
                 )
             ]
         }
+    try:
+        agent.consume_model_call("reflection")
+    except SettledCostBudgetExceeded as exc:
+        raise ReflexionError(f"self-reflection cost budget exhausted: {exc}") from exc
+    except TotalModelBudgetExceeded as exc:
+        raise ReflexionError(f"self-reflection model-call budget exhausted: {exc}") from exc
     reply = agent.model.invoke(
         [
             SystemMessage(content=_REFLECTION_SYSTEM_PROMPT),

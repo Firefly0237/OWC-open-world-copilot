@@ -11,7 +11,7 @@ import os
 
 import unreal  # type: ignore[import-not-found]  # 仅在 UE 进程内可用
 
-# 表名 -> 行结构体资产名(与 docs/研究/UE结构体手建清单.md 一致)
+# 表名 -> 行结构体资产名(与 scripts/ue_verify_import.py 一致)
 _TABLES = {
     "DialogueTreeNodes": "S_OWCDialogueNodeRow",
     "DialogueTreeChoices": "S_OWCDialogueChoiceRow",

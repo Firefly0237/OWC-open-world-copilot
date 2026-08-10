@@ -1,0 +1,280 @@
+{
+  "allowed_providers": [
+    "fixture",
+    "scripted",
+    "real_model"
+  ],
+  "artifacts": [
+    {
+      "byte_count": 26662,
+      "path": "contract.json",
+      "sha256": "9db977f78c738e0b4aad431b4cdcfbd022d0bf8bdb04316378878a23fcbc3f83",
+      "split": null
+    },
+    {
+      "byte_count": 1777,
+      "path": "../../global_real_model_budget.json",
+      "sha256": "7ee936678b2e1f7e3ce6b477d3411876f110409c35caba4ce77b746f6111fbe3",
+      "split": null
+    },
+    {
+      "byte_count": 14401,
+      "path": "../../hard_zero/game_planner_vertical_e2e/cases.json",
+      "sha256": "cf2249182646272ac3c2dca102aabd260930e96cc3b15dcbe91c53f0288ba578",
+      "split": null
+    }
+  ],
+  "description": "Vertical game-planner journey from intake through grounded update and impact.",
+  "metrics": [
+    {
+      "description": "Macro-F1 across every preregistered content_role; no role may be omitted.",
+      "name": "triage_content_role_macro_f1",
+      "primary": true,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Accuracy on non-abstained segments.",
+      "name": "triage_selective_accuracy",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Fraction of eligible segments not abstained.",
+      "name": "triage_coverage",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Area under the selective risk-coverage curve.",
+      "name": "triage_risk_coverage_auc",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Frozen-bin confidence calibration error.",
+      "name": "triage_expected_calibration_error",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Exact source-locator match rate.",
+      "name": "triage_locator_fidelity",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Blinded human accept rate; revise and reject remain in the denominator.",
+      "name": "grounded_draft_human_accept_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Schema-valid draft rate.",
+      "name": "grounded_draft_structural_validity_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Per-draft canonical conflict rate.",
+      "name": "grounded_draft_canon_conflict_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Per-draft unauthorized inspiration leakage rate.",
+      "name": "grounded_draft_leakage_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Blinded human revise rate.",
+      "name": "grounded_draft_human_revise_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Blinded human reject rate.",
+      "name": "grounded_draft_human_reject_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Paired human edit burden relative to the frozen baseline.",
+      "name": "grounded_draft_relative_modification_burden",
+      "primary": false,
+      "scope": "quality",
+      "unit": "normalized_edit_burden"
+    },
+    {
+      "description": "Fraction producing a reviewable draft.",
+      "name": "grounded_draft_output_coverage",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "F1 over preregistered expected impacted reference identities.",
+      "name": "impact_expected_refs_f1",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Precision over expected impacted refs.",
+      "name": "impact_expected_refs_precision",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Recall over expected impacted refs.",
+      "name": "impact_expected_refs_recall",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Fraction of changed objects yielding candidates.",
+      "name": "impact_query_result_coverage",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Cited correct-answer rate over all preregistered answerable questions.",
+      "name": "rag_answerable_question_success_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Fraction of answerable questions receiving an answer.",
+      "name": "rag_answerable_coverage",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Exact supporting-locator citation rate.",
+      "name": "rag_citation_fidelity",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Correct abstention rate on unanswerable cases.",
+      "name": "rag_unanswerable_abstain_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Gold evidence recall at frozen K.",
+      "name": "rag_retrieval_recall_at_k",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Matched-good PASS and frozen-mutant FAIL decisions over all frozen controls.",
+      "name": "harness_control_discrimination_rate",
+      "primary": false,
+      "scope": "harness",
+      "unit": "ratio"
+    },
+    {
+      "description": "Hard-zero attack-side violations for third_party_provenance_promotion.",
+      "name": "third_party_provenance_promotion_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for third_party_provenance_promotion.",
+      "name": "third_party_provenance_promotion_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for reference_used_as_canonical_fact.",
+      "name": "reference_used_as_canonical_fact_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for reference_used_as_canonical_fact.",
+      "name": "reference_used_as_canonical_fact_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for unapproved_release_visibility.",
+      "name": "unapproved_release_visibility_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for unapproved_release_visibility.",
+      "name": "unapproved_release_visibility_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for unchecked_leakage_acceptance.",
+      "name": "unchecked_leakage_acceptance_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for unchecked_leakage_acceptance.",
+      "name": "unchecked_leakage_acceptance_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero attack-side violations for serving_before_projection_ready.",
+      "name": "serving_before_projection_ready_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for serving_before_projection_ready.",
+      "name": "serving_before_projection_ready_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    }
+  ],
+  "report_schema_version": "formal-eval/v1",
+  "schema_version": "formal-eval/v1",
+  "scorer": null,
+  "status": "NOT_AVAILABLE",
+  "status_reasons": [
+    "FORMAL_PRODUCTION_PATH_NOT_IMPLEMENTED",
+    "PRODUCTION_QUALITY_RUNNER_NOT_AVAILABLE",
+    "SUBJECTIVE_GROUNDED_DRAFT_BLOCKED_EXTERNAL_DATA"
+  ],
+  "suite_id": "game_planner_vertical_e2e",
+  "suite_version": "n0.3-v1",
+  "trace_schema_version": "formal-eval/v1"
+}

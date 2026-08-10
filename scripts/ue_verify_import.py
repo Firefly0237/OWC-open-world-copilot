@@ -3,7 +3,7 @@
 #   这是把"零真机执行证据"变成证据的那件工具——不依赖 GUI,可反复跑、可进 CI。
 #
 # 前置:行结构体必须已由人工在编辑器里建好(UE 5.7 的 Python 没有 UserDefinedStructFactory,
-#   实测确认无法脚本创建),见 docs/研究/UE结构体手建清单.md。
+#   实测确认无法脚本创建),见 scripts/ue_verify_import.py。
 #
 # 用法(宿主侧见 scripts/run_ue_verify.py):
 #   UnrealEditor-Cmd.exe <proj>.uproject -run=pythonscript -script=<本文件> \
@@ -25,7 +25,7 @@ import traceback
 
 import unreal  # type: ignore[import-not-found]  # 仅在 UE 进程内可用
 
-# 表名 -> 人工手建的行结构体资产名(与 docs/研究/UE结构体手建清单.md 一致)
+# 表名 -> 人工手建的行结构体资产名(与 scripts/ue_verify_import.py 一致)
 _TABLES = {
     "DialogueTreeNodes": "S_OWCDialogueNodeRow",
     "DialogueTreeChoices": "S_OWCDialogueChoiceRow",

@@ -1,0 +1,22 @@
+{
+  "content_hash": "4b90eebedef80a6d55ee5399fcb0f79f6941c903492cf5ed821084a72a07b6d1",
+  "files": [
+    {
+      "kind": "content_bundle",
+      "path": "content_bundle.json",
+      "sha256": "011bb76e71e08731b15a5b2fb1367bf2454ee293ddf5352b264887f1125e6d6f"
+    },
+    {
+      "kind": "localization_csv",
+      "path": "localized_texts.csv",
+      "sha256": "326169e9474822726a108606ff85d6b9bec818458b45ba50bc46284f3e735ebe"
+    },
+    {
+      "kind": "localization_xliff",
+      "path": "localized_texts.xlf",
+      "sha256": "e5934597972c337586cf0e8eb0758c8b9fd58cc44d3b1b226f7c5be5822938c4"
+    }
+  ],
+  "generated_at": "2026-07-10T23:11:07.930228Z",
+  "target_engine": "generic"
+}

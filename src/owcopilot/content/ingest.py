@@ -284,6 +284,7 @@ def _object_maps(
         ("region", bundle.regions, incoming.regions),
         ("poi", bundle.pois, incoming.pois),
         ("dialogue", bundle.dialogues, incoming.dialogues),
+        ("dialogue_tree", bundle.dialogue_trees, incoming.dialogue_trees),
         ("localized_text", bundle.localized_texts, incoming.localized_texts),
         ("term", bundle.terms, incoming.terms),
         ("style_guide", bundle.style_guides, incoming.style_guides),

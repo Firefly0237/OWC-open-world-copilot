@@ -56,6 +56,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -187,6 +188,7 @@ def compress_transcript(
     chat_model: BaseChatModel | None = None,
     tracer: Any | None = None,
     model: str = "",
+    before_model_call: Callable[[], None] | None = None,
 ) -> tuple[list[str], CompressionStats]:
     """Return a read-time view of *transcript* with oldest turns LLM-summarised if needed.
 
@@ -299,6 +301,7 @@ def compress_transcript(
             compact_tier=compact_tier,
             tracer=tracer,
             model=model,
+            before_model_call=before_model_call,
         )
         if summary_text is None:
             # Gateway failed — graceful fallback to the uncompressed view (not a silent downgrade:
@@ -344,6 +347,7 @@ def _run_compaction(
     compact_tier: str | None,
     tracer: Any | None = None,
     model: str = "",
+    before_model_call: Callable[[], None] | None = None,
 ) -> str | None:
     """Summarise *to_compress* (optionally folding in a prior *reuse_summary*) via the LLM.
 
@@ -381,6 +385,8 @@ def _run_compaction(
         )
         try:
             with compact_span:
+                if before_model_call is not None:
+                    before_model_call()
                 reply = chat_model.invoke(
                     [
                         SystemMessage(content=_COMPACT_SYSTEM_PROMPT),
@@ -401,6 +407,8 @@ def _run_compaction(
             return None
     assert gateway is not None  # compress_transcript validated the pair
     try:
+        if before_model_call is not None:
+            before_model_call()
         return gateway.complete(
             task=compact_task,
             system=_COMPACT_SYSTEM_PROMPT,

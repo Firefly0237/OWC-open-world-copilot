@@ -26,8 +26,9 @@ estimators themselves are exercised at ``n>1`` by the unit tests.
 ``n_trials=1``，``k`` 只在 ``k=1`` 处有定义。这不是命名错误（估计量本身 `pass_hat_k`/`pass_at_k`
 的实现是对的、且在 ``n>1`` 下被单测覆盖过），而是**当前唯一的生产调用点从未喂过 n>1 的数据**。
 在此仅做标注，不重命名函数（重命名会牵动 `ReliabilityReport`/多处测试引用），真正的 k>1 重复采样
-是 Wave 5 W5-3（见 ``docs/研究/一轮修改优化_总实施方案.md``）。**在此之前，任何对外材料都不得把
-这个数字描述为"k 次试验可靠性"，只能称其为 pass@1（=成功率）。**
+历史方案见 ``benchmarks/evidence/``。
+**在此之前，任何对外材料都不得把这个数字描述为"k 次试验可靠性"，只能称其为
+pass@1（=成功率）。**
 """
 
 from __future__ import annotations

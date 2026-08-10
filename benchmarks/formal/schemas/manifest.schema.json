@@ -1,0 +1,235 @@
+{
+  "$defs": {
+    "ArtifactReference": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_count": {
+          "minimum": 0,
+          "title": "Byte Count",
+          "type": "integer"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "split": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvalSplit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "byte_count"
+      ],
+      "title": "ArtifactReference",
+      "type": "object"
+    },
+    "EvalProvider": {
+      "enum": [
+        "fixture",
+        "scripted",
+        "real_model"
+      ],
+      "title": "EvalProvider",
+      "type": "string"
+    },
+    "EvalSplit": {
+      "enum": [
+        "canary",
+        "dev",
+        "sealed"
+      ],
+      "title": "EvalSplit",
+      "type": "string"
+    },
+    "EvalStatus": {
+      "description": "The only statuses allowed in formal evaluation artifacts.",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "NOT_RUN",
+        "NOT_AVAILABLE",
+        "INVALID",
+        "BLOCKED_EXTERNAL_DATA"
+      ],
+      "title": "EvalStatus",
+      "type": "string"
+    },
+    "MetricDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "primary": {
+          "default": false,
+          "title": "Primary",
+          "type": "boolean"
+        },
+        "scope": {
+          "$ref": "#/$defs/MetricScope"
+        },
+        "unit": {
+          "minLength": 1,
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "scope",
+        "description",
+        "unit"
+      ],
+      "title": "MetricDefinition",
+      "type": "object"
+    },
+    "MetricScope": {
+      "enum": [
+        "harness",
+        "quality"
+      ],
+      "title": "MetricScope",
+      "type": "string"
+    },
+    "ScorerProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "scorer_id": {
+          "minLength": 1,
+          "title": "Scorer Id",
+          "type": "string"
+        },
+        "scorer_version": {
+          "minLength": 1,
+          "title": "Scorer Version",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scorer_id",
+        "scorer_version",
+        "sha256"
+      ],
+      "title": "ScorerProvenance",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Common manifest envelope; suite-specific frozen data is added by N0.3-b.",
+  "properties": {
+    "allowed_providers": {
+      "items": {
+        "$ref": "#/$defs/EvalProvider"
+      },
+      "title": "Allowed Providers",
+      "type": "array"
+    },
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/ArtifactReference"
+      },
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "description": {
+      "minLength": 1,
+      "title": "Description",
+      "type": "string"
+    },
+    "metrics": {
+      "items": {
+        "$ref": "#/$defs/MetricDefinition"
+      },
+      "title": "Metrics",
+      "type": "array"
+    },
+    "report_schema_version": {
+      "const": "formal-eval/v1",
+      "title": "Report Schema Version",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "formal-eval/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scorer": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScorerProvenance"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "status": {
+      "$ref": "#/$defs/EvalStatus"
+    },
+    "status_reasons": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Status Reasons",
+      "type": "array"
+    },
+    "suite_id": {
+      "minLength": 1,
+      "title": "Suite Id",
+      "type": "string"
+    },
+    "suite_version": {
+      "minLength": 1,
+      "title": "Suite Version",
+      "type": "string"
+    },
+    "trace_schema_version": {
+      "const": "formal-eval/v1",
+      "title": "Trace Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "suite_id",
+    "suite_version",
+    "description",
+    "status",
+    "trace_schema_version",
+    "report_schema_version",
+    "allowed_providers",
+    "artifacts",
+    "metrics"
+  ],
+  "title": "FormalEvalManifest",
+  "type": "object"
+}

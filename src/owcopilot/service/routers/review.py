@@ -10,19 +10,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from ...app.actions import (
     decide_review_action,
     get_review_item_context_action,
+    list_lessons_action,
     list_review_items_action,
     reviewer_calibration_action,
     revise_draft_action,
+    revoke_lesson_action,
 )
 from ..api import _require_real_allowed
 from ..dependencies import _manage_error, _project_root_or_404
+from ..pagination import PaginationCursorError, paginate
 from ..schemas import (
     CalibrationContextResp,
+    LessonRevokeRequest,
     PayloadStageSummary,
     PayloadSummary,
     ReviewDecideRequest,
@@ -40,10 +44,23 @@ router = APIRouter()
 def list_review_items(
     project: str,
     request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = Query(default=None, max_length=1000),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> ReviewItemsResponse:
     result = list_review_items_action(_project_root_or_404(project))
-    return ReviewItemsResponse(project=project, **result)
+    try:
+        page = paginate(result["items"], limit=limit, cursor=cursor)
+    except PaginationCursorError as exc:
+        raise HTTPException(status_code=409 if exc.stale else 422, detail=str(exc)) from exc
+    return ReviewItemsResponse(
+        project=project,
+        count=page.total,
+        items=page.items,
+        next_cursor=page.next_cursor,
+        snapshot_etag=page.snapshot_etag,
+        cost_budget=result["cost_budget"],
+    )
 
 
 @router.get(
@@ -99,6 +116,60 @@ def review_calibration(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> dict[str, Any]:
     result = reviewer_calibration_action(_project_root_or_404(project))
+    return {"project": project, **result}
+
+
+@router.post("/projects/{project}/review/calibration:learn")
+def learn_from_review_calibration(
+    project: str,
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> dict[str, Any]:
+    """Explicitly distil calibration false-passes into prompt lessons (a deliberate write)."""
+    result = reviewer_calibration_action(_project_root_or_404(project), write_lessons=True)
+    return {"project": project, **result}
+
+
+@router.get("/projects/{project}/lessons")
+def list_project_lessons(
+    project: str,
+    request: Request,
+    include_revoked: bool = False,
+    limit: int | None = Query(default=None, ge=1, le=200),
+    cursor: str | None = Query(default=None, max_length=1000),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> dict[str, Any]:
+    result = list_lessons_action(_project_root_or_404(project), include_revoked=include_revoked)
+    # Keep the original unpaged response byte-shape for CLI/older clients.  Supplying either
+    # pagination parameter opts into a bounded, snapshot-bound cursor response.
+    if limit is None and cursor is None:
+        return {"project": project, **result}
+    try:
+        page = paginate(result["lessons"], limit=limit or 50, cursor=cursor)
+    except PaginationCursorError as exc:
+        raise HTTPException(status_code=409 if exc.stale else 422, detail=str(exc)) from exc
+    result["count"] = page.total
+    result["total"] = page.total
+    result["lessons"] = page.items
+    result["next_cursor"] = page.next_cursor
+    result["snapshot_etag"] = page.snapshot_etag
+    return {"project": project, **result}
+
+
+@router.post("/projects/{project}/lessons/{lesson_id}:revoke")
+def revoke_project_lesson(
+    project: str,
+    lesson_id: str,
+    req: LessonRevokeRequest,
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> dict[str, Any]:
+    try:
+        result = revoke_lesson_action(
+            _project_root_or_404(project), lesson_id=lesson_id, reason=req.reason
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"project": project, **result}
 
 

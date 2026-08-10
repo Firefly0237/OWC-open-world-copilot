@@ -10,9 +10,9 @@ same traversal/zip-slip hardening as workspaces — a tenant cannot name its way
 from __future__ import annotations
 
 import hmac
-import re
 from pathlib import Path
 
+from ..trust.identifiers import resolve_path_segment
 from .auth import AuthError, verify_token
 from .models import LOCAL_PRINCIPAL, Principal, Role
 
@@ -36,25 +36,13 @@ def resolve_principal(
     raise AuthError("缺少有效的 Authorization 或 X-API-Key")
 
 
-# Reject path separators, traversal, and the Windows drive marker ':' (e.g. "C:") in a world name.
-_BAD = re.compile(r"[/\\:]|\.\.")
-
-
-def _sanitize_world(world: str) -> str:
-    name = world.strip()
-    if not name or _BAD.search(name) or Path(name).is_absolute():
-        raise ValueError(f"非法的世界名：{world!r}")
-    return name
-
-
 def tenant_world_root(principal: Principal, world: str, *, worlds_home: str | Path) -> Path:
     """The on-disk root for ``world`` within the caller's tenant. Hardened against traversal: the
     resolved path must stay under ``<worlds_home>/<tenant_id>/``."""
-    tenant_dir = (Path(worlds_home) / principal.tenant_id).resolve()
-    target = (tenant_dir / _sanitize_world(world)).resolve()
-    if tenant_dir not in target.parents and target != tenant_dir:
-        raise ValueError("世界路径越过租户边界")
-    return target
+    # Principal validates tenant_id at construction, while the repeated check here is deliberate
+    # defence-in-depth for model_construct/legacy objects crossing this filesystem boundary.
+    tenant_dir = resolve_path_segment(worlds_home, principal.tenant_id, label="tenant_id")
+    return resolve_path_segment(tenant_dir, world, label="世界名")
 
 
 def require_role(principal: Principal, minimum: Role) -> None:

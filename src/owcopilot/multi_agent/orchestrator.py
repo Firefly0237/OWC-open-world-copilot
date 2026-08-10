@@ -43,6 +43,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from ..agent.middleware import SettledCostBudget, TotalModelCallBudget
 from ..agent.react import _AGENT_TIER, _model_id_of
 from ..llm.jsonio import extract_json
 from ..llm.telemetry import TelemetryCollector
@@ -106,12 +107,16 @@ class OrchestratorAgent:
         # an agent.invoke context, so the TelemetryCallbackHandler is attached explicitly on the
         # invoke config (§1.3) — None ⇒ no accounting (its cost simply is not recorded).
         telemetry: TelemetryCollector | None = None,
+        shared_model_budget: TotalModelCallBudget | None = None,
+        shared_cost_budget: SettledCostBudget | None = None,
     ) -> None:
         self.agent_id = agent_id
         self._model = model
         self._registry = registry
         self._registered_workers = dict(registered_workers or {})
         self._telemetry = telemetry
+        self._shared_model_budget = shared_model_budget
+        self._shared_cost_budget = shared_cost_budget
 
     # ------------------------------------------------------------------
     # Public API
@@ -295,6 +300,14 @@ class OrchestratorAgent:
         invoke config. Returns the reply text for ``_parse_subtasks`` — no ``response_format`` is
         set (the decomposition asks for a JSON *array*, which ``json_object`` mode would reject).
         """
+        # Reserve before dispatch so concurrent/strict-retry decomposition cannot overspend the
+        # session contract. Cost is necessarily a settled-cost gate: an in-flight provider call
+        # can cross the threshold, but no subsequent call is dispatched once it has done so.
+        if self._shared_cost_budget is not None:
+            self._shared_cost_budget.check_before_dispatch("orchestrator_decompose")
+        if self._shared_model_budget is not None:
+            self._shared_model_budget.spend("orchestrator_decompose")
+
         config: RunnableConfig | None = None
         if self._telemetry is not None:
             config = {
@@ -453,6 +466,10 @@ class OrchestratorAgent:
 #   _MAX = 12: conservative ceiling above the prompt's "complex ~8", well under runaway cost.
 _MIN_SUBTASK_STEPS = 2
 _MAX_SUBTASK_STEPS = 12
+# A decomposition is untrusted model output. Bound fan-out independently from per-task step/tool
+# limits so a verbose model cannot multiply cost by emitting dozens of otherwise-valid workers.
+MAX_DECOMPOSED_SUBTASKS = 6
+MAX_DECOMPOSED_SUBTASKS_PER_ROLE = 3
 
 
 _FALLBACK_SUBTASKS = [
@@ -617,6 +634,29 @@ def _parse_subtasks(raw: str, goal: str) -> tuple[list[SubTask], bool]:
 
         if not subtasks:
             return _FALLBACK_SUBTASKS, True
+
+        if len(subtasks) > MAX_DECOMPOSED_SUBTASKS:
+            logger.warning(
+                "orchestrator: decomposition emitted %d subtasks; enforcing total cap %d.",
+                len(subtasks),
+                MAX_DECOMPOSED_SUBTASKS,
+            )
+        capped: list[SubTask] = []
+        role_counts: dict[str, int] = {}
+        for subtask in subtasks:
+            if len(capped) >= MAX_DECOMPOSED_SUBTASKS:
+                break
+            role_count = role_counts.get(subtask.worker_role, 0)
+            if role_count >= MAX_DECOMPOSED_SUBTASKS_PER_ROLE:
+                logger.warning(
+                    "orchestrator: dropping excess %s subtask; per-role cap is %d.",
+                    subtask.worker_role,
+                    MAX_DECOMPOSED_SUBTASKS_PER_ROLE,
+                )
+                continue
+            capped.append(subtask)
+            role_counts[subtask.worker_role] = role_count + 1
+        subtasks = capped
 
         # ③ The decomposition contract requires BOTH a diagnosis and a repair_proposal subtask
         # (the system prompt demands it).  An LLM that returns, say, only a diagnosis would leave

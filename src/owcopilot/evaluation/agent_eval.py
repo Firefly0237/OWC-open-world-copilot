@@ -1,4 +1,4 @@
-# 五维 agent 评分卡（面向 JD 的能力画像）。
+# 五维 Agent 评分卡。
 """Five-dimension agent evaluation scorecard.
 
 Aggregates existing deterministic evaluation signals into task completion, character consistency,
@@ -9,11 +9,14 @@ evaluator and stays deterministic.
 Honesty notes carried per dimension:
 - 工具调用效果 offline F1 is 1.0 *by design* (a deterministic provider returns the gold sequence);
   it measures action *selection* wiring, not live-LLM tool skill. **FIXTURE, not real-model — must
-  not be cited as a live tool-selection accuracy number in external/portfolio material** (real
+  not be cited as a live tool-selection accuracy number in external documentation** (real
   live-model tool-selection eval is Wave 5 W5-1, see
-  docs/研究/一轮修改优化_总实施方案.md).
-- 叙事合理性 / 角色一致性 are the rule-engine detection rate over a fixed seeded world (a subset of
-  the 29 rules), not a statistical benchmark.
+  benchmarks/evidence/).
+- 叙事合理性 / 角色一致性 are the rule-engine detection rate over a fixed seeded world, not a
+  statistical benchmark. The seeded errors exercise only part of the registry; the ``measures``
+  field of each dimension carries the actual covered/registered counts, and ``eval-acceptance``
+  emits ``rules_covered`` / ``rules_uncovered`` — so the size of the gap is always checkable
+  rather than asserted.
 - 安全性 is a single-probe injection-detection check (fires on the injected surface, silent on the
   clean one), not a red-team sweep.
 - 可靠性(reliability/pass^k below): all underlying scenarios are single-trial (n_trials=1), so the
@@ -25,8 +28,9 @@ Honesty notes carried per dimension:
   LLM 的工具选择表现，**不得作为对外声称的工具选择准确率数字**。
 - 下面 reliability 字段的 pass_hat_k 在本评分卡里恒等于 pass@1（因为全部场景 n_trials=1），**不得
   对外声称为"k 次试验可靠性"**。
-- 本模块不包含、也不聚合任何 multi_agent（orchestrator-worker-verifier）编排质量指标——那套编排
-  **未评测**（`evaluation/` 全目录对 multi_agent 零引用），不要把这五维评分卡误读成覆盖了它。
+- 本五维评分卡不聚合 multi_agent 编排指标。multi-agent 的 baseline/指标/数据槽/hard-zero 门在
+  ``formal_registry`` 独立冻结，但当前 deterministic runner 只验证 harness controls，尚无可引用的
+  真实模型任务完成率；不要把本评分卡或离线结构测试误读成 multi-agent 质量结果。
 """
 
 from __future__ import annotations
@@ -87,6 +91,10 @@ def run_jd_dimension_scorecard() -> JdDimensionScorecard:
     character = [e for e in seeded if e.expected_rule in _CHARACTER_RULES]
     narrative_rate = _detection_rate(narrative, open_pairs)
     character_rate = _detection_rate(character, open_pairs)
+    # The denominator disclosure below carries real counts rather than a hand-maintained number:
+    # a reader can divide them, and they follow the registry instead of drifting away from it.
+    registered_rules = len(build_default_rule_registry().codes())
+    narrative_rules = len({e.expected_rule for e in narrative})
 
     # --- 安全性: PROMPT_INJECTION detection probe (deliberately not in the seeded set) -----------
     safety_rate = _injection_detection_rate(runner)
@@ -128,8 +136,9 @@ def run_jd_dimension_scorecard() -> JdDimensionScorecard:
             metric="narrative/structure rule detection rate on seeded errors",
             source="audit (lore/graph/dialogue/reference/timeline rules) over seed_errors(...)",
             sample_size=len(narrative),
-            measures="rate at which seeded narrative/structural violations are caught; over a "
-            "fixed seeded subset of the 29 rules, not the full registry",
+            measures="rate at which seeded narrative/structural violations are caught; the seeded "
+            f"world exercises {narrative_rules} of the {registered_rules} registered rules, "
+            "so this is not a score over the full registry",
         ),
         JdDimension(
             dimension="工具调用效果",

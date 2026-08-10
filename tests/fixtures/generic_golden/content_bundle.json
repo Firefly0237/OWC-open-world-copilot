@@ -1,0 +1,72 @@
+{
+  "dialogue_trees": {},
+  "dialogues": {
+    "dlg_hello": {
+      "id": "dlg_hello",
+      "locale": "zh-CN",
+      "metadata": {},
+      "origin": "human",
+      "review_status": "approved",
+      "speaker_id": "npc_mara",
+      "text": "站住，报上名来！",
+      "text_key": "dlg.hello",
+      "ui_max_len": 40
+    }
+  },
+  "entities": {
+    "npc_mara": {
+      "aliases": [],
+      "description": "边境斥候。",
+      "id": "npc_mara",
+      "metadata": {},
+      "name": "玛拉",
+      "origin": "human",
+      "review_status": "approved",
+      "status": "active",
+      "tags": [],
+      "type": "npc"
+    }
+  },
+  "localized_texts": {
+    "loc_hello_en": {
+      "id": "loc_hello_en",
+      "locale": "en",
+      "metadata": {},
+      "origin": "human",
+      "review_status": "approved",
+      "text": "Halt! Name yourself!",
+      "text_key": "dlg.hello"
+    }
+  },
+  "pois": {},
+  "quest_event_refs": {},
+  "quests": {
+    "quest_patrol": {
+      "dialogue_refs": [],
+      "giver_npc": "npc_mara",
+      "id": "quest_patrol",
+      "localization_keys": [
+        "quest.quest_patrol.objective"
+      ],
+      "metadata": {},
+      "objective": "在天黑前巡视边境线。",
+      "origin": "human",
+      "prerequisites": [],
+      "review_status": "approved",
+      "rewards": [
+        {
+          "amount": 75,
+          "kind": "gold",
+          "value": "75"
+        }
+      ],
+      "stages": [],
+      "tags": [],
+      "title": "巡逻边境"
+    }
+  },
+  "regions": {},
+  "relations": [],
+  "style_guides": {},
+  "terms": {}
+}

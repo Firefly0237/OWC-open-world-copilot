@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xliff version="1.2" xmlns="urn:oasis:names:tc:xliff:document:1.2">
+  <file original="owcopilot" source-language="en" datatype="plaintext">
+    <body>
+      <trans-unit id="dlg.hello" resname="dlg.hello">
+        <source>Halt! Name yourself!</source>
+      </trans-unit>
+    </body>
+  </file>
+  <file original="owcopilot" source-language="zh-CN" datatype="plaintext">
+    <body>
+      <trans-unit id="dlg.hello" resname="dlg.hello" maxwidth="40" size-unit="char">
+        <source>站住，报上名来！</source>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>

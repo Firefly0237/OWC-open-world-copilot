@@ -1,0 +1,119 @@
+{
+  "allowed_providers": [
+    "fixture",
+    "scripted",
+    "real_model"
+  ],
+  "artifacts": [
+    {
+      "byte_count": 9229,
+      "path": "contract.json",
+      "sha256": "36aee9d348fbae4235e3bb7714b414ebc0aac4acb27bf2c4da118a49f1cf50d7",
+      "split": null
+    },
+    {
+      "byte_count": 1777,
+      "path": "../../global_real_model_budget.json",
+      "sha256": "7ee936678b2e1f7e3ce6b477d3411876f110409c35caba4ce77b746f6111fbe3",
+      "split": null
+    },
+    {
+      "byte_count": 5535,
+      "path": "../../hard_zero/semantic_shadow_eval/cases.json",
+      "sha256": "c7421195678539be527ec9c6bf8edd2dae8923335967e934a59f2226781b8233",
+      "split": null
+    }
+  ],
+  "description": "Semantic shadow recall, judgement, abstention, and exact evidence attribution.",
+  "metrics": [
+    {
+      "description": "Recall from eligible defect to correctly attributed defect_type and evidence refs.",
+      "name": "semantic_end_to_end_recall",
+      "primary": true,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Eligible defects recalled among top-K candidates.",
+      "name": "semantic_candidate_recall_at_k",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Precision of judged defects among candidates.",
+      "name": "semantic_judge_precision",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Recall of judged defects among candidates.",
+      "name": "semantic_judge_recall",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Exact supporting-locator precision.",
+      "name": "semantic_evidence_locator_precision",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "Rate of explicit abstention when evidence is insufficient.",
+      "name": "semantic_abstain_rate",
+      "primary": false,
+      "scope": "quality",
+      "unit": "ratio"
+    },
+    {
+      "description": "False positives per 1,000 representative negative statements.",
+      "name": "semantic_false_positives_per_1000_statements",
+      "primary": false,
+      "scope": "quality",
+      "unit": "count_per_1000"
+    },
+    {
+      "description": "Model cost per 1,000 statements.",
+      "name": "semantic_cost_per_1000_statements",
+      "primary": false,
+      "scope": "quality",
+      "unit": "usd"
+    },
+    {
+      "description": "Matched-good PASS and frozen-mutant FAIL decisions over all frozen controls.",
+      "name": "harness_control_discrimination_rate",
+      "primary": false,
+      "scope": "harness",
+      "unit": "ratio"
+    },
+    {
+      "description": "Hard-zero attack-side violations for semantic_clean_world_false_positive.",
+      "name": "semantic_clean_world_false_positive_violation_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    },
+    {
+      "description": "Hard-zero matched-benign false rejects for semantic_clean_world_false_positive.",
+      "name": "semantic_clean_world_false_positive_benign_false_reject_count",
+      "primary": false,
+      "scope": "harness",
+      "unit": "count"
+    }
+  ],
+  "report_schema_version": "formal-eval/v1",
+  "schema_version": "formal-eval/v1",
+  "scorer": null,
+  "status": "NOT_AVAILABLE",
+  "status_reasons": [
+    "SEMANTIC_SHADOW_PRODUCTION_PATH_NOT_IMPLEMENTED",
+    "PRODUCTION_QUALITY_RUNNER_NOT_AVAILABLE",
+    "REPRESENTATIVE_SEALED_CORPUS_SECOND_ANNOTATOR_AND_ADJUDICATION_UNAVAILABLE"
+  ],
+  "suite_id": "semantic_shadow_eval",
+  "suite_version": "n0.3-v1",
+  "trace_schema_version": "formal-eval/v1"
+}

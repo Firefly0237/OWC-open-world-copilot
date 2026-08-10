@@ -13,6 +13,14 @@ backends ship here:
   with ``enable_load_extension`` disabled), the retriever degrades to this backend with a guided
   log line rather than crashing.
 
+**Why not an embedded vector DB (LanceDB and friends).** Not for lack of awareness: the vectors
+have to sit on the SAME SQLite connection as the FTS5 rows they are fused with
+(``SqliteVecBackend(store.conn, …)``), so hybrid retrieval (BM25 + dense + graph) rebuilds in one
+place and never opens a window where two stores disagree about what the world contains. A second
+store would also break "one directory = one project, reproducible offline", which is what the
+deterministic audit rests on. The ANN answer is the ``UsearchBackend`` tier below — inside that
+same store. (Full row: ARCHITECTURE.md「自研决策表」.)
+
 **The fp32 backends (lossless).** Both backends store full-precision float32 vectors and produce
 **bit-identical** ``search``/``vector_for`` results for the same inputs: vectors are normalised on
 upsert, scores are the exact ``stored · query`` dot product, and ties break by ascending ``ref``

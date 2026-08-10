@@ -99,6 +99,7 @@ __all__ = [
     "EARLY_STOPPING",
     "FINDINGS_MARKER",
     "L2_PROMPT_VARIANT",
+    "MEMORY_ARMS",
     "PROMPT_VARIANTS",
     "RECALL_SUCCESS_THRESHOLD",
     "RETRIEVAL_ONLY_SKILLS",
@@ -106,6 +107,7 @@ __all__ = [
     "AgentTask",
     "AgentTaskBenchReport",
     "GoldFinding",
+    "MemoryAbReport",
     "RungSpec",
     "TaskReport",
     "TrialRecord",
@@ -116,8 +118,9 @@ __all__ = [
     "build_task_worlds",
     "extract_claims",
     "gold_findings",
-    "rung_spec",
     "run_agent_task_bench",
+    "run_memory_ab",
+    "rung_spec",
     "score_answer",
 ]
 
@@ -158,8 +161,10 @@ L2_PROMPT_VARIANT = "fewshot"
 
 def _rule_code_vocabulary() -> str:
     """Every rule code the registry ships, generated so it cannot drift from what the scorer
-    accepts. All 34 are named, including the 5 no task seeds — those are distractors, so a
-    "recite the checklist" answer is punished by precision rather than rewarded by recall."""
+    accepts — the list is computed from the registry rather than written down, so adding a rule can
+    neither drift from the scorer nor leave a stale count in this docstring. Codes that NO task
+    seeds are named too: they are distractors, so a "recite the checklist" answer is punished by
+    precision rather than rewarded by recall."""
     return ", ".join(build_default_rule_registry().codes())
 
 
@@ -338,6 +343,15 @@ def rung_spec(rung: str) -> RungSpec:
         raise ValueError(f"未知的梯级 {rung!r}；可用：{', '.join(RUNGS)}。") from None
 
 
+#: The two arms of the episodic-memory A/B (D4). Both arms WRITE memory after every trial; they
+#: differ in exactly one variable — whether the next trial is allowed to READ it back into the
+#: actor's reflection slot. That is precisely the ``--no-recall`` switch's own semantics ("turns
+#: that read side off; writes still happen"), and both arms go through the same
+#: :func:`owcopilot.agent.episodic.recall_agent_memory` the CLI uses, so the control arm cannot
+#: drift into being a different code path. ``None`` (the default everywhere else) means the memory
+#: channel is not exercised at all — no memory store is opened, nothing is written or read.
+MEMORY_ARMS = ("off", "on")
+
 #: A trial counts as a SUCCESS (the unit ``pass^k`` is computed over) when its strict pair recall
 #: reaches this. 0.8 = "found at least four fifths of the real findings"; the threshold is a
 #: judgement call and is printed in every report so a reader can recompute at another value.
@@ -352,7 +366,8 @@ DEFAULT_MAX_STEPS = 6
 #: notice, which would score 0 recall for a purely mechanical reason. The retrieval-only rungs
 #: routinely exhaust their budget — they have no single call that resolves the task — so under
 #: ``"force"`` their recall would measure "did it converge in five steps", not "what did it find".
-#: ``"generate"`` (LangChain's ``early_stopping_method="generate"``) spends one extra call to write
+#: ``"generate"`` (named after the legacy ``AgentExecutor.early_stopping_method``, which langchain
+#: 1.x no longer ships) spends one extra call to write
 #: the best answer the transcript supports, so an exhausted run is still scored on its findings.
 #: This HELPS the lower rungs, which makes every measured rung-to-rung gap a conservative one.
 EARLY_STOPPING: Literal["force", "generate"] = "generate"
@@ -1241,6 +1256,11 @@ class TrialRecord(BaseModel):
     latency_ms: float
     final_answer: str
     error: str = ""
+    #: How many recalled episodic blocks (past-run context block + reflections) actually reached
+    #: this trial's actor. Always 0 outside the memory A/B's ON arm — recorded per trial rather
+    #: than assumed, because "memory was delivered" and "memory helped" are different claims and
+    #: only the first one is observable without a model that reads its prompt.
+    recalled_blocks: int = 0
 
 
 class TaskReport(BaseModel):
@@ -1283,6 +1303,14 @@ class AgentTaskBenchReport(BaseModel):
     #: Fraction of trials whose answer carried the contract's declared findings list. Below 1.0 the
     #: remaining trials were scored through the prose fallback — a different measurement channel.
     contract_followed_rate: float = 0.0
+    #: Which arm of the memory A/B produced these numbers (:data:`MEMORY_ARMS`), or ``""`` when the
+    #: memory channel was not exercised at all — the default for every ladder run.
+    memory_arm: str = ""
+    #: Fraction of trials whose actor actually received a recalled episodic context. In the OFF arm
+    #: this is 0.0 by construction; in the ON arm it is a MEASURED number (a trial recalls nothing
+    #: when the store is still empty, or when nothing clears the similarity gate), so a zero delta
+    #: can be told apart from "memory never arrived".
+    memory_delivered_rate: float = 0.0
     n_tasks: int
     trials_per_task: int
     recall_threshold: float
@@ -1306,6 +1334,35 @@ class AgentTaskBenchReport(BaseModel):
     budget_usd: float
     budget_stopped: bool
     reliability: ReliabilityReport
+    note: str
+
+
+class MemoryAbReport(BaseModel):
+    """The episodic-memory A/B (D4): one corpus, one gold set, one scorer, two arms.
+
+    Everything except the memory READ is held identical between the arms — same rung, same prompt
+    variant, same k, same step budget, same seeded worlds, same scorer. Both arms write memory
+    after every trial; only ``on`` reads it back.
+    """
+
+    rung: str
+    prompt_variant: str
+    trials_per_task: int
+    off: AgentTaskBenchReport
+    on: AgentTaskBenchReport
+    #: pass@1 = the pooled per-trial success rate. Deliberately the ONLY reliability number here:
+    #: with memory on, a task's trials share state, so ``pass^k`` for ``k > 1`` would no longer be
+    #: the independent-retry estimator it is on the ladder. Quoting it would be inflating k.
+    pass_at_1_off: float
+    pass_at_1_on: float
+    delta_pass_at_1: float
+    delta_recall_pair: float
+    delta_precision_pair: float | None
+    #: Fraction of ON-arm trials whose actor actually received recalled context, and the mean number
+    #: of recalled blocks per such trial. These separate "memory did not help" from "memory never
+    #: arrived" — without them a zero delta is uninterpretable.
+    memory_delivered_rate: float
+    mean_recalled_blocks: float
     note: str
 
 
@@ -1399,6 +1456,7 @@ def run_agent_task_bench(
     recall_threshold: float = RECALL_SUCCESS_THRESHOLD,
     rung: str = DEFAULT_RUNG,
     prompt_variant: str | None = None,
+    memory_arm: str | None = None,
     on_trial: Callable[[TrialRecord], None] | None = None,
 ) -> AgentTaskBenchReport:
     """Run every task ``trials`` times against a real chat model and score each answer.
@@ -1420,13 +1478,27 @@ def run_agent_task_bench(
     example "the top rung, but with the neutral prompt, to attribute a change to the output
     contract alone") and is recorded in the report, so an overridden run can never be mistaken for
     the ladder's own rung.
+
+    ``memory_arm`` (D4, one of :data:`MEMORY_ARMS`) exercises the episodic-memory channel: each task
+    gets its OWN memory store — a task world is a project, and production scopes memory per project
+    — which every trial of that task writes to, and which the ON arm additionally reads back into
+    the actor's reflection slot. ``None`` (the default) leaves the channel untouched, which is what
+    every rung run does. **The ON arm's trials are no longer independent** (trial 2 can be handed
+    trial 1's conclusion), so its ``pass^k`` for ``k > 1`` is not a reliability estimate; quote
+    ``pass@1`` — this is why :func:`run_memory_ab` reports only that.
     """
+    from ..agent.episodic import persist_run_embedding, recall_agent_memory
+    from ..agent.history import persist_agent_run
     from ..agent.react import ReActAgent
+    from ..llm.cache import HashingEmbedder
     from ..llm.telemetry import TelemetryCollector, prices_are_configured
     from ..skills import default_skill_registry, scoped_registry
+    from ..storage.sqlite import SQLiteStore
 
     # Both raise before anything is spent.
     spec = rung_spec(rung)
+    if memory_arm is not None and memory_arm not in MEMORY_ARMS:
+        raise ValueError(f"未知的记忆臂 {memory_arm!r}；可用：{', '.join(MEMORY_ARMS)}。")
     variant = spec.prompt_variant if prompt_variant is None else prompt_variant
     goal = build_agent_task_goal(variant)
     allowed = None if spec.allowed_skills is None else set(spec.allowed_skills)
@@ -1462,69 +1534,109 @@ def run_agent_task_bench(
         gold = gold_findings(bundle)
         identifiers = _world_identifiers(bundle)
         records: list[TrialRecord] = []
-        for trial in range(1, trials + 1):
-            if total_cost >= budget_usd:
-                budget_stopped = True
-                break
-            telemetry = TelemetryCollector()
-            # Fresh runtime DB per trial: audit_project persists issues, so a shared DB would let
-            # trial 2 read trial 1's rows via list_issues without auditing. Trials must be i.i.d.
-            sqlite_path = root / f"{task.task_id}_trial{trial}.sqlite"
-            sqlite_path.unlink(missing_ok=True)
-            error = ""
-            try:
-                with _agent_session(world_root, sqlite_path):
-                    agent = ReActAgent(
-                        model=chat_model_factory(),
-                        registry=scoped_registry(
-                            default_skill_registry(
-                                content_root=str(world_root), sqlite_path=str(sqlite_path)
-                            ),
-                            allowed,
-                        ),
-                        max_steps=max_steps,
-                        telemetry=telemetry,
-                        max_replans=max_replans,
-                        early_stopping=EARLY_STOPPING,
+        # D4: one memory store per TASK — a task world is a project, and production scopes episodic
+        # memory per project. It is deliberately NOT the per-trial runtime DB (which must stay fresh
+        # so audit rows cannot leak between trials): memory is the ONE channel this arm lets cross a
+        # trial boundary, so nothing else can be mistaken for it. Deleted first, so a re-run of the
+        # same workspace starts from an empty memory rather than the previous run's.
+        memory_store = None
+        if memory_arm is not None:
+            memory_path = root / f"{task.task_id}_memory.sqlite"
+            memory_path.unlink(missing_ok=True)
+            memory_store = SQLiteStore(str(memory_path))
+        memory_embedder = HashingEmbedder()
+        try:
+            for trial in range(1, trials + 1):
+                if total_cost >= budget_usd:
+                    budget_stopped = True
+                    break
+                telemetry = TelemetryCollector()
+                # Fresh runtime DB per trial: audit_project persists issues, so a shared DB would
+                # let trial 2 read trial 1's rows via list_issues without auditing. Trials must be
+                # i.i.d. — except through the memory channel the ON arm deliberately opens.
+                sqlite_path = root / f"{task.task_id}_trial{trial}.sqlite"
+                sqlite_path.unlink(missing_ok=True)
+                error = ""
+                # The SAME assembly the CLI's `agent` command uses, gated by the SAME switch, so
+                # the OFF arm is the product's own --no-recall rather than a bench-local stub.
+                recalled = (
+                    recall_agent_memory(
+                        memory_store, memory_embedder, goal, enabled=memory_arm == "on"
                     )
-                    result = agent.run(goal)
-                answer = result.final_answer
-                stop_reason = result.stop_reason
-                step_count = result.step_count
-                tool_calls = [step.action for step in result.steps]
-                replans = result.replans
-            except Exception as exc:  # 一次 trial 失败不该毁掉整轮评测——如实记录成 0 分试验
-                error = f"{type(exc).__name__}: {exc}"
-                answer, stop_reason, step_count, tool_calls, replans = "", "error", 0, [], 0
-            summary = telemetry.summary()
-            total_cost += float(summary["total_cost_usd"])
-            record = TrialRecord(
-                task_id=task.task_id,
-                trial=trial,
-                score=score_answer(
-                    answer,
-                    gold,
-                    world_identifiers=identifiers,
-                    rule_codes=registry_codes,
-                    recall_threshold=recall_threshold,
-                ),
-                stop_reason=stop_reason,
-                step_count=step_count,
-                tool_calls=tool_calls,
-                replans=replans,
-                replanned=replans > 0,
-                llm_calls=int(summary["calls"]),
-                input_tokens=int(summary["input_tokens"]),
-                output_tokens=int(summary["output_tokens"]),
-                cost_usd=float(summary["total_cost_usd"]),
-                latency_ms=float(summary["mean_latency_ms"]),
-                final_answer=answer,
-                error=error,
-            )
-            records.append(record)
-            all_records.append(record)
-            if on_trial is not None:
-                on_trial(record)
+                    if memory_store is not None
+                    else None
+                )
+                try:
+                    with _agent_session(world_root, sqlite_path):
+                        agent = ReActAgent(
+                            model=chat_model_factory(),
+                            registry=scoped_registry(
+                                default_skill_registry(
+                                    content_root=str(world_root), sqlite_path=str(sqlite_path)
+                                ),
+                                allowed,
+                            ),
+                            max_steps=max_steps,
+                            telemetry=telemetry,
+                            max_replans=max_replans,
+                            early_stopping=EARLY_STOPPING,
+                        )
+                        result = agent.run(goal, reflections=recalled)
+                    answer = result.final_answer
+                    stop_reason = result.stop_reason
+                    step_count = result.step_count
+                    tool_calls = [step.action for step in result.steps]
+                    replans = result.replans
+                    if memory_store is not None:
+                        # Both arms WRITE (that is what --no-recall means), so the arms differ in
+                        # exactly one variable: whether the next trial may read this back.
+                        run_id = persist_agent_run(
+                            memory_store, result, run_id=f"{task.task_id}_t{trial}"
+                        )
+                        if run_id is not None:
+                            persist_run_embedding(
+                                memory_store,
+                                memory_embedder,
+                                run_id=run_id,
+                                goal=goal,
+                                final_answer=answer,
+                            )
+                except Exception as exc:  # 一次 trial 失败不该毁掉整轮评测——如实记录成 0 分试验
+                    error = f"{type(exc).__name__}: {exc}"
+                    answer, stop_reason, step_count, tool_calls, replans = "", "error", 0, [], 0
+                summary = telemetry.summary()
+                total_cost += float(summary["total_cost_usd"])
+                record = TrialRecord(
+                    task_id=task.task_id,
+                    trial=trial,
+                    score=score_answer(
+                        answer,
+                        gold,
+                        world_identifiers=identifiers,
+                        rule_codes=registry_codes,
+                        recall_threshold=recall_threshold,
+                    ),
+                    stop_reason=stop_reason,
+                    step_count=step_count,
+                    tool_calls=tool_calls,
+                    replans=replans,
+                    replanned=replans > 0,
+                    llm_calls=int(summary["calls"]),
+                    input_tokens=int(summary["input_tokens"]),
+                    output_tokens=int(summary["output_tokens"]),
+                    cost_usd=float(summary["total_cost_usd"]),
+                    latency_ms=float(summary["mean_latency_ms"]),
+                    final_answer=answer,
+                    error=error,
+                    recalled_blocks=len(recalled or []),
+                )
+                records.append(record)
+                all_records.append(record)
+                if on_trial is not None:
+                    on_trial(record)
+        finally:
+            if memory_store is not None:
+                memory_store.close()
         precisions = [r.score.precision_pair for r in records if r.score.precision_pair is not None]
         task_reports.append(
             TaskReport(
@@ -1577,6 +1689,10 @@ def run_agent_task_bench(
         contract_followed_rate=_mean(
             [float(r.score.contract_followed) for r in all_records]
         ),
+        memory_arm=memory_arm or "",
+        memory_delivered_rate=_mean(
+            [float(r.recalled_blocks > 0) for r in all_records]
+        ),
         n_tasks=len(task_reports),
         trials_per_task=trials,
         recall_threshold=recall_threshold,
@@ -1620,6 +1736,115 @@ def run_agent_task_bench(
                 if spec.dialogue_trees_readable
                 else "本梯级的读取面里没有对话树（复现修复前的状态），"
                 "24 条对话树金标对它结构性不可见。"
+            )
+            + (
+                ""
+                if memory_arm is None
+                else f"记忆 A/B 的「{memory_arm}」臂：两臂都在每次 trial 后写情节记忆，"
+                "只有 on 臂允许下一次 trial 把它读回 actor 的反思槽"
+                "（即产品自己的 --no-recall 开关）。"
+                "on 臂的同任务多次 trial 因此不再独立，其 pass^k(k>1) 不是可靠性估计，只看 pass@1。"
+            )
+        ),
+    )
+
+
+def run_memory_ab(
+    workspace: str | Path,
+    *,
+    chat_model_factory: Callable[[], Any],
+    llm_mode: str,
+    model: str = "",
+    trials: int = DEFAULT_TRIALS,
+    max_steps: int = DEFAULT_MAX_STEPS,
+    max_replans: int = 1,
+    budget_usd: float = DEFAULT_BUDGET_USD,
+    task_ids: Sequence[str] | None = None,
+    recall_threshold: float = RECALL_SUCCESS_THRESHOLD,
+    rung: str = DEFAULT_RUNG,
+    prompt_variant: str | None = None,
+    on_trial: Callable[[TrialRecord], None] | None = None,
+) -> MemoryAbReport:
+    """Run the corpus twice — episodic memory readable, and not — and pair the numbers (D4).
+
+    The two arms differ in ONE variable, the same way the ablation ladder's rungs do: both write a
+    run's episodic memory after every trial, and only the ``on`` arm reads it back into the actor's
+    reflection slot on the next trial of that task. The read goes through
+    :func:`owcopilot.agent.episodic.recall_agent_memory` — the product's own assembly, gated by the
+    product's own ``--no-recall`` switch — so the control arm is the shipped "memory off" behaviour
+    rather than a benchmark-local imitation.
+
+    ``budget_usd`` bounds the WHOLE A/B: each arm gets half, so turning a ladder run into an A/B
+    does not silently double the spend.
+
+    What the pairing can and cannot show:
+
+    * ``delta_pass_at_1`` / ``delta_recall_pair`` are reported **as measured, including zero**. A
+      zero delta is a real result — episodic memory feeding forward is a hypothesis, not a given.
+    * It is only interpretable next to ``memory_delivered_rate``: a zero delta with a delivery rate
+      of zero says the memory never reached the actor (a wiring fact), while a zero delta with a
+      high delivery rate says it reached the actor and changed nothing (a capability fact).
+    * With an OFFLINE double the delta is zero **by construction** — a scripted/deterministic stand-
+      in does not read its prompt, so no amount of recalled context can move its answer. An offline
+      A/B therefore validates the protocol (memory really accumulates, really is delivered, really
+      is absent in the control) and nothing about memory's effect; only a real-model run measures
+      that. The note records which of the two this report is.
+    """
+    root = Path(workspace)
+    arm_budget = budget_usd / 2.0
+    reports = {
+        arm: run_agent_task_bench(
+            root / f"memory_{arm}",
+            chat_model_factory=chat_model_factory,
+            llm_mode=llm_mode,
+            model=model,
+            trials=trials,
+            max_steps=max_steps,
+            max_replans=max_replans,
+            budget_usd=arm_budget,
+            task_ids=task_ids,
+            recall_threshold=recall_threshold,
+            rung=rung,
+            prompt_variant=prompt_variant,
+            memory_arm=arm,
+            on_trial=on_trial,
+        )
+        for arm in MEMORY_ARMS
+    }
+    off, on = reports["off"], reports["on"]
+    pass_off = float(off.reliability.pass_hat_k.get(1, 0.0))
+    pass_on = float(on.reliability.pass_hat_k.get(1, 0.0))
+    delivered = [record for task in on.tasks for record in task.trials if record.recalled_blocks]
+    is_real = llm_mode == "real"
+    return MemoryAbReport(
+        rung=on.rung,
+        prompt_variant=on.prompt_variant,
+        trials_per_task=trials,
+        off=off,
+        on=on,
+        pass_at_1_off=pass_off,
+        pass_at_1_on=pass_on,
+        delta_pass_at_1=round(pass_on - pass_off, 4),
+        delta_recall_pair=round(on.mean_recall_pair - off.mean_recall_pair, 4),
+        delta_precision_pair=(
+            round(on.mean_precision_pair - off.mean_precision_pair, 4)
+            if on.mean_precision_pair is not None and off.mean_precision_pair is not None
+            else None
+        ),
+        memory_delivered_rate=on.memory_delivered_rate,
+        mean_recalled_blocks=_mean([float(r.recalled_blocks) for r in delivered]),
+        note=(
+            "情节记忆 A/B：同一套种子世界、同一份金标、同一个判分器、同一个 k，"
+            "两臂只差一个变量——下一次 trial 能不能把上一次的记忆读回反思槽"
+            "（读侧走产品自己的 recall_agent_memory，开关就是 CLI 的 --no-recall）。"
+            "口径为 pass@1（每次试验的成功率）：on 臂同任务的多次 trial 共享记忆、不再独立，"
+            "对它报 pass^k(k>1) 会把 k 虚标成独立重试。差值按实测报告，为零也照报。"
+            + (
+                f"本次为真实模型（{model or llm_mode}），差值可解释为记忆前馈的效果。"
+                if is_real
+                else "本次跑的是离线确定性替身：替身不读提示词，所以差值在构造上必然为 0——"
+                "这一轮验证的是链路（记忆确实在累积、确实被投递、对照臂确实读不到），"
+                "不是记忆的效果；效果数字必须用真实模型跑。"
             )
         ),
     )

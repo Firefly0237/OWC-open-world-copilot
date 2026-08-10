@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..storage.atomic_file import atomic_write_text, read_json_file
 from .models import CollabState
 
 _DIR = ".collab"
@@ -23,11 +24,11 @@ class CollabStore:
     def load(self) -> CollabState:
         if not self.path.exists():
             return CollabState()
-        return CollabState.model_validate_json(self.path.read_text(encoding="utf-8"))
+        return CollabState.model_validate(read_json_file(self.path))
 
     def save(self, state: CollabState) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
+        atomic_write_text(
+            self.path,
             json.dumps(state.model_dump(mode="json"), ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
         )

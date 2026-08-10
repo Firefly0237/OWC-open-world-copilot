@@ -1,0 +1,63 @@
+{
+  "dataset_id": "owcopilot-chunking-benchmark-cases-v1",
+  "documents": [
+    {
+      "id": "c01", "split": "dev",
+      "segments": [
+        {"id": "a", "page": 0, "text": "任务定义：找回被盗的晨星徽记。"},
+        {"id": "b", "page": 0, "text": "限制条件：徽记必须完整，不能交给港口商会。"},
+        {"id": "c", "page": 1, "text": "完成条件：把徽记交还档案员后北门才会开启。"},
+        {"id": "d", "page": 1, "text": "另一个任务要求工匠使用橡木梁修复河谷断桥。"}
+      ],
+      "must_link": [["a", "b"], ["b", "c"]], "must_separate": [["c", "d"]]
+    },
+    {
+      "id": "c02", "split": "dev",
+      "segments": [
+        {"id": "a", "page": 0, "text": "问题：玛拉是否亲眼见到王子死亡？"},
+        {"id": "b", "page": 0, "text": "回答：没有，她只看见北塔起火，因此不知道王子仍然活着。"},
+        {"id": "c", "page": 0, "text": "赤月守卫免疫普通火焰，银制武器可以造成额外伤害。"}
+      ],
+      "must_link": [["a", "b"]], "must_separate": [["b", "c"]]
+    },
+    {
+      "id": "c03", "split": "dev",
+      "segments": [
+        {"id": "a", "page": 0, "text": "船长奥恩：我不欠王室任何东西。"},
+        {"id": "b", "page": 0, "text": "档案员莉亚：但你欠我一次救命之恩。"},
+        {"id": "c", "page": 0, "text": "日蚀期间传送阵停用，亡灵会离开墓地。"}
+      ],
+      "must_link": [["a", "b"]], "must_separate": [["b", "c"]]
+    },
+    {
+      "id": "c04", "split": "held_out",
+      "segments": [
+        {"id": "a", "page": 0, "text": "规则定义：信任值表示塞拉对玩家的忠诚程度。"},
+        {"id": "b", "page": 1, "text": "触发条件：信任低于二十并且玩家私吞王室密函。"},
+        {"id": "c", "page": 1, "text": "触发结果：塞拉会在下一次扎营时背叛队伍。"},
+        {"id": "d", "page": 2, "text": "黑苔沼泽的孢子毒需要使用月露草解毒。"}
+      ],
+      "must_link": [["a", "b"], ["b", "c"]], "must_separate": [["c", "d"]]
+    },
+    {
+      "id": "c05", "split": "held_out",
+      "segments": [
+        {"id": "a", "page": 0, "text": "材料表：断桥修复物资。"},
+        {"id": "b", "page": 0, "text": "第一项是两根橡木梁，第二项是一箱铁钉。"},
+        {"id": "c", "page": 0, "text": "施工必须由工匠伊诺主持，否则材料不会被消耗。"},
+        {"id": "d", "page": 0, "text": "酒馆老板传播了王子死于海难的未证实消息。"}
+      ],
+      "must_link": [["a", "b"], ["b", "c"]], "must_separate": [["c", "d"]]
+    },
+    {
+      "id": "c06", "split": "held_out",
+      "segments": [
+        {"id": "a", "page": 0, "text": "第三章之前，港口的合法管理者是商会。"},
+        {"id": "b", "page": 0, "text": "政变发生后，摄政军接管港口并废止旧通行证。"},
+        {"id": "c", "page": 1, "text": "因此查询港口控制权时必须带故事时间，不能合并两个状态。"},
+        {"id": "d", "page": 1, "text": "铁匠诺拉在火山熔炉中锻造星铁武器。"}
+      ],
+      "must_link": [["a", "b"], ["b", "c"]], "must_separate": [["c", "d"]]
+    }
+  ]
+}

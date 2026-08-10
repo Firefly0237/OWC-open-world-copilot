@@ -16,6 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from ..storage.atomic_file import atomic_write_text, read_json_file
 from ..trust.security import resolve_under_root
 from .hash import content_hash
 from .models import ContentBundle, Relation
@@ -101,7 +102,7 @@ def write_snapshot(
     # anyway (same shared canon helper as the store write boundary — defense-in-depth).
     resolve_under_root(store.root, path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
     return meta
 
 
@@ -112,7 +113,7 @@ def list_snapshots(store: ContentStore) -> list[SnapshotMeta]:
         return []
     metas: list[SnapshotMeta] = []
     for path in directory.glob("*.json"):
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_json_file(path)
         # Only carry keys actually present, so an older snapshot (no world_id/version) falls back to
         # the SnapshotMeta defaults instead of validating a missing key as None.
         fields = {key: data[key] for key in SnapshotMeta.model_fields if key in data}
@@ -137,7 +138,7 @@ def load_snapshot(store: ContentStore, snapshot_id: str) -> ContentBundle | None
     resolve_under_root(store.root, path)
     if not path.exists():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = read_json_file(path)
     return ContentBundle.model_validate(data.get("bundle", {}))
 
 

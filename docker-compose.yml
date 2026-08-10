@@ -6,6 +6,41 @@
 # .dockerignore'd so it never enters the image — it is only mounted into the running container's
 # env by compose. Rotate the key if it has ever been shared (audit A3).
 services:
+  postgres:
+    image: postgres:17.10-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
+    ports:
+      # Development access is host-only. The team API/migration jobs use the private Compose
+      # network; never expose fixed development credentials on every host interface.
+      - "127.0.0.1:${OWCOPILOT_POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: "${OWCOPILOT_POSTGRES_DB:-owcopilot}"
+      POSTGRES_USER: "${OWCOPILOT_POSTGRES_ADMIN_USER:-owcopilot_admin}"
+      POSTGRES_PASSWORD: "${OWCOPILOT_POSTGRES_ADMIN_PASSWORD:-owcopilot-admin-dev-only}"
+      OWCOPILOT_MIGRATION_PASSWORD: "${OWCOPILOT_MIGRATION_PASSWORD:-owcopilot-migration-dev-only}"
+      OWCOPILOT_APP_PASSWORD: "${OWCOPILOT_APP_PASSWORD:-owcopilot-app-dev-only}"
+    volumes:
+      - owcopilot-postgres:/var/lib/postgresql/data
+      - ./infra/team/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: owcopilot-api:latest
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      OWCOPILOT_MIGRATION_DATABASE_URL: "${OWCOPILOT_MIGRATION_DATABASE_URL:-postgresql+psycopg://owcopilot_migration:owcopilot-migration-dev-only@postgres:5432/owcopilot}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build:
       context: .
@@ -26,11 +61,16 @@ services:
       OWCOPILOT_PROVIDER_TIMEOUT_SEC: "${OWCOPILOT_PROVIDER_TIMEOUT_SEC:-30}"
       # Set OWCOPILOT_API_KEY to require X-API-Key on every request (do this for any real-mode deploy).
       OWCOPILOT_API_KEY: "${OWCOPILOT_API_KEY:-}"
+      OWCOPILOT_PROFILE: "${OWCOPILOT_PROFILE:-local}"
+      OWCOPILOT_TEAM_DATABASE_URL: "${OWCOPILOT_TEAM_DATABASE_URL:-postgresql+psycopg://owcopilot_app:owcopilot-app-dev-only@postgres:5432/owcopilot}"
       # OPENAI_BASE_URL / OPENAI_API_KEY come from env_file (.env) below, only needed in real mode.
     env_file:
       - path: .env
         required: false
     restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   # ---------------------------------------------------------------------------------------------
   # Optional: a shared cache for multi-instance deploys.
@@ -41,3 +81,6 @@ services:
   #   image: redis:7-alpine
   #   ports: ["6379:6379"]
   #   restart: unless-stopped
+
+volumes:
+  owcopilot-postgres:

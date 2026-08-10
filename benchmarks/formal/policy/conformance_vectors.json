@@ -1,0 +1,614 @@
+{
+  "schema_validation_alone_is_sufficient": false,
+  "schema_version": "formal-artifact-policy-conformance/v1",
+  "validation_pipeline": [
+    "json.loads",
+    "pydantic.model_validate"
+  ],
+  "vectors": [
+    {
+      "artifact": "report",
+      "expected": {
+        "validation": "REJECT"
+      },
+      "id": "fixture_quality_pass_lure",
+      "payload": {
+        "counts": {
+          "errored_cases": 0,
+          "executed_cases": 1,
+          "failed_cases": 0,
+          "passed_cases": 1,
+          "skipped_cases": 0,
+          "total_cases": 1
+        },
+        "evaluation_status": "PASS",
+        "generated_at": "2026-08-03T00:00:00Z",
+        "harness_status": "PASS",
+        "metrics": [
+          {
+            "baseline_value": 0.0,
+            "effect_size": 1.0,
+            "name": "quality_primary",
+            "sample_size": 1,
+            "scope": "quality",
+            "success_count": 1,
+            "unit": "ratio",
+            "value": 1.0
+          }
+        ],
+        "primary_metric": "quality_primary",
+        "provider": "fixture",
+        "run_id": "conformance-run",
+        "schema_version": "formal-eval/v1",
+        "skipped": false,
+        "split": "dev",
+        "status_reasons": [],
+        "suite_id": "conformance_suite",
+        "suite_version": "n0.3-v1",
+        "trace_sha256s": [
+          "0000000000000000000000000000000000000000000000000000000000000001"
+        ]
+      }
+    },
+    {
+      "artifact": "report",
+      "expected": {
+        "evaluation_status": "INVALID",
+        "harness_status": "FAIL",
+        "required_reasons": [
+          "HARNESS_STATUS_FAIL"
+        ],
+        "validation": "ACCEPT"
+      },
+      "id": "non_pass_harness_cannot_carry_quality_verdict",
+      "payload": {
+        "counts": {
+          "errored_cases": 0,
+          "executed_cases": 1,
+          "failed_cases": 0,
+          "passed_cases": 1,
+          "skipped_cases": 0,
+          "total_cases": 1
+        },
+        "evaluation_status": "PASS",
+        "generated_at": "2026-08-03T00:00:00Z",
+        "harness_status": "FAIL",
+        "metrics": [
+          {
+            "baseline_value": 0.0,
+            "effect_size": 1.0,
+            "name": "quality_primary",
+            "sample_size": 1,
+            "scope": "quality",
+            "success_count": 1,
+            "unit": "ratio",
+            "value": 1.0
+          }
+        ],
+        "primary_metric": "quality_primary",
+        "provider": "real_model",
+        "run_id": "conformance-run",
+        "schema_version": "formal-eval/v1",
+        "skipped": false,
+        "split": "dev",
+        "status_reasons": [],
+        "suite_id": "conformance_suite",
+        "suite_version": "n0.3-v1",
+        "trace_sha256s": [
+          "0000000000000000000000000000000000000000000000000000000000000001"
+        ]
+      }
+    },
+    {
+      "artifact": "report",
+      "expected": {
+        "evaluation_status": "NOT_RUN",
+        "harness_status": "NOT_RUN",
+        "required_reasons": [
+          "NO_EXECUTED_CASES"
+        ],
+        "validation": "ACCEPT"
+      },
+      "id": "zero_over_zero_is_not_run",
+      "payload": {
+        "counts": {
+          "errored_cases": 0,
+          "executed_cases": 0,
+          "failed_cases": 0,
+          "passed_cases": 0,
+          "skipped_cases": 0,
+          "total_cases": 0
+        },
+        "evaluation_status": "PASS",
+        "generated_at": "2026-08-03T00:00:00Z",
+        "harness_status": "PASS",
+        "metrics": [],
+        "primary_metric": null,
+        "provider": "real_model",
+        "run_id": "conformance-run",
+        "schema_version": "formal-eval/v1",
+        "skipped": false,
+        "split": "dev",
+        "status_reasons": [],
+        "suite_id": "conformance_suite",
+        "suite_version": "n0.3-v1",
+        "trace_sha256s": []
+      }
+    },
+    {
+      "artifact": "report",
+      "expected": {
+        "evaluation_status": "INVALID",
+        "harness_status": "INVALID",
+        "required_reasons": [
+          "ALL_TRIALS_ERRORED"
+        ],
+        "validation": "ACCEPT"
+      },
+      "id": "all_error_is_invalid",
+      "payload": {
+        "counts": {
+          "errored_cases": 1,
+          "executed_cases": 1,
+          "failed_cases": 0,
+          "passed_cases": 0,
+          "skipped_cases": 0,
+          "total_cases": 1
+        },
+        "evaluation_status": "PASS",
+        "generated_at": "2026-08-03T00:00:00Z",
+        "harness_status": "PASS",
+        "metrics": [
+          {
+            "baseline_value": 0.0,
+            "effect_size": 1.0,
+            "name": "quality_primary",
+            "sample_size": 1,
+            "scope": "quality",
+            "success_count": 1,
+            "unit": "ratio",
+            "value": 1.0
+          }
+        ],
+        "primary_metric": "quality_primary",
+        "provider": "real_model",
+        "run_id": "conformance-run",
+        "schema_version": "formal-eval/v1",
+        "skipped": false,
+        "split": "dev",
+        "status_reasons": [],
+        "suite_id": "conformance_suite",
+        "suite_version": "n0.3-v1",
+        "trace_sha256s": [
+          "0000000000000000000000000000000000000000000000000000000000000001"
+        ]
+      }
+    },
+    {
+      "artifact": "trace",
+      "expected": {
+        "required_reasons": [
+          "MISSING_REAL_MODEL_MODEL"
+        ],
+        "status": "INVALID",
+        "validation": "ACCEPT"
+      },
+      "id": "real_model_missing_model_metadata",
+      "payload": {
+        "attempt": 1,
+        "budget": {
+          "cost_usd_cap": 1.0,
+          "model_call_cap": 1,
+          "token_cap": 100
+        },
+        "case_id": "case-001",
+        "finished_at": "2026-08-03T00:00:01Z",
+        "payload": {},
+        "prompt_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "provider": "real_model",
+        "run_id": "conformance-run",
+        "schema_version": "formal-eval/v1",
+        "scorer": {
+          "scorer_id": "offline-conformance",
+          "scorer_version": "v1",
+          "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        "split": "dev",
+        "started_at": "2026-08-03T00:00:00Z",
+        "status": "PASS",
+        "status_reasons": [],
+        "suite_id": "conformance_suite",
+        "suite_version": "n0.3-v1",
+        "tool_schema_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "trajectory": [
+          {
+            "kind": "model_call",
+            "payload": {},
+            "sequence": 0,
+            "timestamp": "2026-08-03T00:00:00Z"
+          }
+        ],
+        "usage": {
+          "cost_usd": 0.1,
+          "input_tokens": 10,
+          "latency_ms": 100.0,
+          "model_calls": 1,
+          "output_tokens": 5
+        }
+      }
+    },
+    {
+      "artifact": "trace",
+      "expected": {
+        "required_reasons": [
+          "MISSING_REAL_MODEL_FINISHED_AT"
+        ],
+        "status": "INVALID",
+        "validation": "ACCEPT"
+      },
+      "id": "real_model_missing_finished_at",
+      "payload": {
+        "attempt": 1,
+        "budget": {
+          "cost_usd_cap": 1.0,
+          "model_call_cap": 1,
+          "token_cap": 100
+        },
+        "case_id": "case-001",
+        "model": {
+          "configuration_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "full_model_id": "offline-conformance/model-v1",
+          "provider": "offline-conformance"
+        },
+        "payload": {},
+        "prompt_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "provider": "real_model",
+        "run_id": "conformance-run",
+        "schema_version": "formal-eval/v1",
+        "scorer": {
+          "scorer_id": "offline-conformance",
+          "scorer_version": "v1",
+          "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        "split": "dev",
+        "started_at": "2026-08-03T00:00:00Z",
+        "status": "PASS",
+        "status_reasons": [],
+        "suite_id": "conformance_suite",
+        "suite_version": "n0.3-v1",
+        "tool_schema_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "trajectory": [
+          {
+            "kind": "model_call",
+            "payload": {},
+            "sequence": 0,
+            "timestamp": "2026-08-03T00:00:00Z"
+          }
+        ],
+        "usage": {
+          "cost_usd": 0.1,
+          "input_tokens": 10,
+          "latency_ms": 100.0,
+          "model_calls": 1,
+          "output_tokens": 5
+        }
+      }
+    },
+    {
+      "artifact": "trace",
+      "expected": {
+        "required_reasons": [
+          "ZERO_REAL_MODEL_CALLS"
+        ],
+        "status": "INVALID",
+        "validation": "ACCEPT"
+      },
+      "id": "real_model_zero_call_pass_lure",
+      "payload": {
+        "attempt": 1,
+        "budget": {
+          "cost_usd_cap": 1.0,
+          "model_call_cap": 1,
+          "token_cap": 100
+        },
+        "case_id": "case-001",
+        "finished_at": "2026-08-03T00:00:01Z",
+        "model": {
+          "configuration_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "full_model_id": "offline-conformance/model-v1",
+          "provider": "offline-conformance"
+        },
+        "payload": {},
+        "prompt_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "provider": "real_model",
+        "run_id": "conformance-run",
+        "schema_version": "formal-eval/v1",
+        "scorer": {
+          "scorer_id": "offline-conformance",
+          "scorer_version": "v1",
+          "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        "split": "dev",
+        "started_at": "2026-08-03T00:00:00Z",
+        "status": "PASS",
+        "status_reasons": [],
+        "suite_id": "conformance_suite",
+        "suite_version": "n0.3-v1",
+        "tool_schema_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "trajectory": [
+          {
+            "kind": "model_call",
+            "payload": {},
+            "sequence": 0,
+            "timestamp": "2026-08-03T00:00:00Z"
+          }
+        ],
+        "usage": {
+          "cost_usd": 0.1,
+          "input_tokens": 10,
+          "latency_ms": 100.0,
+          "model_calls": 0,
+          "output_tokens": 5
+        }
+      }
+    },
+    {
+      "artifact": "trace",
+      "expected": {
+        "required_reasons": [
+          "INVALID_TRACE_SEQUENCE"
+        ],
+        "status": "INVALID",
+        "validation": "ACCEPT"
+      },
+      "id": "unordered_trajectory_sequence",
+      "payload": {
+        "attempt": 1,
+        "budget": {
+          "cost_usd_cap": 1.0,
+          "model_call_cap": 1,
+          "token_cap": 100
+        },
+        "case_id": "case-001",
+        "finished_at": "2026-08-03T00:00:01Z",
+        "model": {
+          "configuration_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "full_model_id": "offline-conformance/model-v1",
+          "provider": "offline-conformance"
+        },
+        "payload": {},
+        "prompt_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "provider": "real_model",
+        "run_id": "conformance-run",
+        "schema_version": "formal-eval/v1",
+        "scorer": {
+          "scorer_id": "offline-conformance",
+          "scorer_version": "v1",
+          "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        "split": "dev",
+        "started_at": "2026-08-03T00:00:00Z",
+        "status": "PASS",
+        "status_reasons": [],
+        "suite_id": "conformance_suite",
+        "suite_version": "n0.3-v1",
+        "tool_schema_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "trajectory": [
+          {
+            "kind": "second",
+            "payload": {},
+            "sequence": 1,
+            "timestamp": null
+          },
+          {
+            "kind": "first",
+            "payload": {},
+            "sequence": 0,
+            "timestamp": null
+          }
+        ],
+        "usage": {
+          "cost_usd": 0.1,
+          "input_tokens": 10,
+          "latency_ms": 100.0,
+          "model_calls": 1,
+          "output_tokens": 5
+        }
+      }
+    },
+    {
+      "artifact": "report",
+      "expected": {
+        "validation": "REJECT"
+      },
+      "id": "non_finite_metric_value",
+      "mutation": {
+        "path": [
+          "metrics",
+          0,
+          "value"
+        ],
+        "value_kind": "nan"
+      },
+      "payload": {
+        "counts": {
+          "errored_cases": 0,
+          "executed_cases": 1,
+          "failed_cases": 0,
+          "passed_cases": 1,
+          "skipped_cases": 0,
+          "total_cases": 1
+        },
+        "evaluation_status": "PASS",
+        "generated_at": "2026-08-03T00:00:00Z",
+        "harness_status": "PASS",
+        "metrics": [
+          {
+            "baseline_value": 0.0,
+            "effect_size": 1.0,
+            "name": "quality_primary",
+            "sample_size": 1,
+            "scope": "quality",
+            "success_count": 1,
+            "unit": "ratio",
+            "value": 1.0
+          }
+        ],
+        "primary_metric": "quality_primary",
+        "provider": "real_model",
+        "run_id": "conformance-run",
+        "schema_version": "formal-eval/v1",
+        "skipped": false,
+        "split": "dev",
+        "status_reasons": [],
+        "suite_id": "conformance_suite",
+        "suite_version": "n0.3-v1",
+        "trace_sha256s": [
+          "0000000000000000000000000000000000000000000000000000000000000001"
+        ]
+      }
+    },
+    {
+      "artifact": "report",
+      "expected": {
+        "validation": "REJECT"
+      },
+      "id": "missing_primary_denominator",
+      "payload": {
+        "counts": {
+          "errored_cases": 0,
+          "executed_cases": 1,
+          "failed_cases": 0,
+          "passed_cases": 1,
+          "skipped_cases": 0,
+          "total_cases": 1
+        },
+        "evaluation_status": "PASS",
+        "generated_at": "2026-08-03T00:00:00Z",
+        "harness_status": "PASS",
+        "metrics": [
+          {
+            "baseline_value": 0.0,
+            "effect_size": 1.0,
+            "name": "quality_primary",
+            "scope": "quality",
+            "success_count": 1,
+            "unit": "ratio",
+            "value": 1.0
+          }
+        ],
+        "primary_metric": "quality_primary",
+        "provider": "real_model",
+        "run_id": "conformance-run",
+        "schema_version": "formal-eval/v1",
+        "skipped": false,
+        "split": "dev",
+        "status_reasons": [],
+        "suite_id": "conformance_suite",
+        "suite_version": "n0.3-v1",
+        "trace_sha256s": [
+          "0000000000000000000000000000000000000000000000000000000000000001"
+        ]
+      }
+    },
+    {
+      "artifact": "report",
+      "expected": {
+        "evaluation_status": "INVALID",
+        "harness_status": "PASS",
+        "required_reasons": [
+          "DUPLICATE_TRACE_HASHES"
+        ],
+        "validation": "ACCEPT"
+      },
+      "id": "duplicate_trace_hashes",
+      "payload": {
+        "counts": {
+          "errored_cases": 0,
+          "executed_cases": 2,
+          "failed_cases": 0,
+          "passed_cases": 2,
+          "skipped_cases": 0,
+          "total_cases": 2
+        },
+        "evaluation_status": "PASS",
+        "generated_at": "2026-08-03T00:00:00Z",
+        "harness_status": "PASS",
+        "metrics": [
+          {
+            "baseline_value": 0.0,
+            "effect_size": 1.0,
+            "name": "quality_primary",
+            "sample_size": 2,
+            "scope": "quality",
+            "success_count": 2,
+            "unit": "ratio",
+            "value": 1.0
+          }
+        ],
+        "primary_metric": "quality_primary",
+        "provider": "real_model",
+        "run_id": "conformance-run",
+        "schema_version": "formal-eval/v1",
+        "skipped": false,
+        "split": "dev",
+        "status_reasons": [],
+        "suite_id": "conformance_suite",
+        "suite_version": "n0.3-v1",
+        "trace_sha256s": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ]
+      }
+    },
+    {
+      "artifact": "report",
+      "expected": {
+        "evaluation_status": "INVALID",
+        "harness_status": "PASS",
+        "required_reasons": [
+          "INSUFFICIENT_TRACE_HASHES"
+        ],
+        "validation": "ACCEPT"
+      },
+      "id": "insufficient_trace_hashes",
+      "payload": {
+        "counts": {
+          "errored_cases": 0,
+          "executed_cases": 2,
+          "failed_cases": 0,
+          "passed_cases": 2,
+          "skipped_cases": 0,
+          "total_cases": 2
+        },
+        "evaluation_status": "PASS",
+        "generated_at": "2026-08-03T00:00:00Z",
+        "harness_status": "PASS",
+        "metrics": [
+          {
+            "baseline_value": 0.0,
+            "effect_size": 1.0,
+            "name": "quality_primary",
+            "sample_size": 2,
+            "scope": "quality",
+            "success_count": 2,
+            "unit": "ratio",
+            "value": 1.0
+          }
+        ],
+        "primary_metric": "quality_primary",
+        "provider": "real_model",
+        "run_id": "conformance-run",
+        "schema_version": "formal-eval/v1",
+        "skipped": false,
+        "split": "dev",
+        "status_reasons": [],
+        "suite_id": "conformance_suite",
+        "suite_version": "n0.3-v1",
+        "trace_sha256s": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ]
+      }
+    }
+  ]
+}

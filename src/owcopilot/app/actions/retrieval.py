@@ -12,6 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ...llm.cache import CacheBackend
 from ...qa.community_index import CommunityIndexService
 from ...qa.offline import OfflineCommunityReportProvider, OfflineQAProvider
 from ...qa.service import LoreQAService
@@ -29,14 +30,30 @@ def run_ask_action(
     llm_mode: str = "offline",
     llm_model: str = "deepseek-v4-flash",
     max_cost_usd: float | None = None,
+    agentic: bool = False,
+    faithfulness: str = "off",
+    cache: CacheBackend | None = None,
+    namespace: str | None = None,
 ) -> dict[str, Any]:
+    if faithfulness == "llm" and llm_mode != "real":
+        raise ValueError(
+            "--faithfulness llm 需要 --llm-mode real（用真实模型当判官）；"
+            "离线场景请使用 --faithfulness offline（确定性 $0 判官）。"
+        )
     with _project(content_root, sqlite_path) as project:
         gateway, telemetry = _gateway(
             task="qa_answer",
             llm_mode=llm_mode,
             llm_model=llm_model,
             offline_provider=OfflineQAProvider(),
-            extra_tasks=["qa_expand"],
+            extra_tasks=[
+                "qa_expand",
+                "agentic_rag_followup",
+                "agentic_rag_sufficiency",
+                "faithfulness_judge",
+            ],
+            cache_override=cache,
+            namespace_override=namespace,
         )
         answer = LoreQAService(
             gateway=gateway,
@@ -47,11 +64,16 @@ def run_ask_action(
             # Widen recall with LLM query expansion on the real path; offline stays deterministic
             # (the offline provider returns no variants), so $0 tests are unaffected.
             expand=(llm_mode == "real"),
+            agentic=agentic,
+            faithfulness=faithfulness,
         ).ask(query, budget_tokens=budget_tokens)
         telemetry_summary = telemetry.summary()
         return {
             "answer": answer.model_dump(mode="json"),
+            "degraded": answer.retrieval_degraded,
+            "degradation_reasons": answer.retrieval_degradation_reasons,
             "llm_mode": llm_mode,
+            "llm_model": llm_model if llm_mode == "real" else "offline",
             "telemetry": telemetry_summary,
             "cost_budget": summarize_workflow(
                 [llm_step("ask_lore", telemetry_summary)], budget_usd=max_cost_usd

@@ -1,0 +1,369 @@
+{
+  "$defs": {
+    "BudgetCaps": {
+      "additionalProperties": false,
+      "description": "Frozen aggregate limits; all model-using components count against these caps.",
+      "properties": {
+        "cost_usd_cap": {
+          "minimum": 0,
+          "title": "Cost Usd Cap",
+          "type": "number"
+        },
+        "model_call_cap": {
+          "minimum": 0,
+          "title": "Model Call Cap",
+          "type": "integer"
+        },
+        "token_cap": {
+          "description": "Hard cap over input + output tokens.",
+          "minimum": 0,
+          "title": "Token Cap",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "model_call_cap",
+        "token_cap",
+        "cost_usd_cap"
+      ],
+      "title": "BudgetCaps",
+      "type": "object"
+    },
+    "EvalProvider": {
+      "enum": [
+        "fixture",
+        "scripted",
+        "real_model"
+      ],
+      "title": "EvalProvider",
+      "type": "string"
+    },
+    "EvalSplit": {
+      "enum": [
+        "canary",
+        "dev",
+        "sealed"
+      ],
+      "title": "EvalSplit",
+      "type": "string"
+    },
+    "EvalStatus": {
+      "description": "The only statuses allowed in formal evaluation artifacts.",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "NOT_RUN",
+        "NOT_AVAILABLE",
+        "INVALID",
+        "BLOCKED_EXTERNAL_DATA"
+      ],
+      "title": "EvalStatus",
+      "type": "string"
+    },
+    "ModelProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "configuration_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Configuration Sha256",
+          "type": "string"
+        },
+        "full_model_id": {
+          "minLength": 1,
+          "title": "Full Model Id",
+          "type": "string"
+        },
+        "provider": {
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "full_model_id",
+        "configuration_sha256"
+      ],
+      "title": "ModelProvenance",
+      "type": "object"
+    },
+    "ResourceUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "cost_usd": {
+          "minimum": 0,
+          "title": "Cost Usd",
+          "type": "number"
+        },
+        "input_tokens": {
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "latency_ms": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Latency Ms",
+          "type": "number"
+        },
+        "model_calls": {
+          "minimum": 0,
+          "title": "Model Calls",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "model_calls",
+        "input_tokens",
+        "output_tokens",
+        "cost_usd"
+      ],
+      "title": "ResourceUsage",
+      "type": "object"
+    },
+    "ScorerProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "scorer_id": {
+          "minLength": 1,
+          "title": "Scorer Id",
+          "type": "string"
+        },
+        "scorer_version": {
+          "minLength": 1,
+          "title": "Scorer Version",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scorer_id",
+        "scorer_version",
+        "sha256"
+      ],
+      "title": "ScorerProvenance",
+      "type": "object"
+    },
+    "TraceEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "title": "Payload",
+          "type": "object"
+        },
+        "sequence": {
+          "minimum": 0,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "timestamp": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timestamp"
+        }
+      },
+      "required": [
+        "sequence",
+        "kind"
+      ],
+      "title": "TraceEvent",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One case attempt, including enough provenance to audit a real-model result.",
+  "properties": {
+    "attempt": {
+      "minimum": 1,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "budget": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BudgetCaps"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "case_id": {
+      "minLength": 1,
+      "title": "Case Id",
+      "type": "string"
+    },
+    "finished_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Finished At"
+    },
+    "model": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ModelProvenance"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "payload": {
+      "additionalProperties": true,
+      "title": "Payload",
+      "type": "object"
+    },
+    "prompt_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Prompt Sha256"
+    },
+    "provider": {
+      "$ref": "#/$defs/EvalProvider"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "formal-eval/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scorer": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScorerProvenance"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "split": {
+      "$ref": "#/$defs/EvalSplit"
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Started At"
+    },
+    "status": {
+      "$ref": "#/$defs/EvalStatus"
+    },
+    "status_reasons": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Status Reasons",
+      "type": "array"
+    },
+    "suite_id": {
+      "minLength": 1,
+      "title": "Suite Id",
+      "type": "string"
+    },
+    "suite_version": {
+      "minLength": 1,
+      "title": "Suite Version",
+      "type": "string"
+    },
+    "tool_schema_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tool Schema Sha256"
+    },
+    "trajectory": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/TraceEvent"
+      },
+      "title": "Trajectory",
+      "type": "array"
+    },
+    "usage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResourceUsage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "schema_version",
+    "suite_id",
+    "suite_version",
+    "run_id",
+    "case_id",
+    "attempt",
+    "split",
+    "provider",
+    "status"
+  ],
+  "title": "FormalEvalTrace",
+  "type": "object"
+}

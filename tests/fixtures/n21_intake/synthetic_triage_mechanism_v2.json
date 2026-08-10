@@ -1,0 +1,123 @@
+{
+  "metadata": {
+    "dataset_id": "n21-synthetic-triage-mechanism",
+    "dataset_version": "2.0.0",
+    "dataset_kind": "SYNTHETIC_FIXTURE",
+    "scorer_version": "n21-triage-eval-v2"
+  },
+  "artifact": {
+    "artifact_version_id": "11111111-1111-4111-8111-111111111111",
+    "original_filename": "synthetic.docx",
+    "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "content_base64": "UEsDBBQAAAAIAAAAA133S4B1wgAAAHYBAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbH2QuQ7CMAyGX6XKiqgRAwOiLMAKDLyAlbptRC7FLsfbk3INCBjt//gsLw7XSFxcnPVcqU4kzgFYd+SQyxDJZ6UJyaHkMbUQUR+xJZhOJjPQwQt5GcvQoZaLNTXYWyk2l7xmE3ylEllWxephHFiVwhit0ShZh5OvPyjjJ6HMybuHOxN5lA0KvhIG5TfgmdudKCVTU7HHJFt02QXnkGqog+5dTpb/a77cGZrGaHrnh7aYgiZm41tny7fi0PjX/XB/9/IGUEsDBBQAAAAIAAAAA11hey9DiQAAAPIAAAALAAAAX3JlbHMvLnJlbHONzzsOAiEQBuCrEA6ws1pYGKCy2dZ4AQLDIy6PDBj19lJYrMbCcuaffH9GnHHVPZbcQqyNPdKam+Sh93oEaCZg0m0qFfNIXKGk+xjJQ9Xmqj3Cfp4PQFuDK7E12WIlp8XuOLs8K/5jF+eiwVMxt4S5/6j4uhiyJo9d8nshC/a9ngbLQQn4eFG9AFBLAwQUAAAACAAAAANd3uoy4aMAAADZAQAAEQAAAHdvcmQvZG9jdW1lbnQueG1sjZE9DsIwDEavUvUAuGJgiEoXZhYkDpAm7o9o7ChJlXJ7GlDVBUSWz7L99Aa7jkKzmg1SKBYzkRfxXA4hWAHg1YBG+gNbpHXXsTMyrK3rIbLT1rFC70fqzQTHqjqBkSOVTR1Fy/qZqk3hUoTmIompkJMdZA1pkNK9035nWwz/0Rt26JAUZqp3Pkt/HRfUmeoPm6W904M45p5jo3+oYTs47M9sXlBLAQIUABQAAAAIAAAAA133S4B1wgAAAHYBAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1sUEsBAhQAFAAAAAgAAAADXWF7L0OJAAAA8gAAAAsAAAAAAAAAAAAAAIAB8wAAAF9yZWxzLy5yZWxzUEsBAhQAFAAAAAgAAAADXd7qMuGjAAAA2QEAABEAAAAAAAAAAAAAAIABpQEAAHdvcmQvZG9jdW1lbnQueG1sUEsFBgAAAAADAAMAuQAAAHcCAAAAAA=="
+  },
+  "gold_annotations": [
+    {"case_id": "synthetic-canon-001", "gold_role": "CANON_CANDIDATE"},
+    {"case_id": "synthetic-canon-002", "gold_role": "CANON_CANDIDATE"},
+    {"case_id": "synthetic-reference-001", "gold_role": "REFERENCE"},
+    {"case_id": "synthetic-reference-002-mutant", "gold_role": "REFERENCE"},
+    {"case_id": "synthetic-mixed-001", "gold_role": "MIXED"},
+    {"case_id": "synthetic-mixed-002", "gold_role": "MIXED"},
+    {"case_id": "synthetic-unknown-001", "gold_role": "UNKNOWN"},
+    {"case_id": "synthetic-unknown-002", "gold_role": "UNKNOWN"}
+  ],
+  "thresholds": {
+    "minimum_macro_f1": 0.6,
+    "minimum_selective_accuracy": 0.8,
+    "minimum_coverage": 0.5,
+    "maximum_risk_coverage_auc": 0.5,
+    "maximum_expected_calibration_error": 0.35,
+    "minimum_locator_fidelity": 1.0,
+    "calibration_bin_count": 5
+  },
+  "production_outputs": [
+    {
+      "case_id": "synthetic-canon-001",
+      "segment_ordinal": 0,
+      "raw_output_id": "22222222-2222-4222-8001-222222222222",
+      "raw_output": "{\"content_role\":\"CANON_CANDIDATE\",\"confidence\":0.95,\"evidence_spans\":[{\"start\":0,\"end\":11,\"quote\":\"Canon alpha\"}]}",
+      "verdict_id": "33333333-3333-4333-8001-333333333333",
+      "provider_name": "synthetic-fixture",
+      "model_name": "deterministic-v1",
+      "policy_version": "n21-triage-v1",
+      "policy_confidence_threshold": 0.7
+    },
+    {
+      "case_id": "synthetic-canon-002",
+      "segment_ordinal": 1,
+      "raw_output_id": "22222222-2222-4222-8002-222222222222",
+      "raw_output": "{\"content_role\":\"CANON_CANDIDATE\",\"confidence\":0.9,\"evidence_spans\":[{\"start\":0,\"end\":10,\"quote\":\"Canon beta\"}]}",
+      "verdict_id": "33333333-3333-4333-8002-333333333333",
+      "provider_name": "synthetic-fixture",
+      "model_name": "deterministic-v1",
+      "policy_version": "n21-triage-v1",
+      "policy_confidence_threshold": 0.7
+    },
+    {
+      "case_id": "synthetic-reference-001",
+      "segment_ordinal": 2,
+      "raw_output_id": "22222222-2222-4222-8003-222222222222",
+      "raw_output": "{\"content_role\":\"REFERENCE\",\"confidence\":0.85,\"evidence_spans\":[{\"start\":0,\"end\":15,\"quote\":\"Reference alpha\"}]}",
+      "verdict_id": "33333333-3333-4333-8003-333333333333",
+      "provider_name": "synthetic-fixture",
+      "model_name": "deterministic-v1",
+      "policy_version": "n21-triage-v1",
+      "policy_confidence_threshold": 0.7
+    },
+    {
+      "case_id": "synthetic-reference-002-mutant",
+      "segment_ordinal": 3,
+      "raw_output_id": "22222222-2222-4222-8004-222222222222",
+      "raw_output": "{\"content_role\":\"CANON_CANDIDATE\",\"confidence\":0.8,\"evidence_spans\":[{\"start\":0,\"end\":14,\"quote\":\"Reference beta\"}]}",
+      "verdict_id": "33333333-3333-4333-8004-333333333333",
+      "provider_name": "synthetic-fixture",
+      "model_name": "deterministic-v1",
+      "policy_version": "n21-triage-v1",
+      "policy_confidence_threshold": 0.7
+    },
+    {
+      "case_id": "synthetic-mixed-001",
+      "segment_ordinal": 4,
+      "raw_output_id": "22222222-2222-4222-8005-222222222222",
+      "raw_output": "{\"content_role\":\"MIXED\",\"confidence\":0.75,\"evidence_spans\":[{\"start\":0,\"end\":11,\"quote\":\"Mixed alpha\"}]}",
+      "verdict_id": "33333333-3333-4333-8005-333333333333",
+      "provider_name": "synthetic-fixture",
+      "model_name": "deterministic-v1",
+      "policy_version": "n21-triage-v1",
+      "policy_confidence_threshold": 0.7
+    },
+    {
+      "case_id": "synthetic-mixed-002",
+      "segment_ordinal": 5,
+      "raw_output_id": "22222222-2222-4222-8006-222222222222",
+      "raw_output": "{\"content_role\":\"MIXED\",\"confidence\":0.72,\"evidence_spans\":[{\"start\":0,\"end\":10,\"quote\":\"Mixed beta\"}]}",
+      "verdict_id": "33333333-3333-4333-8006-333333333333",
+      "provider_name": "synthetic-fixture",
+      "model_name": "deterministic-v1",
+      "policy_version": "n21-triage-v1",
+      "policy_confidence_threshold": 0.7
+    },
+    {
+      "case_id": "synthetic-unknown-001",
+      "segment_ordinal": 6,
+      "raw_output_id": "22222222-2222-4222-8007-222222222222",
+      "raw_output": "{\"content_role\":\"UNKNOWN\",\"confidence\":0.4,\"evidence_spans\":[]}",
+      "verdict_id": "33333333-3333-4333-8007-333333333333",
+      "provider_name": "synthetic-fixture",
+      "model_name": "deterministic-v1",
+      "policy_version": "n21-triage-v1",
+      "policy_confidence_threshold": 0.7
+    },
+    {
+      "case_id": "synthetic-unknown-002",
+      "segment_ordinal": 7,
+      "raw_output_id": "22222222-2222-4222-8008-222222222222",
+      "raw_output": "{\"content_role\":\"UNKNOWN\",\"confidence\":0.3,\"evidence_spans\":[]}",
+      "verdict_id": "33333333-3333-4333-8008-333333333333",
+      "provider_name": "synthetic-fixture",
+      "model_name": "deterministic-v1",
+      "policy_version": "n21-triage-v1",
+      "policy_confidence_threshold": 0.7
+    }
+  ]
+}

@@ -188,12 +188,12 @@ def _encode_logic_value(value: bool | int | str) -> str:
 # variant additionally compiles conditions (B1, ``logic/dnf.py``) and structures effects (B2) into
 # a flat ``{Var, Op, Value}`` clause shape a Blueprint can read as a plain DataTable array column —
 # no new parser, no C++, matching the "complexity stays in the pipeline, not the runtime" decision
-# in 求职导向整改计划.md §2. These three tables/columns are strictly ADDITIVE (never touch the
+# in this module. These three tables/columns are strictly ADDITIVE (never touch the
 # existing "Condition"/"Effects" string columns) and only ever populate when ``blueprint_friendly``
 # is explicitly passed, so the default export stays byte-for-byte unchanged — see
 # ``export_unreal_datatables``'s docstring.
 
-# The 3 demo tables B2 scopes this to (求职导向整改计划.md §3 "demo 只用 3 张表"). Reference fields
+# The three tables covered by the Blueprint-friendly export. Reference fields
 # on these tables serialize as bare row-name strings under ``blueprint_friendly`` regardless of the
 # caller's ``handle_style`` — the demo's hand-built structs are simple String/Int/Bool fields, and
 # there is no C++ FDataTableRowHandle to bind to without a compiler.
@@ -230,7 +230,7 @@ def _condition_bp_columns(condition: str) -> dict[str, Any]:
     ``ConditionCompilable`` (always present) — B1's demo export contract. When the condition needs
     OR or fails to compile at all, ``ConditionCompilable=False`` and ``ConditionClauses`` stays
     empty; the Blueprint side falls back to treating the gate as unavailable (demo content is
-    authored to stay within the flat-AND subset, per 求职导向整改计划.md §B1)."""
+    authored to stay within the flat-AND subset)."""
     flat = compile_condition(condition).single_and_group
     return {
         "ConditionClauses": [_atom_to_bp_clause(a) for a in flat] if flat is not None else [],
@@ -1216,7 +1216,7 @@ def export_unreal_datatables(
     source — no duplicated strings); ``"inline"`` writes the source string directly.
 
     ``blueprint_friendly=False`` (default) changes NOTHING — every table, column and byte is exactly
-    as before. When ``True`` (the 求职导向整改计划.md B1/B2 "demo variant", for a pure-Blueprint UE
+    as before. When ``True`` (the Blueprint-friendly variant, for a pure-Blueprint UE
     project with no C++ and no expression parser), three tables get additive treatment: on
     ``DialogueTreeChoices``, ``Condition`` is compiled to DNF (``logic/dnf.py``) and the flat
     (no-OR) case lands in a new ``ConditionClauses``/``ConditionCompilable`` column pair, and

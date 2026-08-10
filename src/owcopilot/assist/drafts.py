@@ -19,6 +19,14 @@ from ..audit.runner import AuditRunner
 from ..content.lang import detect_language, language_directive
 from ..content.models import ContentBundle, Origin, Quest, ReviewStatus
 from ..content.normalize import slug_id
+from ..inspiration.grounding import (
+    build_reference_report,
+    inspiration_prompt_section,
+    inspiration_refs_metadata,
+    retrieve_drafting_references,
+)
+from ..inspiration.report import ReferenceReportItem
+from ..inspiration.retrieval import ReferenceContextBuilder
 from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json_object
 from ..readiness import assess_quest
@@ -54,6 +62,10 @@ class DraftResult(BaseModel):
     quest: Quest
     issues: list[Issue] = Field(default_factory=list)
     context_refs: list[str] = Field(default_factory=list)
+    # 灵感库那一侧的溯源：这次草稿用到的素材 + 每条素材的确定性泄漏重算结论。素材开关关掉（默认）
+    # 时恒为空，产物与接线之前逐字节一致。
+    inspiration_refs: list[str] = Field(default_factory=list)
+    reference_report: list[ReferenceReportItem] = Field(default_factory=list)
     refine_trail: list[RefineRound] = Field(default_factory=list)
     # True when the final draft did NOT clear an auto-review (the critic's reply was unparsable even
     # after a retry). The draft still goes to human review — but flagged for extra scrutiny rather
@@ -72,11 +84,16 @@ class QuestDraftService:
         critic: QuestCritic | None = None,
         max_refine_rounds: int = 0,
         lessons: list[dict] | None = None,  # IN-3 BE-1: cross-session lesson archive
+        # 灵感库检索器（N4.2）。与 worldgen 同构：检索器是装配期的基础设施，"这次要不要吃素材"是
+        # 每次调用时人自己的选择（``draft_quest(use_references=...)``，默认关）。None = 这个调用方
+        # 还没接素材，开关怎么传都是关的。
+        reference_context_builder: ReferenceContextBuilder | None = None,
     ) -> None:
         self.gateway = gateway
         self.context_builder = context_builder
         self.audit_runner = audit_runner
         self.bundle = bundle
+        self.reference_context_builder = reference_context_builder
         # The loop is opt-in: without a critic the service is the original single-shot draft.
         self.critic = critic
         self.max_refine_rounds = max_refine_rounds if critic is not None else 0
@@ -84,8 +101,22 @@ class QuestDraftService:
         # and injected here so _generate can include them in the system prompt.
         self.lessons = lessons
 
-    def draft_quest(self, brief: str, *, budget_tokens: int = 800) -> DraftResult:
+    def draft_quest(
+        self, brief: str, *, budget_tokens: int = 800, use_references: bool = False
+    ) -> DraftResult:
+        """Draft one quest. ``use_references`` additionally grounds it on the inspiration library.
+
+        默认关，与创世默认开相反：创世是"从一部参考作品起一个世界"，而写一条任务的常态是只依据
+        已审过的正典。开关打开时素材走**独立的一段** prompt，不与正典事实混在一起，产出记
+        ``inspiration_refs``，并附一份重算过的溯源/泄漏报告。库里没有可用素材时照常生成。
+        """
         pack = self.context_builder.build(brief, budget_tokens=budget_tokens)
+        inspiration_pack = retrieve_drafting_references(
+            self.reference_context_builder,
+            brief,
+            enabled=use_references,
+            budget_tokens=budget_tokens,
+        )
         context_lines = [f"[{hit.ref}] {hit.title}: {hit.body}".strip() for hit in pack.hits]
         # The pre-draft audit depends only on the (fixed) existing bundle, so compute its
         # fingerprints once instead of re-auditing the whole world on every refine round.
@@ -93,7 +124,7 @@ class QuestDraftService:
             issue_fingerprint(issue)
             for issue in self.audit_runner.run(AuditContext.from_bundle(self.bundle)).issues
         }
-        quest = self._generate(brief, pack)
+        quest = self._generate(brief, pack, inspiration_pack)
         trail: list[RefineRound] = []
         reflections: list[str] = []  # accumulated Reflexion memory across rounds
         auto_review_incomplete = False
@@ -146,7 +177,11 @@ class QuestDraftService:
             # review-queue payload) so complete preference pairs stay recoverable.
             trail[-1].artifact_before = quest.model_dump(mode="json", exclude_none=True)
             quest = self._generate(
-                brief, pack, prior=quest, feedback=with_reflection_memory(fixes, reflections)
+                brief,
+                pack,
+                inspiration_pack,
+                prior=quest,
+                feedback=with_reflection_memory(fixes, reflections),
             )
 
         quest = _with_unique_quest_id(quest, existing_ids=set(self.bundle.quests))
@@ -157,6 +192,8 @@ class QuestDraftService:
                 "metadata": {
                     **quest.metadata,
                     "context_refs": pack.refs,
+                    # 空 dict when no material was recalled → metadata 与接线之前一致。
+                    **inspiration_refs_metadata(inspiration_pack),
                     **({"refine_rounds": len(trail)} if trail else {}),
                     **({"auto_review_incomplete": True} if auto_review_incomplete else {}),
                 },
@@ -167,6 +204,15 @@ class QuestDraftService:
             quest=quest,
             issues=new_issues,
             context_refs=pack.refs,
+            inspiration_refs=inspiration_pack.refs,
+            reference_report=build_reference_report(
+                inspiration_pack,
+                # 只把这条草稿交给检测：既有正典是豁免面（``canon``），不是被查的对象。
+                draft=ContentBundle(quests={quest.id: quest}),
+                canon=self.bundle,
+                human_input=brief,
+                used_for="任务草稿的灵感参考",
+            ),
             refine_trail=trail,
             auto_review_incomplete=auto_review_incomplete,
         )
@@ -175,14 +221,23 @@ class QuestDraftService:
         """Regenerate the draft to address a reviewer's feedback (feedback-driven revision).
 
         Reuses the same prior+feedback path the refine loop uses; the quest's own objective grounds
-        the retrieval since the original brief is not stored. The result re-enters review."""
+        the retrieval since the original brief is not stored. The result re-enters review.
+
+        素材不参与修订：修订是"照人的意见改这一版"，再塞一遍参考素材只会把评审意见冲淡；原稿若用过
+        素材，它的 ``inspiration_refs`` 还留在 metadata 里，溯源不丢。"""
         brief = (prior.objective or prior.title or "").strip()
         pack = self.context_builder.build(brief, budget_tokens=budget_tokens)
         baseline_fingerprints = {
             issue_fingerprint(issue)
             for issue in self.audit_runner.run(AuditContext.from_bundle(self.bundle)).issues
         }
-        quest = self._generate(brief, pack, prior=prior, feedback=[feedback.strip()])
+        quest = self._generate(
+            brief,
+            pack,
+            ContextPack(query=brief, budget_tokens=budget_tokens),
+            prior=prior,
+            feedback=[feedback.strip()],
+        )
         quest = _with_unique_quest_id(quest, existing_ids=set(self.bundle.quests))
         quest = quest.model_copy(
             update={
@@ -201,6 +256,7 @@ class QuestDraftService:
         self,
         brief: str,
         pack: ContextPack,
+        inspiration_pack: ContextPack,
         *,
         prior: Quest | None = None,
         feedback: list[str] | None = None,
@@ -209,7 +265,11 @@ class QuestDraftService:
         # inject_lessons=True is the explicit activation; self.lessons is None when
         # no lessons have been fetched (e.g. first run, empty archive).
         system = _system_prompt(
-            pack, brief=brief, lessons=self.lessons, inject_lessons=self.lessons is not None
+            pack,
+            brief=brief,
+            lessons=self.lessons,
+            inject_lessons=self.lessons is not None,
+            inspiration_pack=inspiration_pack,
         )
         user = _draft_user_message(brief, prior=prior, feedback=feedback)
         raw = self.gateway.complete(task="quest_draft", system=system, user=user)
@@ -442,6 +502,7 @@ def _system_prompt(
     inject_terms: bool = True,
     lessons: list | None = None,
     inject_lessons: bool = True,
+    inspiration_pack: ContextPack | None = None,
 ) -> str:
     context_lines = [f"- [{hit.ref}] {hit.title}: {hit.body}".strip() for hit in pack.hits]
     # Keep the output in the brief's language — the (English) quality bar below was drifting the
@@ -497,4 +558,7 @@ def _system_prompt(
         + f"{lang_line}\n"
         + "Content context:\n"
         + "\n".join(context_lines)
+        # 素材是**独立的一段**，接在正典事实之后：两者绝不混进同一个 context 列表，模型必须能分清
+        # 哪些是世界事实、哪些只是参考。没有素材时这里是空串，prompt 与接线之前逐字节一致。
+        + (inspiration_prompt_section(inspiration_pack) if inspiration_pack is not None else "")
     )
