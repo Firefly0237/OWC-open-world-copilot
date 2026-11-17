@@ -19,6 +19,7 @@ from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
+from pydantic import ValidationError
 
 from ..content.hash import content_hash
 from .graph_v2 import (
@@ -254,7 +255,21 @@ def _execute_node(
             input_refs=refs,
             error=f"{type(exc).__name__}: {exc}",
         )
-        notify("graph.node.failed", outcome.model_dump(mode="json"), node_id=node.id)
+        notify(
+            "graph.node.failed",
+            {**outcome.model_dump(mode="json"),
+             "failure_domain": "typed_contract" if isinstance(exc, ValidationError) else "unknown",
+             "exception_type": type(exc).__name__,
+             "validation_errors": [
+                 {"type": error["type"],
+                  "location_shape": ["index" if isinstance(part, int) else "field"
+                                     for part in error["loc"]]}
+                 for error in exc.errors(
+                     include_input=False, include_context=False, include_url=False
+                 )
+             ] if isinstance(exc, ValidationError) else []},
+            node_id=node.id,
+        )
         return {"outcomes": {node.id: outcome.model_dump(mode="json")}}
 
 
@@ -272,6 +287,7 @@ def execute_persistent_graph(
     before_node: Callable[[NodeSpecV2, dict], dict | None] | None = None,
     consume_resume: Callable[[dict, dict], None] | None = None,
     resume: dict | None = None,
+    invalidated_nodes: list[str] | tuple[str, ...] = (),
 ) -> GraphExecutionResult:
     """Run/resume per-node checkpoints; same run identity cannot change its graph or inputs."""
     compiled = compile_graph(
@@ -282,6 +298,9 @@ def execute_persistent_graph(
     )
     frozen_context = copy.deepcopy(context)
     frozen_identity = copy.deepcopy(context_identity or {})
+    invalidated = frozenset(invalidated_nodes)
+    if invalidated - {node.id for node in compiled.spec.nodes}:
+        raise ValueError("修复失效范围引用未知节点")
     previous = GraphExecutionResult.model_validate(prior) if prior is not None else None
     notify = emit or (lambda *_args, **_kwargs: None)
     is_cancelled = cancelled or (lambda: False)
@@ -290,7 +309,8 @@ def execute_persistent_graph(
         path,
         thread_id,
         compiled.graph_hash,
-        content_hash({"context": frozen_context, "identity": frozen_identity}),
+        content_hash({"context": frozen_context, "identity": frozen_identity,
+                      **({"invalidated_nodes": sorted(invalidated)} if invalidated else {})}),
     )
     graph = StateGraph(_DriverState)
     by_id = {node.id: node for node in compiled.spec.nodes}
@@ -318,7 +338,7 @@ def execute_persistent_graph(
                 handlers,
                 notify,
                 is_cancelled,
-                previous,
+                None if node.id in invalidated else previous,
                 frozen_identity,
             )
 

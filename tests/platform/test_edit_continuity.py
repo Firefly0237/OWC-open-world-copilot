@@ -39,7 +39,7 @@ from owcopilot.workflow.edit_continuity import (
     read_task_preview,
     step_original_task_preview,
 )
-from owcopilot.workflow.intent_application import apply_intent_review
+from owcopilot.workflow.intent_application import apply_intent_review, preview_intent_application
 from owcopilot.workflow.intent_store import _sealed
 from owcopilot.workflow.mechanic_ir_v2 import compile_mechanic_design, compile_mechanic_dialogue
 from owcopilot.workflow.models import Artifact, PreviewInput, PreviewStepInput, TaskCreateInput
@@ -178,7 +178,9 @@ def setup_case(tmp_path, *, use_reference=False):
     return root, store, task, artifact, projects, project, task_preview, project_preview
 
 
-def apply_text(case, *, path=None, value="A newly specified line.", continuation=None):
+def apply_text(
+    case, *, path=None, value="A newly specified line.", continuation=None, preview_only=False
+):
     root, store, task, artifact, _, _, task_preview, _ = case
     cursor = task_preview["cursor"]
     artifact_path = path or f"/tree/nodes/{cursor}/text"
@@ -236,8 +238,75 @@ def apply_text(case, *, path=None, value="A newly specified line.", continuation
         "expected_decision_hash": decision["decision_hash"],
         "continuation": continuation,
     }
-    receipt = apply_intent_review(root, "demo", review["id"], **kwargs)
+    receipt = (
+        preview_intent_application(
+            root,
+            "demo",
+            review["id"],
+            expected_review_hash=review["review_hash"],
+            continuation=continuation,
+        )
+        if preview_only
+        else apply_intent_review(root, "demo", review["id"], **kwargs)
+    )
     return receipt, kwargs, review
+
+
+def test_application_preflight_checks_real_playtest_before_any_write(tmp_path, monkeypatch):
+    case = setup_case(tmp_path)
+    root, store, task, artifact, _, _, played, _ = case
+    context = {
+        "reading_path": f"/tree/nodes/{played['cursor']}/text",
+        "task_preview_id": played["preview_id"],
+        "task_preview_seq": 1,
+    }
+    before = store.get_preview(played["preview_id"])
+    preview, kwargs, review = apply_text(case, continuation=context, preview_only=True)
+    assert preview["impact"]["playtest"]["status"] == "compatible"
+    assert preview["impact"]["playtest"]["evidence"]["current_text_will_change"] is True
+    assert store.get_task(task.id).revision == 1
+    assert len(store.artifacts(task.id)) == 1
+    assert store.get_preview(played["preview_id"]) == before
+    monkeypatch.setenv("OWCOPILOT_PROJECTS_JSON", json.dumps({"demo": str(root)}))
+    monkeypatch.setenv("OWCOPILOT_PROFILE", "local")
+    monkeypatch.delenv("OWCOPILOT_API_KEY", raising=False)
+    monkeypatch.delenv("OWCOPILOT_RUNTIME_DIR", raising=False)
+    with TestClient(create_app()) as client:
+        response = client.post(
+            f"/projects/demo/creative/v2/intent-reviews/{review['id']}/application-preview",
+            json={"expected_review_hash": review["review_hash"], "continuation": context},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["preview_hash"] == preview["preview_hash"]
+        forged = client.post(
+            f"/projects/demo/creative/v2/intent-reviews/{review['id']}/application-preview",
+            json={"expected_review_hash": review["review_hash"], "impact": {"safe": True}},
+        )
+        assert forged.status_code == 422
+    step_preview_action(
+        store, "demo", played["preview_id"], PreviewStepInput(action_id="advance", expected_seq=1)
+    )
+    with pytest.raises(ValueError, match="原试玩位置"):
+        apply_intent_review(
+            root, "demo", review["id"], expected_preview_hash=preview["preview_hash"], **kwargs
+        )
+    assert store.get_task(task.id).revision == 1
+
+
+def test_preflight_rechecks_revoked_reference_use(tmp_path):
+    case = setup_case(tmp_path, use_reference=True)
+    root, _, _, _, _, _, _, _ = case
+    _, _, review = apply_text(case, preview_only=True)
+    references = ReferenceStore(root)
+    source = references.list_sources()[0]
+    (references.sources_dir / (source.id + ".json")).write_text(
+        source.model_copy(update={"allowed_uses": ["inspiration"]}).model_dump_json(),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="许可已撤销"):
+        preview_intent_application(
+            root, "demo", review["id"], expected_review_hash=review["review_hash"]
+        )
 
 
 def test_application_recovers_exact_diff_context_and_same_result_without_second_apply(tmp_path):
@@ -512,8 +581,7 @@ def test_fixed_preview_cannot_supply_current_feedback_even_at_matching_revision(
         )
 
 
-def test_formal_export_includes_only_current_tasks_recorded_links(tmp_path, monkeypatch):
-    from owcopilot.workflow import v2_service
+def test_formal_export_includes_only_current_tasks_recorded_links(tmp_path):
     from owcopilot.workflow.method_trial_scope_v2 import _initialize
     from owcopilot.workflow.v2_evidence import export_v2_evidence
 
@@ -524,16 +592,25 @@ def test_formal_export_includes_only_current_tasks_recorded_links(tmp_path, monk
         store, "demo", receipt["id"], preview_id=preview["preview_id"], expected_seq=1
     )
     old = continue_original_task_preview(store, "demo", preview["preview_id"], expected_seq=1)
-    # Only the source run's display lookup is controlled. Export reads the real
-    # scratch tables and uses the actual persisted application/fork records.
-    monkeypatch.setattr(
-        v2_service,
-        "v2_detail",
-        lambda *_: {
-            "task_id": task.id,
-            "graph": {"nodes": []},
-        },
-    )
+    # This case's other checks only need partial scene context. Export also
+    # requires the source run's persisted identity and graph integrity.
+    with store.connection() as db:
+        state = json.loads(
+            db.execute(
+                "SELECT payload FROM creative_v2_runs WHERE run_id=?", (artifact.run_id,)
+            ).fetchone()[0]
+        )
+        state.update(
+            run_id=artifact.run_id,
+            project=task.project,
+            task_id=task.id,
+            revision=artifact.revision,
+            graph_hash=content_hash(state["graph"]),
+        )
+        db.execute(
+            "UPDATE creative_v2_runs SET payload=? WHERE run_id=?",
+            (json.dumps(state), artifact.run_id),
+        )
     missing = export_v2_evidence(store, root, "demo", artifact.run_id)["intent"]["task_links"]
     assert missing["coverage"]["method_trial_scopes"] == "not_recorded"
     assert missing["method_trial_scopes"] == []

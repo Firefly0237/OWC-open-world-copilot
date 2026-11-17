@@ -9,12 +9,169 @@ from typing import Any
 from ..content.hash import content_hash
 from ..content.models import ContentBundle
 from ..storage.world_lock import world_write_lock
-from .edit_continuity import application_impact, project_review_changes, validate_continuation
+from .edit_continuity import (
+    application_impact,
+    project_domain_projection,
+    project_review_changes,
+    validate_continuation,
+)
 from .intent_models import IntentContract
 from .intent_review import intent_baseline_bundle
 from .intent_store import IntentStore, _decode, _sealed
 from .models import Artifact, RunRecord, new_id, now
 from .store import WorkflowStore
+
+
+def _prepare_application(db, workflow, root, project, review, continuation):
+    from ..app.actions.intent_workflow import _source_validator
+    from ..app.actions.workflow import _KIND_OPERATIONS, _revision_feedback
+
+    record = IntentStore._contract(db, project, review["contract_id"])
+    IntentStore._require_active(db, project, record, review["contract_hash"])
+    contract = IntentContract.model_validate(record["contract"])
+    task, baseline = IntentStore._bound_source(
+        db, project, contract, review["task_revision"], _source_validator(root)
+    )
+    from .reference_guard_v2 import bound_reference_snapshot, check_reference_snapshot
+
+    references = bound_reference_snapshot(db, {"artifact_id": baseline.id})
+    check_reference_snapshot(root, references)
+    if task.request.use_references and task.request.reference_ids and not references:
+        raise ValueError("参考资料缺少冻结来源记录，不能预检或应用旧稿")
+    if review["report"]["status"] != "ready_for_author":
+        raise ValueError("候选没有通过技术门禁")
+    continuation_record = validate_continuation(db, project, task, baseline, continuation)
+    before = intent_baseline_bundle(task, baseline)
+    after = ContentBundle.model_validate(review["report"]["candidate_bundle"])
+    projection = before.model_copy(deep=True)
+    if baseline.kind not in {"quest", "quest_with_logic", "bound_dialogue"}:
+        raise ValueError("not_publishable: 当前草稿产物类型不支持")
+    quest_id = baseline.payload["quest"]["id"]
+    if quest_id not in after.quests:
+        raise ValueError("not_publishable: 不能删除整个草稿任务")
+    projection.quests[quest_id] = after.quests[quest_id]
+    if baseline.kind == "bound_dialogue":
+        tree_id = baseline.payload["tree"]["id"]
+        if tree_id not in after.dialogue_trees:
+            raise ValueError("not_publishable: 不能删除整个对白树")
+        projection.dialogue_trees[tree_id] = after.dialogue_trees[tree_id]
+    if content_hash(projection) != content_hash(after):
+        raise ValueError("not_publishable: 候选包含此草稿集合之外的改动")
+    if content_hash(before) != review["report"]["before_hash"] or (
+        content_hash(after) != review["report"]["after_hash"]
+    ):
+        raise ValueError("审查报告与实际候选内容不一致")
+    payload = project_review_changes(
+        baseline.payload, before.model_dump(mode="json"), after.model_dump(mode="json")
+    )
+    feedback = _revision_feedback(
+        workflow,
+        task,
+        text=contract.modification_goal,
+        scope="content",
+        target=_KIND_OPERATIONS[baseline.kind],
+    )
+    feedback["intent_review_id"] = review["id"]
+    revised = task.model_copy(
+        update={
+            "revision": task.revision + 1,
+            "feedback": [*task.feedback, feedback],
+            "preserved_budgets": WorkflowStore._preserved_failure_budgets(
+                db, task.id, task.preserved_budgets
+            ),
+        }
+    )
+    return task, baseline, contract, payload, feedback, revised, continuation_record
+
+
+def _application_preview_record(db, review, prepared):
+    from ..app.actions.workflow import artifact_is_stale
+    from .reference_guard_v2 import bound_reference_snapshot
+
+    task, baseline, contract, payload, feedback, revised, continuation = prepared
+    candidate = baseline.model_copy(
+        update={
+            "id": "candidate-" + review["id"],
+            "revision": revised.revision,
+            "payload": payload,
+            "content_hash": content_hash(payload),
+        }
+    )
+    impact = application_impact(
+        db, revised, baseline, candidate, contract, review, feedback, continuation
+    )
+    impact["kind"] = "content_application_preview"
+    impact["target"]["artifact_id"] = None
+    already_stale = {
+        artifact.id
+        for row in db.execute("SELECT payload FROM artifacts WHERE task_id=?", (task.id,))
+        if artifact_is_stale(task, artifact := Artifact.model_validate_json(row[0]))
+    }
+    impact["production"]["newly_stale_artifacts"] = [
+        row for row in impact["production"]["stale_artifacts"] if row["id"] not in already_stale
+    ]
+    impact["references"] = {
+        "retained_reference_ids": [
+            row["source_id"]
+            for row in bound_reference_snapshot(db, {"artifact_id": baseline.id})
+        ],
+        "cross_source_semantics": "unknown",
+    }
+    impact["narrative"] = {
+        "changed_paths": [row["path"] for row in impact["changes"]],
+        "cross_scene_semantics": "unknown",
+    }
+    if continuation.get("task_preview_id"):
+        preview = json.loads(
+            db.execute(
+                "SELECT payload FROM previews WHERE id=?", (continuation["task_preview_id"],)
+            ).fetchone()[0]
+        )
+        try:
+            _, evidence = project_domain_projection(preview["session"], baseline.payload, payload)
+            impact["playtest"].update(status="compatible", evidence=evidence)
+        except ValueError as exc:
+            impact["playtest"].update(status="incompatible", reasons=[str(exc)])
+    return _sealed(
+        {
+            "schema_version": 1,
+            "kind": "content_application_preview",
+            "review_id": review["id"],
+            "review_hash": review["review_hash"],
+            "task_id": task.id,
+            "task_revision": task.revision,
+            "source_artifact_id": baseline.id,
+            "source_artifact_hash": baseline.content_hash,
+            "candidate_artifact_hash": candidate.content_hash,
+            "continuation": continuation,
+            "impact": impact,
+            "writes_draft": False,
+            "writes_canon": False,
+        },
+        "preview_hash",
+    )
+
+
+def preview_intent_application(
+    root: str | Path,
+    project: str,
+    review_id: str,
+    *,
+    expected_review_hash: str,
+    continuation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Read a current candidate's consequences without deciding, applying or dispatching."""
+    from ..app.actions.workflow import open_workflow_store
+
+    with world_write_lock(root):
+        workflow = open_workflow_store(root)
+        with workflow.connection() as db:
+            db.execute("BEGIN")
+            review = IntentStore._review(db, project, review_id)
+            if review["review_hash"] != expected_review_hash:
+                raise ValueError("候选报告hash已改变")
+            prepared = _prepare_application(db, workflow, root, project, review, continuation)
+            return _application_preview_record(db, review, prepared)
 
 
 def apply_intent_review(
@@ -24,11 +181,11 @@ def apply_intent_review(
     *,
     expected_review_hash: str,
     expected_decision_hash: str,
+    expected_preview_hash: str | None = None,
     continuation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A repeat returns its original receipt, even though that apply advanced the task."""
-    from ..app.actions.intent_workflow import _source_validator
-    from ..app.actions.workflow import _KIND_OPERATIONS, _revision_feedback, open_workflow_store
+    from ..app.actions.workflow import open_workflow_store
 
     with world_write_lock(root):
         workflow = open_workflow_store(root)
@@ -66,58 +223,13 @@ def apply_intent_review(
                     if any(recorded.get(key) != value for key, value in supplied.items()):
                         raise ValueError("同一应用不能改用另一处继续位置，请读取原回执")
                 return original
-            record = store._contract(db, project, review["contract_id"])
-            store._require_active(db, project, record, review["contract_hash"])
-            contract = IntentContract.model_validate(record["contract"])
-            task, baseline = store._bound_source(
-                db, project, contract, review["task_revision"], _source_validator(root)
-            )
-            if review["report"]["status"] != "ready_for_author":
-                raise ValueError("候选没有通过技术门禁")
-            continuation_record = validate_continuation(db, project, task, baseline, continuation)
-            before = intent_baseline_bundle(task, baseline)
-            after = ContentBundle.model_validate(review["report"]["candidate_bundle"])
-            payload = dict(baseline.payload)
-            projection = before.model_copy(deep=True)
-            if baseline.kind not in {"quest", "quest_with_logic", "bound_dialogue"}:
-                raise ValueError("not_publishable: 当前草稿产物类型不支持")
-            quest_id = payload["quest"]["id"]
-            if quest_id not in after.quests:
-                raise ValueError("not_publishable: 不能删除整个草稿任务")
-            projection.quests[quest_id] = after.quests[quest_id]
-            payload["quest"] = after.quests[quest_id].model_dump(mode="json")
-            if baseline.kind == "bound_dialogue":
-                tree_id = payload["tree"]["id"]
-                if tree_id not in after.dialogue_trees:
-                    raise ValueError("not_publishable: 不能删除整个对白树")
-                projection.dialogue_trees[tree_id] = after.dialogue_trees[tree_id]
-                payload["tree"] = after.dialogue_trees[tree_id].model_dump(mode="json")
-            if content_hash(projection) != content_hash(after):
-                raise ValueError("not_publishable: 候选包含此草稿集合之外的改动")
-            if content_hash(before) != review["report"]["before_hash"] or (
-                content_hash(after) != review["report"]["after_hash"]
+            prepared = _prepare_application(db, workflow, root, project, review, continuation)
+            if expected_preview_hash is not None and (
+                _application_preview_record(db, review, prepared)["preview_hash"]
+                != expected_preview_hash
             ):
-                raise ValueError("审查报告与实际候选内容不一致")
-            payload = project_review_changes(
-                baseline.payload, before.model_dump(mode="json"), after.model_dump(mode="json")
-            )
-            feedback = _revision_feedback(
-                workflow,
-                task,
-                text=contract.modification_goal,
-                scope="content",
-                target=_KIND_OPERATIONS[baseline.kind],
-            )
-            feedback["intent_review_id"] = review_id
-            revised = task.model_copy(
-                update={
-                    "revision": task.revision + 1,
-                    "feedback": [*task.feedback, feedback],
-                    "preserved_budgets": WorkflowStore._preserved_failure_budgets(
-                        db, task.id, task.preserved_budgets
-                    ),
-                }
-            )
+                raise ValueError("修改影响或继续位置已变化，请重新核对应用前影响")
+            task, baseline, contract, payload, feedback, revised, continuation_record = prepared
             artifact = Artifact(
                 task_id=task.id,
                 revision=revised.revision,

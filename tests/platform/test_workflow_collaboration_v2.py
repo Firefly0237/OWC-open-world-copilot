@@ -6,7 +6,7 @@ import pytest
 
 from owcopilot.content.hash import content_hash
 from owcopilot.content.models import ContentBundle
-from owcopilot.workflow.collaboration_v2 import CollaborationStore
+from owcopilot.workflow.collaboration_v2 import CollaborationPolicy, CollaborationStore
 from owcopilot.workflow.graph_driver import execute_persistent_graph
 from owcopilot.workflow.graph_v2 import (
     DataEdge,
@@ -148,3 +148,13 @@ def test_requested_pause_stops_next_dispatch_and_revision_invalidates_approval(t
     store.save_task(task)
     with pytest.raises(ValueError, match="任务已变化"):
         controls.authorize_resume("dev", run.id, expected_gate_hash=pending["gate_hash"])
+
+
+@pytest.mark.parametrize("operation", ["coverage_audit", "validate_decisions"])
+def test_system_checks_ignore_author_allow_and_review_toggles(operation):
+    legacy = {"allowed_operations": [], "review_operations": [operation]}
+    assert CollaborationStore.operation_allowed(legacy, operation)
+    assert not CollaborationStore.operation_review(legacy, operation)
+    normalized = CollaborationPolicy.model_validate(legacy).normalized()
+    assert operation in normalized["allowed_operations"]
+    assert operation not in normalized["review_operations"]

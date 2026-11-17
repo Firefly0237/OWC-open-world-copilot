@@ -37,6 +37,7 @@ jobs:
         run: |
           python -m pytest -q \
             tests/domain/test_workflow_*.py \
+            tests/domain/test_skill*.py \
             tests/domain/test_mechanic_ir_v2.py \
             tests/domain/test_logic_stepper.py \
             tests/domain/test_project_*.py \
@@ -47,6 +48,7 @@ jobs:
             tests/domain/test_reflection_normalization_v2.py \
             tests/domain/test_requirement_planning_admission_v2.py \
             tests/platform/test_workflow_*.py \
+            tests/platform/test_skill*.py \
             tests/platform/test_creator_*.py \
             tests/platform/test_edit_continuity.py \
             tests/platform/test_intent_decision_origin.py \
@@ -55,6 +57,7 @@ jobs:
             tests/platform/test_published_patch_admission.py \
             tests/platform/test_connection_credentials.py \
             tests/agent/test_deepseek_thinking_tools_v2.py \
+            tests/agent/test_deepseek_output_cap.py \
             tests/agent/test_execution_policy.py
 
   frontend:

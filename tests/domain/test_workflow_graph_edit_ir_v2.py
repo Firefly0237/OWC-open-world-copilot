@@ -85,6 +85,35 @@ def test_host_fields_and_wrong_role_source_cannot_be_smuggled_into_business_ir()
         )
 
 
+def test_guidance_edit_preserves_execution_authority_and_cannot_change_mandatory_checks():
+    graph, baseline_edit = _business_edit()
+    edit = {
+        "expected_graph_hash": baseline_edit["expected_graph_hash"],
+        "rationale": "Correct a formally diagnosed output contract",
+        "operations": [
+            {"op": "update_guidance", "node_id": "logic", "guidance": "Use valid types"}
+        ],
+    }
+    receipt = compile_graph_edit(
+        graph, edit, narrative_role_registry(), {"task": PortSpec(type_name="task_context")}
+    )
+    old = next(node for node in graph.nodes if node.id == "logic")
+    new = next(node for node in receipt.applied.graph.nodes if node.id == "logic")
+    assert new.model_dump(exclude={"guidance"}) == old.model_dump(exclude={"guidance"})
+    assert receipt.applied.graph.data_edges == graph.data_edges
+    assert receipt.applied.graph.control_edges == graph.control_edges
+    assert {"logic", "audit"} <= set(receipt.applied.affected_nodes)
+    contaminated = deepcopy(edit)
+    contaminated["operations"][0]["problem_key"] = "fresh-budget"
+    with pytest.raises(ValidationError):
+        GraphEditIR.model_validate(contaminated)
+    edit["operations"][0]["node_id"] = "audit"
+    with pytest.raises(ValueError, match="强制检查"):
+        compile_graph_edit(
+            graph, edit, narrative_role_registry(), {"task": PortSpec(type_name="task_context")}
+        )
+
+
 def test_legacy_invalid_host_claims_are_retained_in_independent_projection_only():
     graph, _ = _business_edit()
     old = baseline_to_constrained_delta(graph).model_dump(mode="json")

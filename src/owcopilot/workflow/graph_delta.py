@@ -50,6 +50,14 @@ class ReplaceRole(_Model):
     role_version: str = "1"
 
 
+class UpdateGuidance(_Model):
+    """A task-local instruction update cannot change ownership or capability fields."""
+
+    op: Literal["update_guidance"] = "update_guidance"
+    node_id: str = Field(min_length=1)
+    guidance: str = Field(min_length=1, max_length=8000)
+
+
 class ConnectData(_Model):
     op: Literal["connect_data"] = "connect_data"
     edge: DataEdge
@@ -74,6 +82,7 @@ GraphOperation = Annotated[
     InsertNode
     | RemoveNode
     | ReplaceRole
+    | UpdateGuidance
     | ConnectData
     | DisconnectData
     | ConnectControl
@@ -116,6 +125,7 @@ class ReplaceRegisteredRole(_Model):
 GraphEditOperation = Annotated[
     InsertRegisteredRole
     | ReplaceRegisteredRole
+    | UpdateGuidance
     | RemoveNode
     | ConnectData
     | DisconnectData
@@ -552,6 +562,18 @@ def apply_graph_delta(
                 raise ValueError("不能删除图出口生产节点")
             del nodes[step.node_id]
             changed_nodes.add(step.node_id)
+        elif isinstance(step, UpdateGuidance):
+            existing = nodes.get(step.node_id)
+            if existing is None:
+                raise ValueError("指导修改引用未知节点")
+            if _protected(existing, roles, protected_operations):
+                raise ValueError("不能改写强制检查角色的指导")
+            if existing.guidance == step.guidance:
+                raise ValueError("指导修改没有实际变化")
+            nodes[step.node_id] = NodeSpecV2.model_validate(
+                {**existing.model_dump(mode="json"), "guidance": step.guidance}
+            )
+            changed_nodes.add(step.node_id)
         elif isinstance(step, ReplaceRole):
             existing = nodes.get(step.node_id)
             replacement = roles.get(step.operation)
@@ -613,9 +635,14 @@ def apply_graph_delta(
         if node.id in inserted and not _protected(node, roles, protected_operations):
             if not any(edge.source_node == node.id for edge in child.data_edges):
                 raise ValueError("新增非门禁节点的输出必须被实际数据端口消费")
-    affected = changed_nodes.intersection(nodes)
-    for node_id in list(affected):
-        affected.update(nx.descendants(dependencies, node_id))
+    old_dependencies = _dependencies(parent.spec)
+    affected = set(changed_nodes)
+    for node_id in changed_nodes:
+        if node_id in dependencies:
+            affected.update(nx.descendants(dependencies, node_id))
+        if node_id in old_dependencies:
+            affected.update(nx.descendants(old_dependencies, node_id))
+    affected.intersection_update(nodes)
     return AppliedGraphDelta(
         graph=compiled.spec,
         parent_graph_hash=parent.graph_hash,

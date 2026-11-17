@@ -229,6 +229,15 @@ class HarnessStore:
                 "context_manifest": context_manifest,
                 "context_hash": content_hash(context_manifest),
                 "reconstruction_scope": "exact_local_provider_arguments_before_sdk",
+                "configuration_hash": content_hash(request.get("config", {})),
+                "source_axes": {
+                    "task_origin": task.get("origin_kind", "unspecified"),
+                    "execution_origin": request.get("config", {}).get(
+                        "execution_origin", "unknown"
+                    ),
+                    "actor_origin": "unknown",
+                    "collection_condition": "normal_use",
+                },
             }
             db.execute(
                 "INSERT INTO creative_harness_dispatches VALUES(?,?,?,?,?)",
@@ -277,6 +286,15 @@ class HarnessStore:
 
         with self.workflow.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            previous = db.execute(
+                "SELECT payload FROM creative_harness_events WHERE run_id=? "
+                "AND event_type='model/result' AND json_extract(payload,'$.payload.request_id')=?",
+                (record["run_id"], record["id"]),
+            ).fetchall()
+            if previous:
+                if any(json.loads(row[0])["payload"] != payload for row in previous):
+                    raise ValueError("已有派发结果不可被重复回调改写")
+                return
             self._event(
                 db,
                 record["run_id"],

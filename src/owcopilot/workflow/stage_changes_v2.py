@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from ..content.hash import content_hash
-from .collaboration_v2 import CollaborationPolicy
+from .collaboration_v2 import SYSTEM_CHECK_OPERATIONS, CollaborationPolicy
 from .models import now
 
 
@@ -27,6 +27,11 @@ def change_request(
         not text.strip() or len(text) > 8000 for text in guidance.values()
     ):
         raise ValueError("修改计划需要属于当前步骤的有效指导")
+    if any(
+        node["id"] in guidance and node["operation"] in SYSTEM_CHECK_OPERATIONS
+        for node in source["graph"]["nodes"]
+    ):
+        raise ValueError("系统检查由正式规则执行，不能作为创作指导修改")
     if policy is not None and expected_policy_hash is None:
         raise ValueError("修改后续约定需要当前约定版本")
     if expected_policy_hash is not None and expected_policy_hash != collaboration["policy_hash"]:
@@ -42,10 +47,12 @@ def change_request(
         "gate_hash": gate_hash,
         "source_graph_hash": source["graph_hash"],
         "source_execution_graph_hash": source.get("execution_graph_hash"),
-        "source_checkpoint_input_hash": content_hash({
-            "outcomes": (source.get("result") or {}).get("outcomes", {}),
-            "artifacts": (source.get("result") or {}).get("artifacts", {}),
-        }),
+        "source_checkpoint_input_hash": content_hash(
+            {
+                "outcomes": (source.get("result") or {}).get("outcomes", {}),
+                "artifacts": (source.get("result") or {}).get("artifacts", {}),
+            }
+        ),
         "source_policy_hash": collaboration["policy_hash"],
         "source_reference_hash": content_hash(source["references"]),
         "source_narrative_hash": content_hash(source.get("narrative_context")),
@@ -127,17 +134,27 @@ def write_change(db, request: dict, successor: dict, validated: dict) -> dict:
     }
     receipt = {**payload, "receipt_hash": content_hash(payload)}
     record = validated["gate_record"]
-    record.update(status="superseded", supersession={
-        "next_run_id": successor["run_id"], "receipt_hash": receipt["receipt_hash"],
-        "actor_kind": request["actor_kind"],
-    })
+    record.update(
+        status="superseded",
+        supersession={
+            "next_run_id": successor["run_id"],
+            "receipt_hash": receipt["receipt_hash"],
+            "actor_kind": request["actor_kind"],
+        },
+    )
     db.execute(
         "UPDATE creative_v2_interactions SET payload=? WHERE run_id=? AND gate_hash=?",
         (json.dumps(record, ensure_ascii=False), request["parent_run_id"], request["gate_hash"]),
     )
     db.execute(
         "INSERT INTO creative_v2_stage_changes VALUES(?,?,?,?,?,?)",
-        (request["parent_run_id"], request["gate_hash"], request["project"],
-         request["request_hash"], successor["run_id"], json.dumps(receipt, ensure_ascii=False)),
+        (
+            request["parent_run_id"],
+            request["gate_hash"],
+            request["project"],
+            request["request_hash"],
+            successor["run_id"],
+            json.dumps(receipt, ensure_ascii=False),
+        ),
     )
     return receipt

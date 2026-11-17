@@ -20,7 +20,7 @@ from ...workflow.collaboration_v2 import CollaborationPolicy, CollaborationStore
 from ...workflow.edit_continuity import ApplicationContinuation
 from ...workflow.graph_v2 import create_narrative_graph
 from ...workflow.harness import HarnessStore
-from ...workflow.intent_application import apply_intent_review
+from ...workflow.intent_application import apply_intent_review, preview_intent_application
 from ...workflow.models import (
     FeedbackInput,
     PreviewStepInput,
@@ -29,11 +29,13 @@ from ...workflow.models import (
     TaskRecord,
 )
 from ...workflow.requirements_v2 import MachineRequirements
+from ...workflow.skill_cards import SkillSelection
 from ...workflow.store import WorkflowStore
 from ..api import _require_real_allowed
 from ..dependencies import _project_root_or_404
 from .generated_story_tools import router as generated_story_tools_router
 from .narrative_projects import router as narrative_projects_router
+from .skill_cards import router as skill_cards_router
 from .workflows import _call, _local_studio, _store
 
 router = APIRouter(prefix="/projects/{project}/creative/v2", dependencies=[Depends(_local_studio)])
@@ -65,6 +67,9 @@ class RunInput(_Input):
     narrative_scene_id: str | None = Field(default=None, min_length=1)
     narrative_preview_id: str | None = Field(default=None, min_length=1)
     narrative_transition_id: str | None = Field(default=None, min_length=1)
+    skill_card_selections: list[SkillSelection] = Field(default_factory=list, max_length=8)
+    apply_project_skills: bool = True
+    summarize_skill: bool = False
 
     @model_validator(mode="after")
     def paired_trial_scope(self):
@@ -140,10 +145,14 @@ class EvolveInput(_Input):
     attempt_reason: str | None = Field(default=None, min_length=1, max_length=4000)
 
 
-class ApplyIntentInput(_Input):
+class PreviewIntentApplicationInput(_Input):
     expected_review_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
-    expected_decision_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     continuation: ApplicationContinuation | None = None
+
+
+class ApplyIntentInput(PreviewIntentApplicationInput):
+    expected_decision_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_preview_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class ContinueEditedPreviewInput(_Input):
@@ -177,7 +186,12 @@ def _submit_run(
         try:
             if not bound:
                 raise ValueError("任务未成功绑定后台执行器，未调用模型")
-            return v2_service.execute_v2_run(store, root, project, run_id, emit=emit)
+            from ...workflow.repair_v2 import maybe_repair_execution
+            from .skill_cards import schedule_run_summary
+
+            result = v2_service.execute_v2_run(store, root, project, run_id, emit=emit)
+            result = maybe_repair_execution(store, root, project, result, emit=emit)
+            return schedule_run_summary(request, project, store, root, result)
         except Exception as exc:
             store.update_run(run_id, status="failed", error=f"{type(exc).__name__}: {exc}")
             raise
@@ -224,10 +238,16 @@ def _prepare_production(store, root, task, req):
         "narrative_scene_id": req.narrative_scene_id,
         "narrative_preview_id": req.narrative_preview_id,
         "narrative_transition_id": req.narrative_transition_id,
+        "skill_card_selections": [value.model_dump() for value in req.skill_card_selections],
+        "apply_project_skills": req.apply_project_skills,
+        "summarize_skill": req.summarize_skill,
     }
     if req.skill_version_id:
         return v2_service.prepare_skill_run(
-            store, root, task, req.skill_version_id,
+            store,
+            root,
+            task,
+            req.skill_version_id,
             trial_scope_id=req.trial_scope_id,
             expected_trial_scope_hash=req.expected_trial_scope_hash,
             **extra,
@@ -247,6 +267,8 @@ def _prepare_production(store, root, task, req):
             task,
             requirements=extra["machine_requirements"],
             narrative_context=narrative_context,
+            skill_card_selections=extra["skill_card_selections"],
+            apply_project_skills=extra["apply_project_skills"],
         )
         return v2_service.prepare_v2_run(store, root, task, planned["graph"], **extra)
     return v2_service.prepare_v2_run(
@@ -307,9 +329,13 @@ def production_job(project: str, task_id: str, req: RunInput, request: Request) 
             from ...workflow.v2_skills import assert_skill_admission
 
             _call(
-                assert_skill_admission, store, task, req.skill_version_id,
+                assert_skill_admission,
+                store,
+                task,
+                req.skill_version_id,
                 machine_requirements=req.machine_requirements.model_dump(mode="json")
-                if req.machine_requirements else None,
+                if req.machine_requirements
+                else None,
                 trial_scope_id=req.trial_scope_id,
                 expected_trial_scope_hash=req.expected_trial_scope_hash,
             )
@@ -328,7 +354,12 @@ def production_job(project: str, task_id: str, req: RunInput, request: Request) 
             ready.wait()
             state = _prepare_production(store, root, task, req)
             store.update_run(state["run_id"], job_id=job_id)
-            return v2_service.execute_v2_run(store, root, project, state["run_id"], emit=emit)
+            from ...workflow.repair_v2 import maybe_repair_execution
+            from .skill_cards import schedule_run_summary
+
+            result = v2_service.execute_v2_run(store, root, project, state["run_id"], emit=emit)
+            result = maybe_repair_execution(store, root, project, result, emit=emit)
+            return schedule_run_summary(request, project, store, root, result)
 
         job = manager.submit("creative_v2_production", runner)
         job_id = job.id
@@ -398,6 +429,9 @@ def create_run(project: str, task_id: str, req: RunInput, request: Request) -> d
             "narrative_scene_id": req.narrative_scene_id,
             "narrative_preview_id": req.narrative_preview_id,
             "narrative_transition_id": req.narrative_transition_id,
+            "skill_card_selections": [value.model_dump() for value in req.skill_card_selections],
+            "apply_project_skills": req.apply_project_skills,
+            "summarize_skill": req.summarize_skill,
         }
         if req.skill_version_id:
             state = _call(
@@ -470,19 +504,55 @@ def run_requests(project: str, run_id: str) -> dict[str, Any]:
     return {"requests": _call(HarnessStore(store).requests, run_id)}
 
 
+@router.get("/runs/{run_id}/skill-usage")
+def skill_usage(project: str, run_id: str) -> dict[str, Any]:
+    from ...workflow.skill_usage import run_skill_usage
+
+    return _call(run_skill_usage, _store(project), project, run_id)
+
+
 @router.post("/runs/{run_id}/cancel")
-def cancel_run(project: str, run_id: str) -> dict[str, Any]:
+def cancel_run(project: str, run_id: str, request: Request) -> dict[str, Any]:
     store = _store(project)
     _call(v2_service.v2_detail, store, project, run_id)
     run = store.get_run(run_id)
-    if run.status in {"queued", "running", "waiting_user"}:
+    with store.connection() as db:
+        children = [
+            row[0]
+            for row in db.execute(
+                "SELECT run_id FROM creative_v2_runs WHERE project=? "
+                "AND json_extract(payload,'$.task_id')=? "
+                "AND json_extract(payload,'$.repair_contract.source_run_id')=?",
+                (project, run.task_id, run_id),
+            )
+        ]
+    child_runs = [store.get_run(child) for child in children]
+    active_children = [
+        child for child in child_runs if child.status in {"queued", "running", "waiting_user"}
+    ]
+    job = request.app.state.jobs_manager.get(run.job_id) if run.job_id else None
+    if (
+        run.status in {"queued", "running", "waiting_user"}
+        or active_children
+        or (job is not None and job.status in {"queued", "running"})
+    ):
         run = _call(
             store.update_run,
             run_id,
             cancel_requested=True,
-            status="running" if run.status == "running" else "cancelled",
+            status="cancelled" if run.status in {"queued", "waiting_user"} else run.status,
         )
-    return {"run": run.model_dump(mode="json")}
+        for child in active_children:
+            _call(
+                store.update_run,
+                child.id,
+                cancel_requested=True,
+                status="running" if child.status == "running" else "cancelled",
+            )
+    return {
+        "run": run.model_dump(mode="json"),
+        "cancelled_repair_run_ids": [child.id for child in active_children],
+    }
 
 
 @router.post("/runs/{run_id}/preview")
@@ -513,12 +583,16 @@ def resume_run(project: str, run_id: str, req: ResumeInput, request: Request) ->
             _require_real_allowed(request)
             next_state = _call(
                 v2_service.revise_stage_run,
-                store, root, project, run_id,
+                store,
+                root,
+                project,
+                run_id,
                 expected_gate_hash=req.expected_gate_hash,
                 expected_policy_hash=req.expected_policy_hash,
                 guidance=req.guidance,
                 collaboration_policy=req.collaboration_policy.model_dump(mode="json")
-                if req.collaboration_policy is not None else None,
+                if req.collaboration_policy is not None
+                else None,
                 actor_kind=req.actor_kind,
             )
             successor = store.get_run(next_state["run_id"])
@@ -540,7 +614,7 @@ def resume_run(project: str, run_id: str, req: ResumeInput, request: Request) ->
         if pending is None or pending["gate_hash"] != req.expected_gate_hash:
             return _invalid("待决门已变化，请刷新")
         if req.action == "cancel":
-            return cancel_run(project, run_id)
+            return cancel_run(project, run_id, request)
         _require_real_allowed(request)
         _call(
             collaboration.authorize_resume,
@@ -610,7 +684,8 @@ def authorize_trial(project: str, version_id: str, req: TrialInput) -> dict[str,
         expected_family_hash=req.expected_family_hash,
         allowed=req.allowed,
         authority="explicit_author_action"
-        if req.actor_kind == "author" else "development_operator",
+        if req.actor_kind == "author"
+        else "development_operator",
         note=req.note,
     )
 
@@ -631,11 +706,17 @@ def grant_task_trial(project: str, task_id: str, req: TaskTrialInput) -> dict[st
     if task.revision != req.expected_revision:
         return _invalid("任务版本已变化，请重新读取后许可试用")
     permit = _call(
-        grant_trial_scope, store, project, task_id, req.version_ids,
+        grant_trial_scope,
+        store,
+        project,
+        task_id,
+        req.version_ids,
         machine_requirements=req.machine_requirements.model_dump(mode="json"),
         authority="explicit_author_action"
-        if req.actor_kind == "author" else "development_technical_trial",
-        reason=req.reason, operation_id=req.operation_id,
+        if req.actor_kind == "author"
+        else "development_technical_trial",
+        reason=req.reason,
+        operation_id=req.operation_id,
     )
     return _call(get_trial_scope, store, project, permit["id"])
 
@@ -645,8 +726,12 @@ def revoke_task_trial(project: str, scope_id: str, req: RevokeTaskTrialInput) ->
     from ...workflow.method_trial_scope_v2 import revoke_trial_scope
 
     return _call(
-        revoke_trial_scope, _store(project), project, scope_id,
-        expected_permit_hash=req.expected_permit_hash, reason=req.reason,
+        revoke_trial_scope,
+        _store(project),
+        project,
+        scope_id,
+        expected_permit_hash=req.expected_permit_hash,
+        reason=req.reason,
     )
 
 
@@ -764,6 +849,20 @@ def run_evidence(project: str, run_id: str) -> dict[str, Any]:
     )
 
 
+@router.post("/intent-reviews/{review_id}/application-preview")
+def preview_review_application(
+    project: str, review_id: str, req: PreviewIntentApplicationInput
+) -> dict[str, Any]:
+    return _call(
+        preview_intent_application,
+        _project_root_or_404(project),
+        project,
+        review_id,
+        expected_review_hash=req.expected_review_hash,
+        continuation=req.continuation.model_dump(exclude_none=True) if req.continuation else None,
+    )
+
+
 @router.post("/intent-reviews/{review_id}/apply")
 def apply_review(project: str, review_id: str, req: ApplyIntentInput) -> dict[str, Any]:
     return _call(
@@ -773,6 +872,7 @@ def apply_review(project: str, review_id: str, req: ApplyIntentInput) -> dict[st
         review_id,
         expected_review_hash=req.expected_review_hash,
         expected_decision_hash=req.expected_decision_hash,
+        expected_preview_hash=req.expected_preview_hash,
         continuation=req.continuation.model_dump(exclude_none=True) if req.continuation else None,
     )
 
@@ -796,8 +896,12 @@ def continue_edited_preview(project: str, application_id: str, req: ContinueEdit
     from ...workflow.edit_continuity import continue_application_preview
 
     return _call(
-        continue_application_preview, _store(project), project, application_id,
-        preview_id=req.preview_id, expected_seq=req.expected_seq,
+        continue_application_preview,
+        _store(project),
+        project,
+        application_id,
+        preview_id=req.preview_id,
+        expected_seq=req.expected_seq,
     )
 
 
@@ -815,7 +919,10 @@ def continue_original_edit_preview(
     from ...workflow.edit_continuity import continue_original_task_preview
 
     return _call(
-        continue_original_task_preview, _store(project), project, preview_id,
+        continue_original_task_preview,
+        _store(project),
+        project,
+        preview_id,
         expected_seq=req.expected_seq,
     )
 
@@ -866,3 +973,4 @@ def propose_patch(project: str, contract_id: str, req: ProposePatchInput, reques
 
 router.include_router(narrative_projects_router)
 router.include_router(generated_story_tools_router)
+router.include_router(skill_cards_router)

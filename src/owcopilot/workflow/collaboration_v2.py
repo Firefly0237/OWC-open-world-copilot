@@ -16,9 +16,18 @@ from .models import now
 from .store import WorkflowStore
 
 ProductionOperation = Literal[
-    "plan_events", "draft_quest", "draft_logic", "logic_contract", "draft_dialogue",
-    "dialogue_constrained", "bind_dialogue", "coverage_audit", "validate_decisions",
+    "plan_events",
+    "draft_quest",
+    "draft_logic",
+    "logic_contract",
+    "draft_dialogue",
+    "dialogue_constrained",
+    "bind_dialogue",
+    "coverage_audit",
+    "validate_decisions",
 ]
+
+SYSTEM_CHECK_OPERATIONS = frozenset({"coverage_audit", "validate_decisions"})
 
 
 class CollaborationPolicy(BaseModel):
@@ -40,9 +49,10 @@ class CollaborationPolicy(BaseModel):
             "key_step_review": self.mode == "edit"
             if self.key_step_review is None
             else self.key_step_review,
-            "allowed_operations": sorted(set(self.allowed_operations))
-            if self.allowed_operations is not None else None,
-            "review_operations": sorted(set(self.review_operations)),
+            "allowed_operations": sorted(set(self.allowed_operations) | SYSTEM_CHECK_OPERATIONS)
+            if self.allowed_operations is not None
+            else None,
+            "review_operations": sorted(set(self.review_operations) - SYSTEM_CHECK_OPERATIONS),
         }
 
 
@@ -155,17 +165,21 @@ class CollaborationStore:
             table = db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='creative_v2_runs'"
             ).fetchone()
-            row = db.execute(
-                "SELECT payload FROM creative_v2_runs WHERE run_id=?", (run_id,)
-            ).fetchone() if table else None
-        operations = {
-            node["operation"] for node in json.loads(row[0])["graph"]["nodes"]
-        } if row else set()
+            row = (
+                db.execute(
+                    "SELECT payload FROM creative_v2_runs WHERE run_id=?", (run_id,)
+                ).fetchone()
+                if table
+                else None
+            )
+        operations = (
+            {node["operation"] for node in json.loads(row[0])["graph"]["nodes"]} if row else set()
+        )
         groups = [
             ("planning", "大纲与场景", {"plan_events", "draft_quest"}),
             ("mechanics", "选择与后果", {"draft_logic", "logic_contract"}),
             ("dialogue", "角色对白", {"draft_dialogue", "dialogue_constrained", "bind_dialogue"}),
-            ("checks", "草稿检查", {"validate_decisions", "coverage_audit"}),
+            ("checks", "系统检查", SYSTEM_CHECK_OPERATIONS),
         ]
         policy = state["policy"]
         result = []
@@ -173,38 +187,55 @@ class CollaborationStore:
             present = sorted(operations & members)
             if not present:
                 continue
-            result.append({
-                "id": key, "title": title,
-                "operations": [{
-                    "operation": operation, "title": _TITLES.get(operation, operation),
-                    "allowed": self.operation_allowed(policy, operation),
-                    "review_before": self.operation_review(policy, operation),
-                } for operation in present],
+            result.append(
+                {
+                    "id": key,
+                    "title": title,
+                    "operations": [
+                        {
+                            "operation": operation,
+                            "title": _TITLES.get(operation, operation),
+                            "allowed": self.operation_allowed(policy, operation),
+                            "review_before": self.operation_review(policy, operation),
+                            "system_required": operation in SYSTEM_CHECK_OPERATIONS,
+                        }
+                        for operation in present
+                    ],
+                    "policy_hash": state["policy_hash"],
+                    "policy_version": state.get("policy_version", 1),
+                }
+            )
+        result.append(
+            {
+                "id": "methods",
+                "title": "方法试用",
+                "operations": [],
+                "task_permit_required": True,
+                "automatic_trial_requested": policy.get("allow_candidate_trial", False),
                 "policy_hash": state["policy_hash"],
                 "policy_version": state.get("policy_version", 1),
-            })
-        result.append({
-            "id": "methods", "title": "方法试用", "operations": [],
-            "task_permit_required": True,
-            "automatic_trial_requested": policy.get("allow_candidate_trial", False),
-            "policy_hash": state["policy_hash"],
-            "policy_version": state.get("policy_version", 1),
-        })
+            }
+        )
         return result
 
     @staticmethod
     def operation_allowed(policy: dict, operation: str) -> bool:
+        if operation in SYSTEM_CHECK_OPERATIONS:
+            return True
         allowed = policy.get("allowed_operations")
         return allowed is None or operation in allowed
 
     @staticmethod
     def operation_review(policy: dict, operation: str) -> bool:
+        if operation in SYSTEM_CHECK_OPERATIONS:
+            return False
         return bool(
             operation in policy.get("review_operations", [])
-            or policy.get("plan_review") and operation == "draft_quest"
-            or policy.get("key_step_review") and operation in {
-                "logic_contract", "draft_logic", "draft_dialogue", "dialogue_constrained"
-            }
+            or policy.get("plan_review")
+            and operation == "draft_quest"
+            or policy.get("key_step_review")
+            and operation
+            in {"logic_contract", "draft_logic", "draft_dialogue", "dialogue_constrained"}
         )
 
     def request_pause(self, project: str, run_id: str, *, expected_policy_hash: str) -> dict:
@@ -247,9 +278,10 @@ class CollaborationStore:
                 return existing["gate"]
             policy = state["policy"]
             permission_required = not self.operation_allowed(policy, node.operation)
-            if not permission_required and (node.id in state["reviewed_nodes"] or any(
-                g["node_id"] == node.id and g["status"] == "consumed" for g in history
-            )):
+            if not permission_required and (
+                node.id in state["reviewed_nodes"]
+                or any(g["node_id"] == node.id and g["status"] == "consumed" for g in history)
+            ):
                 needs_review = False
             else:
                 needs_review = self.operation_review(policy, node.operation)

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import { humanizeError } from "../api";
-import { creatorStatus, storyCreatorClient, type AIPatchReview, type ApplicationContinuation, type CreatorJob, type PatchSelection } from "../storyCreatorApi";
+import { creatorStatus, storyCreatorClient, type AIPatchReview, type ApplicationContinuation, type ApplicationPreview, type CreatorJob, type PatchSelection } from "../storyCreatorApi";
 import type { EvolutionArtifact, IntentApplicationReceipt, IntentDecision } from "../evolutionStudioApi";
 import type { StudioTask } from "../studioApi";
 import StoryImpactSummary from "./StoryImpactSummary.vue";
@@ -26,9 +26,20 @@ const proposalGoal = ref("");
 const review = ref<AIPatchReview | null>(null);
 const decision = ref<IntentDecision | null>(null);
 const receipt = ref<IntentApplicationReceipt | null>(null);
+const applicationPreview = ref<ApplicationPreview | null>(null);
+const impactBusy = ref(false);
+const impactError = ref("");
+const impactKey = ref("");
+let impactGeneration = 0;
 const pending = computed(() => Boolean(jobId.value) && ["queued", "running"].includes(job.value?.status ?? "queued"));
 const current = computed(() => sourceRevision.value === props.revision && Boolean(snapshot.value)
   && snapshot.value?.artifact_id === props.source?.artifact_id && snapshot.value?.artifact_hash === props.source?.artifact_hash);
+const impactContextKey = computed(() => JSON.stringify({
+  project: props.project, task: props.taskId, revision: props.revision,
+  source: props.source, review: review.value?.review_hash, continuation: props.continuation ?? {},
+}));
+const impactReady = computed(() => current.value && Boolean(applicationPreview.value)
+  && impactKey.value === impactContextKey.value);
 
 function readPointer(document: unknown, pointer: string): unknown {
   let value = document;
@@ -65,6 +76,29 @@ function working(value: boolean): void { busy.value = value; emit("working", val
 function reset(): void {
   epoch += 1; stop(); busy.value = false; emit("working", false); error.value = ""; notice.value = "";
   job.value = null; jobId.value = ""; review.value = null; decision.value = null; receipt.value = null; snapshot.value = null; sourceRevision.value = 0; proposalGoal.value = "";
+  impactGeneration += 1; applicationPreview.value = null; impactKey.value = "";
+  impactBusy.value = false; impactError.value = "";
+}
+async function refreshImpact(): Promise<void> {
+  if (!review.value || !current.value || receipt.value || review.value.report.status !== "ready_for_author") return;
+  const generation = ++impactGeneration; const key = impactContextKey.value;
+  const candidate = review.value;
+  impactBusy.value = true; impactError.value = ""; applicationPreview.value = null; impactKey.value = "";
+  try {
+    const result = await api.previewApplication(candidate.id, candidate.review_hash, props.continuation);
+    if (!alive || generation !== impactGeneration || key !== impactContextKey.value) return;
+    if (result.review_id !== candidate.id || result.review_hash !== candidate.review_hash
+      || result.task_id !== props.taskId || result.task_revision !== props.revision
+      || result.source_artifact_id !== snapshot.value?.artifact_id
+      || result.source_artifact_hash !== snapshot.value?.artifact_hash
+      || result.writes_draft !== false || result.writes_canon !== false
+      || typeof result.preview_hash !== "string" || !/^[a-f0-9]{64}$/.test(result.preview_hash)) {
+      throw new Error("影响预检与当前建议或原稿不一致。");
+    }
+    applicationPreview.value = result; impactKey.value = key;
+  } catch (failure) {
+    if (alive && generation === impactGeneration && key === impactContextKey.value) impactError.value = humanizeError(failure);
+  } finally { if (alive && generation === impactGeneration) impactBusy.value = false; }
 }
 function isReview(value: unknown): value is AIPatchReview {
   if (value == null || typeof value !== "object") return false;
@@ -146,6 +180,7 @@ async function propose(): Promise<void> {
 }
 async function decide(value: "accepted" | "rejected"): Promise<void> {
   if (!review.value || !current.value || busy.value || props.locked) return;
+  if (value === "accepted" && !impactReady.value) return;
   working(true); error.value = ""; const stamp = epoch;
   try {
     const result = await api.decideIntent(review.value.id, sourceRevision.value, review.value.review_hash, value, props.actorKind ?? "author");
@@ -169,10 +204,10 @@ async function readApplied(): Promise<void> {
   notice.value = "已载入修改后的草稿。";
 }
 async function apply(): Promise<void> {
-  if (!review.value || decision.value?.decision !== "accepted" || !current.value || busy.value || props.locked || receipt.value) return;
+  if (!review.value || decision.value?.decision !== "accepted" || !current.value || !impactReady.value || busy.value || props.locked || receipt.value) return;
   working(true); error.value = ""; const stamp = epoch;
   try {
-    const result = await api.applyIntent(review.value.id, review.value.review_hash, decision.value.decision_hash, props.continuation);
+    const result = await api.applyIntent(review.value.id, review.value.review_hash, decision.value.decision_hash, props.continuation, applicationPreview.value!.preview_hash);
     if (!alive || stamp !== epoch) return;
     receipt.value = result; await readApplied();
   } catch (failure) {
@@ -183,7 +218,11 @@ watch(() => `${props.project}:${props.taskId}`, () => { reset(); api = storyCrea
 watch(() => props.selection ? `${props.selection.artifact_id}:${props.selection.bundle_path}` : "", (value, previous) => {
   if (value && value !== previous) reset();
 });
-onUnmounted(() => { alive = false; epoch += 1; stop(); emit("working", false); });
+watch(impactContextKey, () => {
+  impactGeneration += 1; applicationPreview.value = null; impactKey.value = ""; impactBusy.value = false; impactError.value = "";
+  void refreshImpact();
+});
+onUnmounted(() => { alive = false; epoch += 1; impactGeneration += 1; stop(); emit("working", false); });
 </script>
 
 <template>
@@ -200,7 +239,13 @@ onUnmounted(() => { alive = false; epoch += 1; stop(); emit("working", false); }
       <details v-if="diff"><summary>查看文字差异</summary><p class="inline-diff">{{ diff.prefix }}<del v-if="diff.removed">{{ diff.removed }}</del><ins v-if="diff.added">{{ diff.added }}</ins>{{ diff.suffix }}</p></details>
       <div class="hard-checks"><strong>{{ creatorStatus(review.report.status, "review") }}</strong><ul v-if="review.report.reasons.length"><li v-for="reason in review.report.reasons" :key="reason">{{ reason }}</li></ul><p>变更{{ review.report.changed_paths.length }}处 · 新增错误{{ review.report.introduced_errors.length }}项 · 目标问题未解决{{ review.report.remaining_targets.length }}项</p><p class="hint">是否符合修改意图：{{ creatorStatus(review.report.goal_status, "requirements") }}</p><details v-if="review.report.formal_results.length || review.report.soft_results.length"><summary>条件检查与待确认项</summary><div v-for="(result, index) in review.report.formal_results" :key="index" class="formal-result"><p>条件 {{ index + 1 }} · 修改前：{{ formalState(result, 'before') }}</p><p>修改后：{{ formalState(result, 'after') }}</p></div><p v-for="(result, index) in review.report.soft_results" :key="index">{{ result.text }} · {{ creatorStatus(result.status, "requirements") }}</p></details></div>
       <p v-if="!current && !receipt" class="hint">源草稿已更新。此建议仅供回看，请针对当前版本重新生成。</p>
-      <div class="actions"><button :disabled="locked || busy || !current || Boolean(decision) || proposedText === null || review.report.status !== 'ready_for_author'" @click="decide('accepted')">选用此建议</button><button :disabled="locked || busy || !current || Boolean(decision)" @click="decide('rejected')">不采用</button><button v-if="decision?.decision === 'accepted'" class="primary" :disabled="locked || busy || !current || Boolean(receipt)" @click="apply">应用本次修改</button></div>
+      <template v-if="!receipt && current && review.report.status === 'ready_for_author'">
+        <p v-if="impactBusy" class="hint" role="status">正在核对修改影响…</p>
+        <p v-if="impactError" class="message error" role="alert">影响预检未完成：{{ impactError }}</p>
+        <StoryImpactSummary v-if="impactReady" :impact="applicationPreview!.impact" :field-label="snapshot.label" phase="before" />
+        <button class="text-link" :disabled="busy || impactBusy" @click="refreshImpact">重新核对影响</button>
+      </template>
+      <div class="actions"><button :disabled="locked || busy || !current || !impactReady || Boolean(decision) || proposedText === null || review.report.status !== 'ready_for_author'" @click="decide('accepted')">选用此建议</button><button :disabled="locked || busy || !current || Boolean(decision)" @click="decide('rejected')">不采用</button><button v-if="decision?.decision === 'accepted'" class="primary" :disabled="locked || busy || !current || !impactReady || Boolean(receipt)" @click="apply">应用本次修改</button></div>
       <p v-if="decision" class="hint">{{ actorKind === 'development_operator' ? '开发操作 · ' : '' }}{{ creatorStatus(decision.decision, "author") }}{{ decision.decision === 'accepted' && !receipt ? ' · 尚未应用' : '' }}</p><p v-if="receipt" class="applied-note">已保存草稿 v{{ receipt.revision }}。<button class="text-link" :disabled="busy" @click="rereadApplied">读取该版本</button></p>
       <StoryImpactSummary v-if="receipt" :impact="receipt.impact" :field-label="snapshot.label" />
       <details class="debug"><summary>检查与操作记录</summary><pre>{{ JSON.stringify({ path: snapshot.bundle_path, review_id: review.id, proposal_trace_run_id: review.proposal_trace_run_id, report: review.report, receipt }, null, 2) }}</pre></details>

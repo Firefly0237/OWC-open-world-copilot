@@ -801,10 +801,12 @@ class EvolutionStore:
         project: str,
         episode_id: str,
         *,
-        status: Literal["candidate", "blocked", "failed"],
+        status: Literal["candidate", "blocked", "failed", "no_change", "insufficient_evidence"],
         candidate_version_id: str | None = None,
         evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if status not in {"candidate", "blocked", "failed", "no_change", "insufficient_evidence"}:
+            raise ValueError("未知演化终态")
         with self.workflow.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(

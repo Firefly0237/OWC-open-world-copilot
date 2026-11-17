@@ -3,8 +3,10 @@ import { evolutionClient } from "./evolutionStudioApi";
 import type { EvolutionGraph, EvolutionRunState, EvolutionQuest, IntentContractRecord, IntentReview } from "./evolutionStudioApi";
 import type { StudioTask, StudioPreview } from "./studioApi";
 import type { EvolutionArtifact, IntentApplicationReceipt } from "./evolutionStudioApi";
+import type { RunSkillUsage, SkillCardSelection } from "./skillCardsApi";
 
 export type CollaborationMode = "delegate" | "direction" | "edit";
+export const SYSTEM_CREATOR_CHECKS = new Set(["coverage_audit", "validate_decisions"]);
 export interface CollaborationPolicy {
   mode: CollaborationMode;
   plan_review?: boolean;
@@ -23,6 +25,14 @@ export interface ApplicationContinuation {
 export interface ApplicationDetail {
   receipt: IntentApplicationReceipt; artifact: EvolutionArtifact; task: StudioTask;
   impact: Record<string, unknown>; target_current: boolean;
+}
+export interface ApplicationPreview {
+  kind: "content_application_preview";
+  preview_hash: string; review_id: string; review_hash: string;
+  task_id: string; task_revision: number;
+  source_artifact_id: string; source_artifact_hash: string;
+  candidate_artifact_hash: string; continuation: ApplicationContinuation;
+  impact: Record<string, unknown>; writes_draft: false; writes_canon: false;
 }
 export interface MethodTrialScope {
   permit: { id: string; permit_hash: string; task_id: string; task_revision: number;
@@ -125,6 +135,11 @@ export interface RequirementsReport {
 }
 export interface StoryRunState {
   run: EvolutionRunState["run"];
+  skill_summary_job_id?: string | null;
+  skill_summary_error?: string | null;
+  selection_decision_id?: string;
+  method_decision?: { mode: "reuse" | "adapt" | "fresh"; asset_kind: "graph" | "subgraph" | "skill" | "none";
+    reason: string; estimated_tokens: number | null; cost_status: "estimated" | "unknown" };
   graph?: EvolutionGraph;
   graph_hash?: string;
   skill_version_id?: string | null;
@@ -140,7 +155,7 @@ export interface StoryRunState {
     pending_gate?: StoryGate | { gate: StoryGate; gate_hash: string; node_id: string; status: string } | null;
     history: Record<string, unknown>[]; can_pause?: boolean; can_resume?: boolean; phase?: string;
     stage_agreements?: { id: string; title: string; policy_hash: string; version: number;
-      operations: { operation: string; title: string; allowed: boolean; review_before: boolean }[] }[];
+      operations: { operation: string; title: string; allowed: boolean; review_before: boolean; system_required?: boolean }[] }[];
   };
   stage_change?: Record<string, unknown>;
   method_trial_scope_id?: string | null;
@@ -160,6 +175,9 @@ export interface ProductionInput {
   plan_guidance?: Record<string, string>;
   machine_requirements: MachineRequirements;
   collaboration_policy: CollaborationPolicy;
+  skill_card_selections?: SkillCardSelection[];
+  apply_project_skills?: boolean;
+  summarize_skill?: boolean;
   narrative_project_id?: string;
   narrative_scene_id?: string;
   narrative_preview_id?: string;
@@ -197,6 +215,7 @@ export function storyCreatorClient(project = currentProject()) {
       apiPost<{ task: StudioTask }>(`${base}/tasks`, input),
     detail: (taskId: string) => apiGet<{ task: StudioTask; runs: StoryRunState[] }>(`${base}/tasks/${encoded(taskId)}`),
     state: (runId: string) => apiGet<StoryRunState>(`${base}/runs/${encoded(runId)}`),
+    skillUsage: (runId: string) => apiGet<RunSkillUsage>(`${base}/runs/${encoded(runId)}/skill-usage`),
     produce: (taskId: string, input: ProductionInput) =>
       apiPost<{ job_id: string; run_id?: string; status?: string }>(`${base}/tasks/${encoded(taskId)}/production-jobs`, input),
     pause: (runId: string, policyHash: string) =>
@@ -206,6 +225,10 @@ export function storyCreatorClient(project = currentProject()) {
     job: (jobId: string) => apiGet<CreatorJob>(`/jobs/${encoded(jobId)}`),
     applications: (taskId: string) => apiGet<{ applications: IntentApplicationReceipt[] }>(`${base}/tasks/${encoded(taskId)}/edit-applications`),
     application: (applicationId: string) => apiGet<ApplicationDetail>(`${base}/intent-applications/${encoded(applicationId)}`),
+    previewApplication: (reviewId: string, reviewHash: string, continuation?: ApplicationContinuation) =>
+      apiPost<ApplicationPreview>(`${base}/intent-reviews/${encoded(reviewId)}/application-preview`, { expected_review_hash: reviewHash, ...(continuation ? { continuation } : {}) }),
+    applyIntent: (reviewId: string, reviewHash: string, decisionHash: string, continuation?: ApplicationContinuation, previewHash?: string) =>
+      apiPost<IntentApplicationReceipt>(`${base}/intent-reviews/${encoded(reviewId)}/apply`, { expected_review_hash: reviewHash, expected_decision_hash: decisionHash, ...(continuation ? { continuation } : {}), ...(previewHash ? { expected_preview_hash: previewHash } : {}) }),
     continueEditedPreview: (applicationId: string, previewId: string, seq: number) =>
       apiPost<Record<string, unknown>>(`${base}/intent-applications/${encoded(applicationId)}/continue-preview`, { preview_id: previewId, expected_seq: seq }),
     continueOriginalTask: (previewId: string, seq: number) =>

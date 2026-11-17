@@ -149,16 +149,36 @@ def validate_requirement_capabilities(
 
 
 def plan_initial_graph(
-    store, root, task, *, requirements=None, narrative_context=None, provider=None, emit=None
+    store,
+    root,
+    task,
+    *,
+    requirements=None,
+    narrative_context=None,
+    provider=None,
+    emit=None,
+    decision_id=None,
+    skill_card_selections=None,
+    apply_project_skills=True,
 ):
     from .v2_service import _json, reference_snapshot
 
     trace = RunRecord(task_id=task.id, revision=task.revision, status="running")
     with store.connection() as db:
         db.execute("INSERT INTO runs VALUES(?,?,?)", (trace.id, task.id, trace.model_dump_json()))
+    if decision_id:
+        from .execution_records import ExecutionRecords
+
+        ExecutionRecords(store).bind_run(task.project, decision_id, trace.id)
     events = HarnessStore(store)
     owned = provider is None
     try:
+        from .skill_cards import SkillCards
+
+        selected_cards = SkillCards(store).resolve(
+            task.project, skill_card_selections, include_defaults=apply_project_skills
+        )
+        SkillCards.validate_task_inputs(selected_cards, task, requirements)
         provider = provider or build_real_provider(
             model=task.request.model or os.getenv("OWCOPILOT_CHEAP_MODEL") or "deepseek-v4-flash",
             timeout=120,
@@ -180,6 +200,7 @@ def plan_initial_graph(
                 name: role.model_dump(mode="json") for name, role in roles.items()
             },
             "output_schema": PlanIR.model_json_schema(),
+            "selected_skills": selected_cards,
         }
         response = Harness(events, trace.id, provider).complete(
             owner=BudgetOwner(
@@ -195,6 +216,8 @@ def plan_initial_graph(
                 "输出PlanIR JSON，不输出预算、任意代码或未注册工具。所有节点须服务真实产物。"
                 "必须有plan_events、draft_quest、机制、对白、bind_dialogue、coverage_audit。"
                 "outputs只含bound和report，report必须实际读取最终bound。"
+                "selected_skills是本次明确选用的工作方法，应安排相应制作角色与依赖；"
+                "方法不得覆盖当前明确要求、保护项或系统检查，也不能获得额外权限。"
                 "若选择dialogue_constrained，必须读取validate_decisions产出的contract；"
                 "logic_contract需要plan和quest。遵守来源用途与作者保护项，未知不假称通过。"
                 "若明确distinct_outcomes=true、decision_option_count或正数decision_count，"
@@ -214,10 +237,25 @@ def plan_initial_graph(
             },
         )
         plan = PlanIR.model_validate(_json(response))
+        SkillCards(store).assert_bindings(task.project, selected_cards)
         graph = compile_plan_ir(plan, roles)
         admission = validate_requirement_capabilities(graph, requirements)
         events.append(trace.id, "planning/requirement_capabilities", admission)
-        provenance = {"run_id": trace.id, "plan_ir_hash": content_hash(plan)}
+        provenance = {
+            "run_id": trace.id,
+            "plan_ir_hash": content_hash(plan),
+            "task_id": task.id,
+            "task_revision": task.revision,
+            "skill_selection_hash": content_hash(
+                [
+                    {
+                        key: binding[key]
+                        for key in ("card_id", "version_id", "version_hash", "selection")
+                    }
+                    for binding in selected_cards
+                ]
+            ),
+        }
         graph = graph.model_copy(
             update={
                 "nodes": [

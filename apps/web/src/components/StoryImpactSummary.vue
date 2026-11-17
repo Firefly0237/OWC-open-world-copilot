@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import { CREATOR_OPERATIONS } from "../storyCreatorApi";
 
-const props = defineProps<{ impact?: Record<string, unknown> | null; fieldLabel?: string }>();
+const props = defineProps<{ impact?: Record<string, unknown> | null; fieldLabel?: string; phase?: "before" | "after" }>();
 
 function record(value: unknown): Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value)
@@ -18,8 +18,14 @@ const changes = computed(() => rows(props.impact?.changes));
 const changesAvailable = computed(() => Array.isArray(props.impact?.changes));
 const production = computed(() => record(props.impact?.production));
 const affectedOperations = computed(() => strings(production.value.affected_operations));
-const staleArtifactCount = computed(() => Array.isArray(production.value.stale_artifacts)
-  ? production.value.stale_artifacts.length : null);
+const staleArtifactCount = computed(() => {
+  const values = props.phase === "before" ? production.value.newly_stale_artifacts : production.value.stale_artifacts;
+  return Array.isArray(values) ? values.length : null;
+});
+const scope = computed(() => record(props.impact?.scope));
+const hardLocks = computed(() => rows(scope.value.hard_locks));
+const references = computed(() => record(props.impact?.references));
+const retainedReferenceIds = computed(() => strings(references.value.retained_reference_ids));
 const reading = computed(() => record(props.impact?.reading));
 const playtest = computed(() => record(props.impact?.playtest));
 const unconfirmed = computed(() => rows(props.impact?.unconfirmed)
@@ -27,8 +33,8 @@ const unconfirmed = computed(() => rows(props.impact?.unconfirmed)
 const modificationGoal = computed(() => record(props.impact?.reason).text);
 const readingState = computed(() => {
   if (typeof reading.value.path !== "string" || !reading.value.path) return "未关联原阅读位置";
-  return reading.value.target_exists === true ? "新版中可定位原字段"
-    : reading.value.target_exists === false ? "原字段在新版中不存在" : "原位置尚未核对";
+  return reading.value.target_exists === true ? (props.phase === "before" ? "应用后仍可定位原字段" : "新版中可定位原字段")
+    : reading.value.target_exists === false ? (props.phase === "before" ? "应用后原字段将不存在" : "原字段在新版中不存在") : "原位置尚未核对";
 });
 const playtestState = computed(() => {
   const labels: Record<string, string> = {
@@ -58,7 +64,7 @@ function detailsText(value: unknown): string { return JSON.stringify(value, null
 
 <template>
   <section class="impact-summary">
-    <h3>修改影响</h3>
+    <h3>{{ phase === 'before' ? '应用前影响' : '修改影响' }}</h3>
     <p v-if="!impact" class="hint">尚未取得影响记录。</p>
     <template v-else>
       <p v-if="typeof modificationGoal === 'string' && modificationGoal" class="goal"><span>修改目标</span>{{ modificationGoal }}</p>
@@ -72,10 +78,12 @@ function detailsText(value: unknown): string { return JSON.stringify(value, null
       </details>
       <p v-else class="hint">{{ changesAvailable ? '记录中没有字段改动。' : '未返回具体改动字段。' }}</p>
       <dl class="impact-status">
-        <dt>阅读位置</dt><dd>{{ readingState }}<small v-if="typeof reading.path === 'string' && reading.path && reading.target_exists === true && reading.current_text_will_change === true">当前位置的文字已改变</small></dd>
+        <dt v-if="phase === 'before'">保护约定</dt><dd v-if="phase === 'before'">{{ hardLocks.length ? `保留${hardLocks.length}项锁定范围` : '本次未另设字段锁定' }}</dd>
+        <dt>阅读位置</dt><dd>{{ readingState }}<small v-if="typeof reading.path === 'string' && reading.path && reading.target_exists === true && reading.current_text_will_change === true">{{ phase === 'before' ? '当前位置的文字将改变' : '当前位置的文字已改变' }}</small></dd>
         <dt>继续试玩</dt><dd>{{ playtestState }}</dd>
-        <dt>制作内容</dt><dd><template v-if="affectedOperations.length">需重新处理：{{ affectedOperations.map(operationLabel).join('、') }}</template><template v-else>未列出受影响的制作步骤</template><small v-if="production.basis !== 'stored_production_graph'">制作依赖尚未完整关联</small></dd>
-        <dt>旧产物</dt><dd>{{ staleArtifactCount !== null ? `${staleArtifactCount}份已失效` : '失效范围尚未核对' }}</dd>
+        <dt>制作内容</dt><dd><template v-if="affectedOperations.length">受影响步骤：{{ affectedOperations.map(operationLabel).join('、') }}</template><template v-else>未列出受影响的制作步骤</template><small v-if="production.basis !== 'stored_production_graph'">制作依赖尚未完整关联</small></dd>
+        <dt>旧产物</dt><dd>{{ staleArtifactCount !== null ? `${staleArtifactCount}份${phase === 'before' ? '将失效' : '已失效'}` : '失效范围尚未核对' }}</dd>
+        <dt v-if="phase === 'before'">资料与后续剧情</dt><dd v-if="phase === 'before'">{{ retainedReferenceIds.length ? `保留${retainedReferenceIds.length}份所选资料` : '本次未关联参考资料' }}<small>跨资料与跨场景的意义影响尚未判定</small></dd>
       </dl>
       <ul v-if="strings(playtest.reasons).length" class="reasons"><li v-for="reason in strings(playtest.reasons)" :key="reason">{{ reason }}</li></ul>
       <section v-if="unconfirmed.length" class="unconfirmed"><h4>待你判断</h4><ul><li v-for="(item, index) in unconfirmed" :key="index">{{ item.text }}</li></ul></section>
