@@ -40,11 +40,11 @@ Honesty (load-bearing, mirrors :mod:`.explore`'s ``truncated`` contract):
   then ``status="proven"`` / ``strong=True``. When the bound was hit, a clean run only means "no
   counterexample within the boundary" (``status="no_counterexample_in_bound"`` / ``strong=False``) —
   never "proven".
-* Unbounded ``int`` (``inc``/``dec`` with no declared range) makes the raw state space infinite.
-  Real quests are forward DAGs so their state space is finite anyway; a counter *loop* would
-  truncate → weak result. Declaring an int range (``TemporalSpec.int_ranges``) turns that flag
-  into a finite saturating domain, restoring an exhaustive run → a strong proof. This is the only
-  lever that converts "no counterexample in bound" into "proven" for a looping counter.
+* Unbounded ``int`` counters can make the state space infinite. ``TemporalSpec.int_ranges``
+  limits search, not game semantics: effects keep their concrete values. Reaching an excluded
+  integer state truncates further exploration; it never clamps a game value to manufacture a
+  finite model or a strong proof. Concrete witnesses/counterexamples remain valid in a truncated
+  search, while a clean bounded search remains weak.
 """
 
 from __future__ import annotations
@@ -97,8 +97,8 @@ class TemporalSpec(BaseModel):
     """One temporal property to check against a quest.
 
     ``expression`` is a boolean-expression source (see :mod:`.expr`) for ``AG``/``EF``; it is empty
-    for ``AG_EF_ENDING``. ``int_ranges`` optionally declares ``{flag: [lo, hi]}`` finite saturating
-    domains for integer flags — the only way to earn a *strong* proof on a counter-looping quest.
+    for ``AG_EF_ENDING``. ``int_ranges`` optionally declares ``{flag: [lo, hi]}`` search bounds
+    for integer flags. They do not change runtime arithmetic or imply a finite game domain.
     ``antecedent`` optionally names the trigger sub-expression of an implication invariant so the
     engine can run the vacuity check (an ``AG (not A or B)`` that holds only because ``A`` is never
     reachable is reported ``vacuous``, not green).
@@ -121,7 +121,7 @@ class TemporalResult(BaseModel):
     pattern: PropertyPattern
     holds: bool
     status: SpecStatus
-    strong: bool = False  # True only when the verdict is a proof (exhaustive / declared-bounded)
+    strong: bool = False  # Exhaustive proof, or a concrete reachable witness/counterexample.
     truncated: bool = False
     counterexample_witness: list[str] = Field(default_factory=list)
     counterexample_stage: str = ""
@@ -181,18 +181,29 @@ def _written_flags(logic: QuestLogic) -> set[str]:
     return written
 
 
-def _external_input_flags(logic: QuestLogic) -> set[str]:
+def _external_input_flags(
+    logic: QuestLogic, provably_never_written: frozenset[str] = frozenset()
+) -> set[str]:
     """Flags a stage precondition or branch condition READS but no quest effect WRITES — i.e. state
     the quest does not control (a dialogue-set flag, a cross-quest ``quest:x.done``, an entry
     input). A dead-end blocked by such a flag is NOT a sound single-quest soft-lock: the owning
     dialogue / other quest may set it so the block clears. Read only from *internal* guards (stage
-    preconditions + branch conditions); the quest-level precondition only gates entry."""
+    preconditions + branch conditions); the quest-level precondition only gates entry.
+
+    ``provably_never_written`` narrows that concession with world knowledge. "Not written by me"
+    only implies "owned by someone else" while this quest is all the checker can see; a flag that
+    **nothing in the whole world writes** has no owning layer to clear it, so it seals a dead-end
+    just as firmly as a quest-local flag. Callers get that set from
+    :meth:`owcopilot.logic.xref.FlagXref.provably_never_written`, which restricts it to flags
+    declared in some quest's variable table — an undeclared reference may still be written by engine
+    gameplay this tool cannot see, and must keep its concession. Default empty = quest-local
+    behaviour, unchanged."""
     read_in_guards: set[str] = set()
     for stage in logic.stage_logic:
         read_in_guards |= _refs_of(stage.precondition)
     for branch in logic.branches:
         read_in_guards |= _refs_of(branch.condition)
-    return read_in_guards - _written_flags(logic)
+    return read_in_guards - _written_flags(logic) - provably_never_written
 
 
 # --------------------------------------------------------------------------------------------------
@@ -225,19 +236,15 @@ def _key(mapping: dict[str, Value]) -> StateKey:
     return tuple(sorted(mapping.items()))
 
 
-def _apply_ranged(
-    state: WorldState, var: str, op: str, value: Value, int_ranges: dict[str, tuple[int, int]]
-) -> None:
-    """Apply an effect, saturating into a declared int range when one is given. A declared range
-    turns an ``inc``/``dec`` counter into a finite domain so enumeration terminates (a strong proof
-    becomes possible); with no declared range this is exactly ``WorldState.apply``."""
-    state.apply(var, op, value)
-    bounds = int_ranges.get(var)
-    if bounds is not None:
-        current = state.values.get(var)
-        if isinstance(current, int) and not isinstance(current, bool):
-            lo, hi = bounds
-            state.values[var] = max(lo, min(hi, current))
+def _outside_int_ranges(
+    values: dict[str, Value], int_ranges: dict[str, tuple[int, int]]
+) -> bool:
+    """An exploration limit must not mutate the concrete transition relation."""
+    for var, (lo, hi) in int_ranges.items():
+        value = values.get(var)
+        if isinstance(value, int) and not isinstance(value, bool) and not lo <= value <= hi:
+            return True
+    return False
 
 
 def _build_state_graph(
@@ -303,6 +310,12 @@ def _build_state_graph(
         graph.node_state[node] = dict(pre_state_map)
         graph.witness.setdefault(node, list(witness))
 
+        if _outside_int_ranges(pre_state_map, int_ranges):
+            # Retain the actual reachable boundary state for sound AG/EF evidence, but
+            # do not expand it. Absence of further states can no longer prove a property.
+            graph.truncated = True
+            continue
+
         pos = node[0]
         sl = stage_logic.get(pos)
         pre_state = WorldState(dict(pre_state_map))
@@ -314,7 +327,7 @@ def _build_state_graph(
         if sl:
             for effect in sl.effects_on_complete:
                 if effect.var in keep:
-                    _apply_ranged(post_state, effect.var, effect.op, effect.value, int_ranges)
+                    post_state.apply(effect.var, effect.op, effect.value)
         post_map = _project(post_state, keep)
 
         outgoing = branches_from.get(pos, [])
@@ -332,6 +345,8 @@ def _build_state_graph(
             else:  # linear completion at the last stage
                 graph.can_terminate.add(node)
                 graph.terminal_states.append((dict(post_map), list(witness), pos))
+                if _outside_int_ranges(post_map, int_ranges):
+                    graph.truncated = True
             continue
 
         satisfiable = [b for b in outgoing if _truthy(post_state, b.condition)]
@@ -343,9 +358,12 @@ def _build_state_graph(
                 term_state = WorldState(dict(post_map))
                 for effect in branch.effects:
                     if effect.var in keep:
-                        _apply_ranged(term_state, effect.var, effect.op, effect.value, int_ranges)
+                        term_state.apply(effect.var, effect.op, effect.value)
+                terminal_map = _project(term_state, keep)
+                if _outside_int_ranges(terminal_map, int_ranges):
+                    graph.truncated = True
                 graph.terminal_states.append(
-                    (_project(term_state, keep), [*witness, branch.id], pos)
+                    (terminal_map, [*witness, branch.id], pos)
                 )
                 continue
             if branch.to_stage not in stage_set:  # dangling ref → dead state
@@ -357,7 +375,7 @@ def _build_state_graph(
             branch_state = WorldState(dict(post_map))
             for effect in branch.effects:
                 if effect.var in keep:
-                    _apply_ranged(branch_state, effect.var, effect.op, effect.value, int_ranges)
+                    branch_state.apply(effect.var, effect.op, effect.value)
             succ_map = _project(branch_state, keep)
             succ = (branch.to_stage, _key(succ_map))
             graph.adjacency[node].add(succ)
@@ -430,16 +448,21 @@ def _trap_block_refs(quest: Quest, node: Node, entry_state: dict[str, Value]) ->
 
 
 def _classify_dead_region(
-    quest: Quest, graph: _Graph, dead: list[Node], base: TemporalResult
+    quest: Quest,
+    graph: _Graph,
+    dead: list[Node],
+    base: TemporalResult,
+    provably_never_written: frozenset[str] = frozenset(),
 ) -> TemporalResult:
     """Decide, over an exhaustively-explored quest with a non-empty dead set, whether it is a sound
     soft-lock or must be withheld. A dead-end is a SOUND soft-lock only when the flags that seal it
-    are all written by the quest itself; if any trap depends on an external input flag (a
-    dialogue-set or cross-quest flag the quest never writes), the owning layer may clear the block,
-    so a single-quest verdict is withheld rather than reported as a false positive."""
+    are all *decidable*: written by the quest itself, or — given ``provably_never_written`` from the
+    world-level cross-reference — written by nothing at all. If any trap still depends on a flag
+    some other layer may own (a dialogue-set or cross-quest flag), the owning layer may clear the
+    block, so a single-quest verdict is withheld rather than reported as a false positive."""
     logic = quest.logic
     assert logic is not None
-    inputs = _external_input_flags(logic)
+    inputs = _external_input_flags(logic, provably_never_written)
     # Trap sources = dead nodes with no successor (blocked precondition / deadlock / dangling only);
     # every other dead node inherits its deadness from one of these.
     trap_sources = [n for n in dead if not graph.adjacency.get(n)]
@@ -452,8 +475,14 @@ def _classify_dead_region(
         n for n in trap_sources
         if not (_trap_block_refs(quest, n, graph.node_state[n]) & inputs)
     ]
-    if sealed:  # a genuine dead-end sealed by quest-controlled flags → a sound soft-lock
+    if sealed:  # a genuine dead-end sealed by decidable flags → a sound soft-lock
         worst = min(sealed, key=_key)
+        # Which blockers only became decidable through world knowledge: naming them turns a bare
+        # "there is a soft-lock" into an actionable "nothing anywhere sets this flag", which is a
+        # different repair (write it somewhere) from a quest-local trap (change this branch).
+        world_sealed = sorted(
+            _trap_block_refs(quest, worst, graph.node_state[worst]) & provably_never_written
+        )
         base.holds = False
         base.status = SpecStatus.VIOLATED
         base.strong = True
@@ -462,6 +491,11 @@ def _classify_dead_region(
         base.counterexample_detail = (
             f"在阶段 '{worst[0]}' 存在一个可达状态，从该状态再也走不到任何结局（软锁 / 死局）。"
         )
+        if world_sealed:
+            base.counterexample_detail += (
+                f" 挡住它的 {'、'.join(world_sealed)} 在全世界范围内没有任何一处会写入，"
+                "所以没有任何一层能来解开这个卡死。"
+            )
         base.message = "检测到软锁：存在无法通关的可达状态。"
         return base
 
@@ -490,12 +524,17 @@ def check_soft_lock(
     *,
     max_states: int = _DEFAULT_MAX_STATES,
     max_depth: int = _DEFAULT_MAX_DEPTH,
+    provably_never_written: frozenset[str] = frozenset(),
 ) -> TemporalResult:
     """``AG EF ending`` — decide whether every reachable state can still reach some quest ending.
 
     A violation (a reachable soft-lock state) is reported with the branch-id witness reaching it; it
     is sound only when the exploration was exhaustive (a truncated run cannot prove a state has NO
     onward ending, so a soft-lock verdict under truncation is withheld and reported as weak).
+
+    ``provably_never_written`` is the world's answer to "could another layer clear this block?" —
+    pass :meth:`owcopilot.logic.xref.FlagXref.provably_never_written` to stop withholding on flags
+    nothing in the world ever writes. Omitted, the check stays quest-local exactly as before.
     """
     spec = TemporalSpec(
         id="soft_lock", pattern=PropertyPattern.AG_EF_ENDING, provenance="builtin",
@@ -532,7 +571,7 @@ def check_soft_lock(
             base.strong = False
             base.message = "探索在边界内截断，疑似软锁无法证明为真正死局；结论降级为边界内未证。"
             return base
-        return _classify_dead_region(quest, graph, dead, base)
+        return _classify_dead_region(quest, graph, dead, base, provably_never_written)
 
     if graph.truncated:
         base.status = SpecStatus.NO_COUNTEREXAMPLE_IN_BOUND
@@ -550,11 +589,20 @@ def check_temporal_spec(
     *,
     max_states: int = _DEFAULT_MAX_STATES,
     max_depth: int = _DEFAULT_MAX_DEPTH,
+    provably_never_written: frozenset[str] = frozenset(),
 ) -> TemporalResult:
     """Decide ``spec`` against ``quest``. ``AG_EF_ENDING`` routes to :func:`check_soft_lock`;
-    ``AG``/``EF`` evaluate the sliced reachable state graph and return an honest verdict."""
+    ``AG``/``EF`` evaluate the sliced reachable state graph and return an honest verdict.
+
+    ``provably_never_written`` only affects the soft-lock pattern (see :func:`check_soft_lock`);
+    ``AG``/``EF`` decide over the reachable state graph and never withhold on flag ownership."""
     if spec.pattern is PropertyPattern.AG_EF_ENDING:
-        result = check_soft_lock(quest, max_states=max_states, max_depth=max_depth)
+        result = check_soft_lock(
+            quest,
+            max_states=max_states,
+            max_depth=max_depth,
+            provably_never_written=provably_never_written,
+        )
         return result.model_copy(update={"spec_id": spec.id})
 
     logic = quest.logic

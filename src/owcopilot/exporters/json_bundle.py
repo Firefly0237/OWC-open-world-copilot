@@ -6,21 +6,29 @@ that any importer or MCP workflow consumes without a live editor. Localization t
 CSV + XLIFF 1.2 (the CAT/TMS interchange standard). This is intentionally NOT a per-engine code
 generator: engine schemas differ project to project, so the value is clean, verifiable data + the
 standard localization format — not bespoke scripts for a specific runtime.
+
+Two opt-in, engine-agnostic planning artifacts (F1/N8) sit alongside the bundle: a multi-sheet
+``planning_workbook.xlsx`` (``planning_workbook=True``, see ``xlsx_workbook.py``) and a
+``planning_notes.docx`` (``planning_notes=True``, see ``docx_notes.py``). Both default off, so
+every pre-existing call site's three-file output is unchanged.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from pathlib import Path
 
 from ..content.hash import content_hash
 from ..content.models import ContentBundle
+from .docx_notes import write_planning_notes
 from .models import EngineTarget, ExportedFile, ExportManifest
 from .unity_localization import UnityLocalizationSummary, write_unity_localization
 from .unity_manifest import write_unity_manifest
-from .unreal_datatable import export_unreal_datatables
+from .unreal_datatable import AuditFindingInput, export_unreal_datatables
 from .xliff import write_localization_csv, write_localization_xliff
+from .xlsx_workbook import write_planning_workbook
 
 _UNREAL_SUBDIR = "unreal"
 _UNITY_SUBDIR = "unity"
@@ -33,6 +41,9 @@ def export_content_bundle(
     target_engine: EngineTarget | str = EngineTarget.GENERIC,
     unity_localization: bool = False,
     row_struct_map: dict[str, dict[str, str]] | None = None,
+    planning_workbook: bool = False,
+    planning_notes: bool = False,
+    review_findings: Iterable[AuditFindingInput] = (),
 ) -> ExportManifest:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -50,6 +61,19 @@ def export_content_bundle(
         write_localization_xliff(bundle, output / "localized_texts.xlf")
         files.append(_file_entry(output, "localized_texts.csv", "localization_csv"))
         files.append(_file_entry(output, "localized_texts.xlf", "localization_xliff"))
+
+    # Planning materials (F1/N8): engine-agnostic, so written once regardless of target_engine —
+    # a planner working in GENERIC, UNREAL or UNITY mode gets the same workbook/notes. Both opt-in
+    # and default False, so every pre-existing call site keeps the exact same three-file output
+    # (the golden-fixture byte tests are the sentinel).
+    if planning_workbook:
+        files.append(write_planning_workbook(bundle, output / "planning_workbook.xlsx"))
+    if planning_notes:
+        files.append(
+            write_planning_notes(
+                bundle, output / "planning_notes.docx", review_findings=review_findings
+            )
+        )
 
     # UNREAL target is a superset: keep the generic bundle above byte-for-byte, then add the UE
     # DataTable projection under unreal/. Preflight may raise UnrealExportError (guided) before any

@@ -132,7 +132,36 @@ class ContextPackBuilder:
         anchor_bundle = query_bundles.get(anchor) if query_bundles else None
         ranked = self._rerank(anchor, fused, anchor_bundle=anchor_bundle) if self.rerank else fused
         trimmed = trim_hits_to_budget(ranked, budget_tokens=budget_tokens)
-        return ContextPack(query=anchor, budget_tokens=budget_tokens, hits=trimmed)
+        reasons = self._degradation_reasons(ranked)
+        return ContextPack(
+            query=anchor,
+            budget_tokens=budget_tokens,
+            hits=trimmed,
+            degraded=bool(reasons),
+            degradation_reasons=reasons,
+        )
+
+    def _degradation_reasons(self, ranked: list[RetrievalHit]) -> list[str]:
+        """Return stable public reason codes, never provider/model exception messages."""
+        reasons: list[str] = []
+        if self.vector is not None:
+            embedder = self.vector.embedder
+            if getattr(embedder, "degraded", False):
+                reasons.append(
+                    str(getattr(embedder, "degradation_reason", None) or "embedder_degraded")
+                )
+        if self.neural_reranker is not None and getattr(
+            self.neural_reranker, "degraded", False
+        ):
+            reasons.append(
+                str(
+                    getattr(self.neural_reranker, "degradation_reason", None)
+                    or "neural_reranker_degraded"
+                )
+            )
+        elif any(hit.source == "reranked_lexical_fallback" for hit in ranked):
+            reasons.append("neural_reranker_degraded")
+        return list(dict.fromkeys(reasons))
 
     def _rerank(
         self,

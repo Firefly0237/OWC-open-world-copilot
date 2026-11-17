@@ -228,16 +228,39 @@ class VectorRetriever:
             scores[ref] = float(stored @ q)
         return scores
 
-    def search(self, query: str | QueryBundle, *, limit: int = 10) -> list[RetrievalHit]:
+    def search(
+        self,
+        query: str | QueryBundle,
+        *,
+        limit: int = 10,
+        allowed_refs: set[str] | None = None,
+    ) -> list[RetrievalHit]:
+        """Recall top-k within an optional candidate set, never filter a global top-k.
+
+        Backends do not share a filtered-KNN API, but all expose authoritative fp32 vectors.
+        Explicit selections use those vectors for an exact subset scan before truncation.
+        ``None`` preserves the existing backend/tier; an empty set recalls nothing.
+        """
         if not self._rows or self._backend is None:
+            return []
+        if allowed_refs is not None and not allowed_refs:
             return []
         q = self._query_vector(query)
         # The backend returns up to ``limit`` (ref, score) pairs already ordered by score desc,
         # ref asc on ties. Apply the retriever's ``score > 0`` rule and materialise hits; because
         # the backend order matches the historical stable argsort, the kept set is identical to the
         # previous "argsort, break on first score <= 0, cap at limit" walk.
-        scored = self._backend.search(q, limit=limit)
         rows_by_ref = {row.ref: row for row in self._rows}
+        if allowed_refs is None:
+            scored = self._backend.search(q, limit=limit)
+        else:
+            scored = []
+            for ref in allowed_refs.intersection(rows_by_ref):
+                vector = self._backend.vector_for(ref)
+                if vector is not None and vector.shape[0] == q.shape[0]:
+                    scored.append((ref, float(vector @ q)))
+            scored.sort(key=lambda item: (-item[1], item[0]))
+            scored = scored[:limit]
         hits: list[RetrievalHit] = []
         for ref, score in scored:
             if score <= 0:

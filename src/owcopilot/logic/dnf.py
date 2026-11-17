@@ -11,10 +11,10 @@ two variables (``a == b``), a comparison between two literals, or one that blows
 group/atom caps below — is reported as **not compilable** rather than guessed at: the caller keeps
 the original source string as the fallback (see ``DnfResult.compilable``).
 
-Correctness is verified by a differential test (``tests/test_logic_dnf.py``): every compilable
-expression that appears in the existing test suite's fixtures is checked against the production
-evaluator (``logic/semantics.evaluate``) across the full combination of test values for its
-variables — bool variables exhaustively, int variables at their comparison boundaries.
+Correctness is verified by a differential test (``tests/domain/test_logic_dnf.py``): every
+compilable expression that appears in the existing test suite's fixtures is checked against the
+production evaluator (``logic/semantics.evaluate``) across the full combination of test values
+for its variables — bool variables exhaustively, int variables at their comparison boundaries.
 """
 
 from __future__ import annotations

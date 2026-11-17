@@ -16,6 +16,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from .content.models import ContentBundle
+from .storage.atomic_file import atomic_write_text, read_json_file
 
 
 class LocStatus(str, Enum):
@@ -109,10 +110,13 @@ def build_localization_overview(
     for text_key in sorted(present):
         here = present[text_key]
         per_locale = {}
+        per_assignee = {}
         for locale in targets:
             is_present = locale in here
             st = status_of(state, text_key, locale, present=is_present)
             per_locale[locale] = st.value
+            entry = state.entries.get(_slot(text_key, locale))
+            per_assignee[locale] = entry.assignee if entry is not None else ""
             by_status[st.value] = by_status.get(st.value, 0) + 1
             if not is_present:
                 missing_total += 1
@@ -122,6 +126,9 @@ def build_localization_overview(
                 "present_locales": sorted(here),
                 "missing_locales": [loc for loc in targets if loc not in here],
                 "status": per_locale,
+                # Additive field: legacy consumers keep their existing overview shape while
+                # assignment-aware clients can restore the server ledger after every refresh.
+                "assignee": per_assignee,
             }
         )
     return {
@@ -140,13 +147,13 @@ class LocStore:
     def load(self) -> LocState:
         if not self.path.exists():
             return LocState()
-        return LocState.model_validate_json(self.path.read_text(encoding="utf-8"))
+        return LocState.model_validate(read_json_file(self.path))
 
     def save(self, state: LocState) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
+        atomic_write_text(
+            self.path,
             json.dumps(state.model_dump(mode="json"), ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
         )
 
 

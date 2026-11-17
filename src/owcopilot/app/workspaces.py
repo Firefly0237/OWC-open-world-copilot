@@ -17,24 +17,18 @@ from __future__ import annotations
 import io
 import json
 import os
-import re
 import zipfile
 from pathlib import Path
 from typing import Any
 
 from ..content.models import ContentBundle
 from ..content.store import ContentStore
+from ..trust.identifiers import resolve_path_segment, validate_path_segment
+from ..trust.security import PathSecurityError, resolve_under_root
 
 # Runtime state and local-only history are rebuildable / machine-local and stay out of world packs.
 _PACK_EXCLUDE_DIRS = {".owcopilot", ".git", ".snapshots"}
-_NAME_MAX_LEN = 48
-# Windows reserves these device names: a directory called CON/NUL/COM1 fails or behaves
-# pathologically (this app runs on win32), so a world can never be named one.
-_RESERVED_WIN_NAMES = (
-    {"CON", "PRN", "AUX", "NUL"}
-    | {f"COM{i}" for i in range(1, 10)}
-    | {f"LPT{i}" for i in range(1, 10)}
-)
+_NAME_MAX_LEN = 64
 # A world is JSON/text and realistically a few MB; cap decompressed pack size so a zip bomb
 # (tiny compressed, gigabytes inflated) can't exhaust memory/disk before any content check.
 _MAX_PACK_UNCOMPRESSED = 500 * 1024 * 1024
@@ -56,32 +50,40 @@ def worlds_home(base: str | Path | None = None) -> Path:
 
 
 def sanitize_world_name(name: str) -> str:
-    """A world name doubles as its directory name: strip path-hostile characters but keep
-    CJK (Windows and POSIX are both fine with it)."""
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(name)).strip().strip(".")
-    cleaned = re.sub(r"\s+", " ", cleaned)[:_NAME_MAX_LEN].strip()
-    if not cleaned:
-        raise ValueError("世界名称不能为空（或全是非法字符）。")
-    # Windows reserves device names regardless of extension (CON, CON.txt, ...), so check the stem.
-    if cleaned.split(".")[0].upper() in _RESERVED_WIN_NAMES:
-        raise ValueError(f"「{cleaned}」是系统保留名称，请换一个。")
-    return cleaned
+    """Validate a world directory name and return it byte-for-byte unchanged.
+
+    The public name is also its identifier.  Silently deleting hostile characters used to create
+    aliases (``../evil`` and ``evil`` became the same world), so invalid input now fails closed.
+    """
+    return validate_path_segment(name, label="世界名", max_length=_NAME_MAX_LEN)
+
+
+def managed_world_path(name: str, *, base: str | Path | None = None) -> Path:
+    """Resolve one managed-world name as a direct, non-symlink child of ``worlds_home``."""
+    return resolve_path_segment(worlds_home(base), name, label="世界名", max_length=_NAME_MAX_LEN)
 
 
 def list_managed_worlds(base: str | Path | None = None) -> list[dict[str, Any]]:
     """Managed worlds, most recently modified first."""
-    home = worlds_home(base)
+    home = worlds_home(base).expanduser().resolve()
     if not home.exists():
         return []
-    worlds = [
-        {"name": child.name, "path": str(child)} for child in home.iterdir() if child.is_dir()
-    ]
+    worlds: list[dict[str, Any]] = []
+    for child in home.iterdir():
+        try:
+            resolved = managed_world_path(child.name, base=home)
+        except ValueError:
+            # A symlink/junction is not a managed world and must not turn listing into an external
+            # directory oracle. Invalid legacy entries remain on disk for manual recovery.
+            continue
+        if resolved.is_dir():
+            worlds.append({"name": child.name, "path": str(resolved)})
     worlds.sort(key=lambda w: Path(w["path"]).stat().st_mtime, reverse=True)
     return worlds
 
 
 def create_managed_world(name: str, *, base: str | Path | None = None) -> Path:
-    target = worlds_home(base) / sanitize_world_name(name)
+    target = managed_world_path(name, base=base)
     if target.exists() and any(target.iterdir()):
         raise ValueError(f"世界「{target.name}」已存在。换个名字，或直接在列表里选中它。")
     target.mkdir(parents=True, exist_ok=True)
@@ -108,7 +110,7 @@ def open_managed_world(
     from ..pipeline.project import ProjectContext
 
     world_name = sanitize_world_name(name)
-    world_dir = worlds_home(base) / world_name
+    world_dir = managed_world_path(world_name, base=base)
     if not world_dir.exists() or not world_dir.is_dir():
         raise ValueError(f"世界「{world_name}」不存在。请先创建或导入它。")
     return ProjectContext.open(
@@ -122,17 +124,25 @@ def open_managed_world(
 
 def export_world_zip(root: str | Path) -> bytes:
     """Pack a content root into a portable world pack (runtime/.git excluded)."""
-    source = Path(root)
+    source = Path(root).expanduser().resolve()
     if not source.exists():
         raise FileNotFoundError(f"content root does not exist: {source}")
+    # Resolve and validate the full read set before opening the archive writer. A file/directory
+    # symlink inside a world must not turn a pack download into an outside-root file disclosure.
+    portable_files: list[tuple[Path, Path]] = []
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source)
+        if relative.parts and relative.parts[0] in _PACK_EXCLUDE_DIRS:
+            continue
+        resolved = resolve_under_root(source, path)
+        if resolved != path:
+            raise PathSecurityError(f"world pack entry {relative} is a symlink or path alias")
+        if resolved.is_file():
+            portable_files.append((relative, resolved))
+
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as pack:
-        for path in sorted(source.rglob("*")):
-            if not path.is_file():
-                continue
-            relative = path.relative_to(source)
-            if relative.parts and relative.parts[0] in _PACK_EXCLUDE_DIRS:
-                continue
+        for relative, path in portable_files:
             pack.writestr(str(relative).replace("\\", "/"), path.read_bytes())
     return buffer.getvalue()
 
@@ -152,7 +162,7 @@ def import_world_zip(data: bytes, name: str, *, base: str | Path | None = None) 
     Defenses: zip-slip members are rejected outright; after extraction the directory must
     load as a content bundle (and contain at least one object) or it is rolled back.
     """
-    target = worlds_home(base) / sanitize_world_name(name)
+    target = managed_world_path(name, base=base)
     if target.exists() and any(target.iterdir()):
         raise ValueError(f"世界「{target.name}」已存在。换个名字再导入。")
     try:
@@ -206,10 +216,7 @@ def delete_managed_world(name: str, *, base: str | Path | None = None) -> None:
     Destructive and irreversible, so it is fenced hard: the resolved target must be a DIRECT child
     of ``worlds_home`` — belt-and-suspenders over name sanitization, so no crafted name can ever
     point ``rmtree`` outside the managed-worlds folder."""
-    home = worlds_home(base).resolve()
-    target = (worlds_home(base) / sanitize_world_name(name)).resolve()
-    if target.parent != home:
-        raise ValueError("非法的世界名称，已拒绝删除。")
+    target = managed_world_path(name, base=base)
     if not target.exists() or not target.is_dir():
         raise ValueError(f"世界「{target.name}」不存在。")
     _remove_tree(target)

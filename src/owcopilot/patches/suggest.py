@@ -130,15 +130,14 @@ class PatchSuggestService:
     def as_candidate_provider(
         self, *, max_llm_calls: int, budget_tokens: int = 600
     ) -> CandidateProvider:
-        """Expose the LLM proposer as a MCTS ``CandidateProvider`` (LATS — Zhou et al. 2024,
-        arXiv:2310.04406: an LM proposer that *widens* the search's move set).
+        """Expose model-proposed repair moves through a MCTS ``CandidateProvider``.
 
         Each call returns the deterministic fixers PLUS model-proposed candidates for the issue.
         The shared move generator (:func:`owcopilot.patches.search.applicable_repair_moves`) then
         shadow-validates and non-worsening-prunes every one, so the model path needs no new safety
         code — a worsening or malformed model candidate is dropped exactly like any other.
 
-        Model cost is explicitly bounded LATS-style by two knobs: a hard ``max_llm_calls`` cap on
+        The proposer uses two bounds: a hard ``max_llm_calls`` cap on
         proposer calls, and a per-``(issue, bundle-state)`` cache so re-visiting the same MCTS state
         never re-pays for a completion. Once the cap is spent the provider falls back to the
         deterministic fixers, each marked ``budget-exhausted`` — an explicit, visible bound, never a
@@ -160,7 +159,7 @@ class PatchSuggestService:
             if cached is not None:  # same MCTS state re-visited: reuse, never re-pay the model
                 return cached
             deterministic = deterministic_candidates(issue, bundle)
-            if calls_made >= max_llm_calls:  # LATS budget spent: bounded fallback, marked visibly
+            if calls_made >= max_llm_calls:  # Proposer budget spent; fallback remains explicit.
                 result = _mark_budget_exhausted(deterministic)
             else:
                 calls_made += 1

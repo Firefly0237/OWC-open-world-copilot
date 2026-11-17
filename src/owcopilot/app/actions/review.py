@@ -19,9 +19,13 @@ from ...assist.lessons import extract_lessons_from_report
 from ...assist.offline import OfflineQuestDraftProvider
 from ...assist.review_queue import ReviewItemType, ReviewQueue
 from ...content.models import ContentBundle, DialogueTree, Entity, Quest, Relation
+from ...pipeline.project import ProjectContext
 from ...pipeline.review import decide_review_item
 from ...pipeline.review import get_review_item_context_action as _get_review_item_context_action
+from ...storage.world_lock import serialized_world_write
 from ...telemetry import llm_step, summarize_workflow
+from ...trust.identifiers import validate_path_segment
+from ...trust.security import resolve_under_root
 from ...worldgen import (
     OfflineWorldExpandProvider,
     OfflineWorldSeedProvider,
@@ -49,6 +53,7 @@ def list_review_items_action(
         }
 
 
+@serialized_world_write
 def decide_review_action(
     content_root: str | Path,
     *,
@@ -58,7 +63,25 @@ def decide_review_action(
     sqlite_path: str | None = None,
 ) -> dict[str, Any]:
     with _project(content_root, sqlite_path) as project:
-        outcome = decide_review_item(project, item_id, decision=decision, operator=operator)
+        item = ReviewQueue(project.sqlite_store).get(item_id)
+        scope = item.payload.get("creative_scope")
+        if decision == "accepted" and isinstance(scope, dict):
+            version = validate_path_segment(scope.get("version"), label="版本")
+            world_id = validate_path_segment(scope.get("world_id"), label="世界")
+            root = project.content_store.root.resolve()
+            resolve_under_root(root, root / "versions" / version)
+            scoped = ProjectContext.open(
+                root,
+                sqlite_path=project.sqlite_store.path,
+                world_id=world_id,
+                version=version,
+            )
+            try:
+                outcome = decide_review_item(scoped, item_id, decision=decision, operator=operator)
+            finally:
+                scoped.close()
+        else:
+            outcome = decide_review_item(project, item_id, decision=decision, operator=operator)
         return {
             "decision": outcome.decision,
             "item": outcome.item.model_dump(mode="json"),
@@ -86,19 +109,38 @@ def reviewer_calibration_action(
     content_root: str | Path,
     *,
     sqlite_path: str | None = None,
+    write_lessons: bool = False,
 ) -> dict[str, Any]:
     """How well does the critic's verdict track the human's final accept/reject? Surfaces the
     false-pass blind spot (critic said pass, human rejected) over the resolved review history."""
     with _project(content_root, sqlite_path) as project:
         resolved = ReviewQueue(project.sqlite_store).list_resolved()
         report = build_calibration_report(resolved)
-        # IN-3 BE-1: extract and persist lessons from false-pass data so they can be
-        # injected into future drafts. This is the write trigger for the lesson archive.
-        lessons_written = extract_lessons_from_report(report, project.sqlite_store)
+        # A read must stay read-only. Lesson distillation is explicit because it changes future
+        # prompts; CLI ``memory-report --write-lessons`` and POST calibration:learn opt into it.
+        lessons_written = (
+            extract_lessons_from_report(report, project.sqlite_store) if write_lessons else 0
+        )
         return {
             **report.model_dump(mode="json"),
             "lessons_written": lessons_written,
             "cost_budget": _deterministic_cost_budget("review_calibration"),
+        }
+
+
+def list_lessons_action(
+    content_root: str | Path,
+    *,
+    sqlite_path: str | None = None,
+    include_revoked: bool = False,
+) -> dict[str, Any]:
+    """List the cross-session lessons that can steer future generation prompts."""
+    with _project(content_root, sqlite_path) as project:
+        lessons = project.sqlite_store.list_lessons(include_revoked=include_revoked)
+        return {
+            "count": len(lessons),
+            "lessons": lessons,
+            "cost_budget": _deterministic_cost_budget("lesson_list"),
         }
 
 

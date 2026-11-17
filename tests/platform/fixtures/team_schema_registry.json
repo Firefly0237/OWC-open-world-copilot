@@ -1,0 +1,355 @@
+{
+  "schema_version": 3,
+  "node": "N2.1",
+  "database": {
+    "engine": "PostgreSQL",
+    "version": "17.10",
+    "driver": "postgresql+psycopg",
+    "alembic_head": "n21_0001",
+    "image": "postgres:17.10-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394",
+    "pgvector_claim": "NOT_IMPLEMENTED"
+  },
+  "roles": {
+    "migration_owner": {
+      "name": "owcopilot_migration",
+      "required_attributes": [
+        "LOGIN",
+        "NOINHERIT",
+        "NOSUPERUSER",
+        "NOCREATEDB",
+        "NOCREATEROLE",
+        "NOREPLICATION",
+        "NOBYPASSRLS"
+      ],
+      "pg_auth_members_edges": {
+        "member_column": "FORBIDDEN",
+        "roleid_column": "FORBIDDEN"
+      },
+      "force_rls_policy": "USING (true) WITH CHECK (true)"
+    },
+    "runtime": {
+      "name": "owcopilot_app",
+      "required_attributes": [
+        "LOGIN",
+        "NOINHERIT",
+        "NOSUPERUSER",
+        "NOCREATEDB",
+        "NOCREATEROLE",
+        "NOREPLICATION",
+        "NOBYPASSRLS"
+      ],
+      "pg_auth_members_edges": {
+        "member_column": "FORBIDDEN",
+        "roleid_column": "FORBIDDEN"
+      },
+      "forbidden_capabilities": [
+        "OWNER",
+        "CREATE",
+        "TRUNCATE",
+        "REFERENCES",
+        "SET ROLE owcopilot_migration"
+      ]
+    }
+  },
+  "ownership_context": {
+    "transaction_local_only": true,
+    "transaction_timezone": "UTC",
+    "tenant_guc": "owcopilot.tenant_id",
+    "container_guc": "owcopilot.container_id",
+    "authentication_source": "memberships",
+    "guc_is_authentication": false
+  },
+  "contract_consumption": [
+    "ArtifactIdentity",
+    "OwnershipScope",
+    "ContentObjectVersion",
+    "RevisionMembership",
+    "ContentRevision",
+    "ReleasePointer",
+    "SourceSegment",
+    "IntakeRun",
+    "TriageVerdict"
+  ],
+  "global_control_tables": [
+    {
+      "name": "alembic_version",
+      "owner": "owcopilot_migration",
+      "tenant_data": false,
+      "rls_exemption": "global schema-head probe only",
+      "runtime_grants": ["SELECT"]
+    }
+  ],
+  "tables": [
+    {
+      "name": "tenants",
+      "migration": "n12_0001",
+      "ownership_scope": "tenant_only",
+      "scope_columns": ["tenant_id"],
+      "force_rls": true,
+      "runtime_policy": "tenants_ownership_scope",
+      "migration_owner_policy": "tenants_migration_owner",
+      "runtime_grants": ["SELECT"],
+      "immutable": false,
+      "positive_isolation_test": "tests/platform/test_team_pg_integration.py::test_membership_auth_same_tenant",
+      "negative_isolation_test": "tests/platform/test_team_pg_integration.py::test_membership_auth_cross_tenant_denied"
+    },
+    {
+      "name": "memberships",
+      "migration": "n12_0001",
+      "ownership_scope": "tenant_only",
+      "scope_columns": ["tenant_id"],
+      "force_rls": true,
+      "runtime_policy": "memberships_ownership_scope",
+      "migration_owner_policy": "memberships_migration_owner",
+      "runtime_grants": ["SELECT"],
+      "immutable": false,
+      "positive_isolation_test": "tests/platform/test_team_pg_integration.py::test_membership_auth_same_tenant",
+      "negative_isolation_test": "tests/platform/test_team_pg_integration.py::test_membership_auth_cross_tenant_denied"
+    },
+    {
+      "name": "containers",
+      "migration": "n12_0001",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "containers_ownership_scope",
+      "migration_owner_policy": "containers_migration_owner",
+      "runtime_grants": ["SELECT"],
+      "immutable": false,
+      "positive_isolation_test": "tests/platform/test_team_pg_integration.py::test_same_scope_canonical_round_trip",
+      "negative_isolation_test": "tests/platform/test_team_pg_integration.py::test_cross_container_isolation"
+    },
+    {
+      "name": "bootstrap_import_runs",
+      "migration": "n12_0001",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "bootstrap_import_runs_ownership_scope",
+      "migration_owner_policy": "bootstrap_import_runs_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT", "UPDATE"],
+      "immutable": false,
+      "state_machine": "building_to_committed_only",
+      "positive_isolation_test": "tests/platform/test_team_pg_integration.py::test_bootstrap_idempotent_replay",
+      "negative_isolation_test": "tests/platform/test_team_pg_integration.py::test_bootstrap_identity_fields_cannot_mutate"
+    },
+    {
+      "name": "legacy_archive_registry",
+      "migration": "n12_0001",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "legacy_archive_registry_ownership_scope",
+      "migration_owner_policy": "legacy_archive_registry_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT"],
+      "immutable": true,
+      "positive_isolation_test": "tests/platform/test_team_pg_integration.py::test_legacy_archive_registry_round_trip",
+      "negative_isolation_test": "tests/platform/test_team_pg_integration.py::test_legacy_archive_registry_is_immutable"
+    },
+    {
+      "name": "content_object_versions",
+      "migration": "n12_0002",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "content_object_versions_ownership_scope",
+      "migration_owner_policy": "content_object_versions_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT"],
+      "immutable": true,
+      "consumes_contract": "ContentObjectVersion",
+      "positive_isolation_test": "tests/platform/test_team_pg_integration.py::test_same_scope_canonical_round_trip",
+      "negative_isolation_test": "tests/platform/test_team_pg_integration.py::test_cross_tenant_object_version_rejected"
+    },
+    {
+      "name": "content_revisions",
+      "migration": "n12_0002",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "content_revisions_ownership_scope",
+      "migration_owner_policy": "content_revisions_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT"],
+      "immutable": true,
+      "consumes_contract": "ContentRevision",
+      "positive_isolation_test": "tests/platform/test_team_pg_integration.py::test_same_scope_canonical_round_trip",
+      "negative_isolation_test": "tests/platform/test_team_pg_integration.py::test_cross_tenant_revision_rejected"
+    },
+    {
+      "name": "revision_memberships",
+      "migration": "n12_0002",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "revision_memberships_ownership_scope",
+      "migration_owner_policy": "revision_memberships_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT"],
+      "immutable": true,
+      "consumes_contract": "RevisionMembership",
+      "positive_isolation_test": "tests/platform/test_team_pg_integration.py::test_same_scope_canonical_round_trip",
+      "negative_isolation_test": "tests/platform/test_team_pg_integration.py::test_membership_object_fk_rejects_cross_scope"
+    },
+    {
+      "name": "release_pointers",
+      "migration": "n12_0002",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "release_pointers_ownership_scope",
+      "migration_owner_policy": "release_pointers_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT", "UPDATE"],
+      "immutable": false,
+      "consumes_contract": "ReleasePointer",
+      "positive_isolation_test": "tests/platform/test_team_pg_integration.py::test_release_pointer_cas",
+      "negative_isolation_test": "tests/platform/test_team_pg_integration.py::test_cross_scope_release_pointer_rejected"
+    },
+    {
+      "name": "operation_events",
+      "migration": "n12_0002",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "operation_events_ownership_scope",
+      "migration_owner_policy": "operation_events_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT"],
+      "immutable": true,
+      "positive_isolation_test": "tests/platform/test_team_pg_integration.py::test_operation_event_written_with_revision",
+      "negative_isolation_test": "tests/platform/test_team_pg_integration.py::test_operation_event_update_delete_rejected"
+    },
+    {
+      "name": "source_artifacts",
+      "migration": "n21_0001",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "source_artifacts_ownership_scope",
+      "migration_owner_policy": "source_artifacts_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT", "UPDATE"],
+      "immutable": false,
+      "state_machine": "active_to_logically_deleted_only",
+      "positive_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_intake_tables_same_scope_round_trip",
+      "negative_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_source_artifact_logical_delete_state_machine"
+    },
+    {
+      "name": "artifact_versions",
+      "migration": "n21_0001",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "artifact_versions_ownership_scope",
+      "migration_owner_policy": "artifact_versions_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT"],
+      "immutable": true,
+      "consumes_contract": "ArtifactIdentity",
+      "positive_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_intake_tables_same_scope_round_trip",
+      "negative_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_all_immutable_tables_reject_update_and_delete"
+    },
+    {
+      "name": "intake_runs",
+      "migration": "n21_0001",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "intake_runs_ownership_scope",
+      "migration_owner_policy": "intake_runs_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT", "UPDATE"],
+      "immutable": false,
+      "consumes_contract": "IntakeRun",
+      "state_machine": "uploaded_or_processing_failed_to_segmented_or_pdf_handoff_then_awaiting_human_or_rejected",
+      "positive_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_intake_tables_same_scope_round_trip",
+      "negative_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_intake_run_state_machine"
+    },
+    {
+      "name": "source_segments",
+      "migration": "n21_0001",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "source_segments_ownership_scope",
+      "migration_owner_policy": "source_segments_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT"],
+      "immutable": true,
+      "consumes_contract": "SourceSegment",
+      "positive_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_intake_tables_same_scope_round_trip",
+      "negative_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_locator_constraints_fail_closed"
+    },
+    {
+      "name": "raw_triage_outputs",
+      "migration": "n21_0001",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "raw_triage_outputs_ownership_scope",
+      "migration_owner_policy": "raw_triage_outputs_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT"],
+      "immutable": true,
+      "positive_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_intake_tables_same_scope_round_trip",
+      "negative_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_raw_and_derived_triage_are_version_bound"
+    },
+    {
+      "name": "triage_verdicts",
+      "migration": "n21_0001",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "triage_verdicts_ownership_scope",
+      "migration_owner_policy": "triage_verdicts_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT"],
+      "immutable": true,
+      "consumes_contract": "TriageVerdict",
+      "positive_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_intake_tables_same_scope_round_trip",
+      "negative_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_raw_and_derived_triage_are_version_bound"
+    },
+    {
+      "name": "human_triage_decisions",
+      "migration": "n21_0001",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "human_triage_decisions_ownership_scope",
+      "migration_owner_policy": "human_triage_decisions_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT"],
+      "immutable": true,
+      "positive_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_intake_tables_same_scope_round_trip",
+      "negative_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_raw_and_derived_triage_are_version_bound"
+    },
+    {
+      "name": "rights_declarations",
+      "migration": "n21_0001",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "rights_declarations_ownership_scope",
+      "migration_owner_policy": "rights_declarations_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT"],
+      "immutable": true,
+      "positive_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_intake_tables_same_scope_round_trip",
+      "negative_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_all_immutable_tables_reject_update_and_delete"
+    },
+    {
+      "name": "allowed_uses",
+      "migration": "n21_0001",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "allowed_uses_ownership_scope",
+      "migration_owner_policy": "allowed_uses_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT"],
+      "immutable": true,
+      "positive_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_intake_tables_same_scope_round_trip",
+      "negative_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_all_immutable_tables_reject_update_and_delete"
+    },
+    {
+      "name": "lineage_anchors",
+      "migration": "n21_0001",
+      "ownership_scope": "tenant_container",
+      "scope_columns": ["tenant_id", "container_id"],
+      "force_rls": true,
+      "runtime_policy": "lineage_anchors_ownership_scope",
+      "migration_owner_policy": "lineage_anchors_migration_owner",
+      "runtime_grants": ["SELECT", "INSERT"],
+      "immutable": true,
+      "positive_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_intake_tables_same_scope_round_trip",
+      "negative_isolation_test": "tests/intake/test_n21_team_pg_integration.py::test_n21_all_immutable_tables_reject_update_and_delete"
+    }
+  ]
+}

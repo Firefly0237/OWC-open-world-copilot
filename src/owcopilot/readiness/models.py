@@ -38,6 +38,16 @@ class KindSummary(BaseModel):
     average_score: float
 
 
+class DanglingInspirationRef(BaseModel):
+    """One canon object whose ``metadata.inspiration_refs`` cites reference-library chunks that no
+    longer exist (source deleted, or a re-ingest reshuffled chunk boundaries) — a stale citation,
+    not a correctness bug: the object's own content is unaffected, but its "grounded in X" claim
+    can no longer be verified. See ``inspiration.lineage.dangling_inspiration_refs`` (N2.4 / B7)."""
+
+    object_ref: str
+    dangling_refs: list[str] = Field(default_factory=list)
+
+
 class ReadinessReport(BaseModel):
     """Project-level readiness snapshot — a planning-management dashboard, computed on demand."""
 
@@ -49,3 +59,7 @@ class ReadinessReport(BaseModel):
     ready_rate: float
     by_kind: list[KindSummary] = Field(default_factory=list)
     items: list[ItemReadiness] = Field(default_factory=list)
+    # Additive, opt-in: only populated when the caller passes known_reference_chunk_ids to
+    # assess_readiness(). Every existing caller that doesn't leaves this empty — unchanged
+    # behaviour, unchanged byte shape for anyone not asking for the check.
+    dangling_inspiration_refs: list[DanglingInspirationRef] = Field(default_factory=list)

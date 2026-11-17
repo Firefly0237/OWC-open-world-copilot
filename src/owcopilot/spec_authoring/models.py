@@ -10,10 +10,13 @@ validation, and a natural-language back-translation for the planner to confirm.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from ..logic.temporal import TemporalSpec
+
+SpecOperand = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
 
 class DraftPattern(str, Enum):
@@ -35,9 +38,14 @@ class SpecDraft(BaseModel):
     NOT real flag ids — grounding resolves them against the closed flag catalog; the model is never
     trusted to invent a flag id."""
 
+    model_config = ConfigDict(extra="forbid")
+
     pattern: DraftPattern
-    operands: list[str] = Field(default_factory=list)  # surface names the planner referred to
-    description: str = ""
+    operands: list[SpecOperand] = Field(
+        default_factory=list,
+        max_length=2,
+    )  # surface names the planner referred to
+    description: str = Field(default="", max_length=1200)
 
 
 class OperandStatus(str, Enum):

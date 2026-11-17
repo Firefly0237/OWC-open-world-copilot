@@ -9,7 +9,8 @@ flips it back with no condition gating on that variable. See the class docstring
 
 消息与建议动作全部中文化、面向策划：不出现蛇形字段名/类名等代码标识符，只保留对象 id、节点 id 与
 内容里本来就有的 DSL 字面量（如 ``rep:faction_id``、``quest:x.done``）。建议动作一律由本文件内的
-确定性字符串拼接生成，不调用任何模型——参见 ``docs/研究/可执行报告改造_计划.md`` 的纪律。"""
+确定性字符串拼接生成，不调用任何模型——参见
+``tests/domain/test_audit_report_wording.py`` 的纪律。"""
 
 from __future__ import annotations
 

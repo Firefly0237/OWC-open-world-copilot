@@ -59,10 +59,10 @@ import os
 import sqlite3
 import threading
 from collections.abc import Generator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    pass  # only used for type annotations that are already strings
+    from opentelemetry.sdk.trace.export import SpanExporter
 
 _log = logging.getLogger(__name__)
 
@@ -253,7 +253,11 @@ def get_tracer(service_name: str | None = None) -> Any:
         # Use env-override if set, otherwise fall back to absolute default path.
         sqlite_path = os.getenv(_OTEL_SQLITE_PATH_ENV) or _default_sqlite_path()
         sqlite_exporter = SqliteSpanExporter(db_path=sqlite_path)
-        provider.add_span_processor(BatchSpanProcessor(sqlite_exporter))  # type: ignore[arg-type]
+        # The exporter deliberately avoids inheriting SpanExporter at import time so
+        # ``observe`` remains optional.  It implements that interface structurally.
+        provider.add_span_processor(
+            BatchSpanProcessor(cast("SpanExporter", sqlite_exporter))
+        )
 
         # Optional OTLP gRPC exporter
         endpoint = os.getenv(_OTEL_ENDPOINT_ENV, "")
@@ -339,7 +343,9 @@ def build_test_tracer(exporter: InMemoryExporter | None = None) -> tuple[Any, In
 
     resource = Resource.create({"service.name": "owcopilot-test"})
     provider = TracerProvider(resource=resource)
-    provider.add_span_processor(SimpleSpanProcessor(exporter))  # type: ignore[arg-type]
+    provider.add_span_processor(
+        SimpleSpanProcessor(cast("SpanExporter", exporter))
+    )
     tracer = provider.get_tracer("owcopilot-test")
     return tracer, exporter
 

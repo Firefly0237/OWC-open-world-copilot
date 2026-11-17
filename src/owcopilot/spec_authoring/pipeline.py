@@ -22,6 +22,7 @@ nothing else changes. Truth-deciding never depends on which translator is used.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Protocol
 
@@ -62,9 +63,7 @@ class SpecTranslator(Protocol):
 # --------------------------------------------------------------------------------------------------
 
 
-def translate_intent(
-    intent: str, quest, bundle, translator: SpecTranslator
-) -> TranslationOutcome:
+def translate_intent(intent: str, quest, bundle, translator: SpecTranslator) -> TranslationOutcome:
     """Run the full pipeline for one intent against one quest. Returns an auditable outcome; never
     mutates the quest and never auto-applies the spec (confirmation is a human step)."""
     from .grounding import build_symbol_catalog
@@ -74,7 +73,9 @@ def translate_intent(
 
     if draft.pattern is DraftPattern.UNSUPPORTED:
         return TranslationOutcome(
-            intent=intent, status=OutcomeStatus.UNSUPPORTED, draft=draft,
+            intent=intent,
+            status=OutcomeStatus.UNSUPPORTED,
+            draft=draft,
             message=(
                 "该意图不属于 A 档可判定的模式（状态不变式 / 可达 / 软锁）；"
                 "先序/响应等时序性质属 B 档，数值区间请直接声明 int 规约。"
@@ -86,26 +87,39 @@ def translate_intent(
     if len(groundings) < arity:
         got = len(groundings)
         return TranslationOutcome(
-            intent=intent, status=OutcomeStatus.REJECTED, draft=draft, groundings=groundings,
+            intent=intent,
+            status=OutcomeStatus.REJECTED,
+            draft=draft,
+            groundings=groundings,
             message=f"模式 {draft.pattern.value} 需要 {arity} 个符号，但只识别到 {got} 个。",
         )
     rejected = [g for g in groundings if g.status is not OperandStatus.GROUNDED]
     if rejected:
         return TranslationOutcome(
-            intent=intent, status=OutcomeStatus.REJECTED, draft=draft, groundings=groundings,
+            intent=intent,
+            status=OutcomeStatus.REJECTED,
+            draft=draft,
+            groundings=groundings,
             message="闭世界校验未通过：" + "；".join(g.note for g in rejected),
         )
 
     spec = _assemble_spec(intent, draft, groundings, quest)
     if spec is None:
         return TranslationOutcome(
-            intent=intent, status=OutcomeStatus.REJECTED, draft=draft, groundings=groundings,
+            intent=intent,
+            status=OutcomeStatus.REJECTED,
+            draft=draft,
+            groundings=groundings,
             message="组装后的规约表达式类型检查未通过（符号类型与模式不匹配）。",
         )
 
     return TranslationOutcome(
-        intent=intent, status=OutcomeStatus.NEEDS_CONFIRMATION, draft=draft, groundings=groundings,
-        spec=spec, back_translation=backtranslate_spec(spec, draft.pattern, groundings),
+        intent=intent,
+        status=OutcomeStatus.NEEDS_CONFIRMATION,
+        draft=draft,
+        groundings=groundings,
+        spec=spec,
+        back_translation=backtranslate_spec(spec, draft.pattern, groundings),
         message="已产出候选规约，请策划确认回译是否符合原意后再纳入审计。",
     )
 
@@ -135,8 +149,13 @@ def _assemble_spec(
             return None
         if type_errors(tree, symbols):
             return None
+    # A stable content-derived id allows one quest to carry several authored properties while an
+    # identical candidate keeps the same id and is therefore rejected as a duplicate on accept.
+    spec_fingerprint = hashlib.sha256(
+        f"{quest.id}\0{pattern.value}\0{expression}\0{intent.strip()}".encode()
+    ).hexdigest()[:12]
     return TemporalSpec(
-        id=f"{quest.id}_authored",
+        id=f"{quest.id}_authored_{spec_fingerprint}",
         pattern=pattern,
         expression=expression,
         description=draft.description or intent,
@@ -157,7 +176,7 @@ def backtranslate_spec(
     if pattern is DraftPattern.ALWAYS:
         return f"在任何可达状态下，『{names[0]}』始终成立。"
     if pattern is DraftPattern.REACHABLE:
-        return f"存在一条通关路径，使『{names[0]}』能够成立（可达）。"
+        return f"存在一个可达状态，使『{names[0]}』成立；这不表示该状态之后能够通关。"
     return "无论走到哪个可达状态，都仍存在一条走到某个结局的路径（不会卡死 / 无软锁）。"
 
 
@@ -165,7 +184,7 @@ def backtranslate_spec(
 # The LLM node — offline ($0, deterministic) and gateway-backed (real model) translators.
 # --------------------------------------------------------------------------------------------------
 
-_QUOTE_PAIRS = "「」『』“”\"\"【】《》"
+_QUOTE_PAIRS = '「」『』“”""【】《》'
 
 
 def _extract_quoted(intent: str) -> list[str]:
@@ -243,16 +262,23 @@ class GatewaySpecTranslator:
     def __init__(self, gateway: LLMGateway, *, task: str = "spec_translate") -> None:
         self.gateway = gateway
         self.task = task
+        self.used_fallback = False
+        self.fallback_reason = ""
 
     def translate(self, intent: str, catalog: SymbolCatalog) -> SpecDraft:
+        # One translator instance may be reused; report the state of this call, not a previous one.
+        self.used_fallback = False
+        self.fallback_reason = ""
         flags = ", ".join(sorted(catalog.flag_ids)) or "(该任务未声明 flag)"
         user = f"任务可用 flag：{flags}\n策划意图：{intent}\n请只输出 JSON。"
         try:
-            reply = self.gateway.complete(
-                task=self.task, system=_SYSTEM_PROMPT, user=user
-            )
+            reply = self.gateway.complete(task=self.task, system=_SYSTEM_PROMPT, user=user)
             return extract_validated(reply, SpecDraft)
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as exc:
+            self.used_fallback = True
+            # Category-only on purpose: raw provider/model output can contain project text and must
+            # not leak into telemetry or a browser error surface.
+            self.fallback_reason = f"invalid_structured_output:{type(exc).__name__}"
             return OfflineSpecTranslator().translate(intent, catalog)
 
 

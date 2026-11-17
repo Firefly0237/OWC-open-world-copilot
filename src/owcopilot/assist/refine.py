@@ -1,4 +1,4 @@
-# 通用 generate→critique→refine 循环：每个有 critic 的 assist 面复用它（Reflexion 式反思前馈）。
+# 通用 generate→critique→refine 循环：每个有 critic 的 assist 面复用它（跨轮反馈记忆 式反思前馈）。
 """A generic generate→critique→refine loop, reused by every assist surface that has a critic.
 
 The quest-draft and world-seed loops predate this and keep their own richer trail types; this is the
@@ -6,7 +6,7 @@ shared default for new content kinds (characters, dialogue). Adding the loop to 
 "supply an ``assess`` and a ``regenerate`` callback" — the honest-failure rule (an unparsable
 critique is never a pass; it sets ``auto_review_incomplete``) lives here, once.
 
-This is the **Reflexion** form (Shinn et al., 2023), not just Self-Refine: each round's critique is
+This is the **feedback-memory** form, not just critique-and-revision: each round's critique is
 distilled into a short verbal *reflection* that is accumulated in memory and fed forward into EVERY
 later attempt — so the generator sees the whole history of what went wrong, not only the latest
 round's fixes. The reflection memory rides the existing ``fixes`` channel (so no call site changes),
@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from pydantic import BaseModel
 
+from ..llm.execution_policy import LLMExecutionPolicy
 from .calibration import primary_failing_dimension
 from .critic import CritiqueResult
 
@@ -40,7 +41,8 @@ class RefineStep(BaseModel):
     auto_review_ok: bool  # False when this round's critique could not be parsed
     fixes: list[str] = []
     summary: str = ""
-    # The verbal self-reflection distilled from this round's critique (Reflexion memory). Carried
+    # The verbal self-reflection distilled from this round's critique (feedback-memory memory).
+    # Carried
     # forward into every later attempt so the generator learns from the whole history.
     reflection: str = ""
     # Primary failing dimension from this round's CritiqueResult.
@@ -68,6 +70,7 @@ def run_refine_loop(
     assess: Callable[[T], tuple[list[str], CritiqueResult]],
     regenerate: Callable[[T, list[str]], T],
     evaluator_gateway: LLMGateway | None = None,  # accepted for API symmetry; used by callers
+    execution_policy: LLMExecutionPolicy | None = None,
 ) -> RefineOutcome[T]:
     """Drive the loop. ``assess(artifact) -> (deterministic_gaps, critique)`` is the objective +
     subjective read; ``regenerate(artifact, fixes) -> artifact`` produces an improved version.
@@ -77,9 +80,10 @@ def run_refine_loop(
     scrutiny instead of being waved through."""
     artifact = initial
     trail: list[RefineStep] = []
-    reflections: list[str] = []  # accumulated verbal reflections (Reflexion episodic memory)
+    reflections: list[str] = []  # accumulated verbal reflections (feedback-memory episodic memory)
     auto_review_incomplete = False
-    for round_index in range(max_rounds):
+    rounds = 0 if execution_policy and not execution_policy.allow_refinement else max_rounds
+    for round_index in range(rounds):
         gaps, critique = assess(artifact)
         auto_review_incomplete = not critique.parse_ok
         fixes = list(critique.actionable_fixes())
@@ -109,7 +113,8 @@ def run_refine_loop(
         # This round revises: snapshot the artifact being replaced so the (rejected → chosen)
         # side of a preference pair stays recoverable (see RefineStep.artifact_before).
         trail[-1].artifact_before = snapshot_artifact(artifact)
-        # Feed the WHOLE reflection history forward (not just this round's fixes) — the Reflexion
+        # Feed the WHOLE reflection history forward (not just this round's fixes) — the
+        # feedback-memory
         # distinction. It rides the fixes channel so existing regenerate callbacks render it.
         artifact = regenerate(artifact, with_reflection_memory(fixes, reflections))
     return RefineOutcome(
@@ -132,7 +137,8 @@ def snapshot_artifact(artifact: Any) -> dict[str, Any]:
 
 
 def summarize_reflection(round_index: int, critique: CritiqueResult, gaps: list[str]) -> str:
-    """Distil one round's critique into a short verbal reflection (the Reflexion 'self-reflection').
+    """Distil one round's critique into a short verbal reflection (the feedback-memory
+    'self-reflection').
 
     Reused by the quest-draft and world-seed loops so every surface phrases its memory identically.
     """

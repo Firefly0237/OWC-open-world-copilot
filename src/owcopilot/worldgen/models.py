@@ -8,6 +8,10 @@ from pydantic import BaseModel, Field
 
 from ..content.models import ContentBundle
 
+# 溯源报告行现在住在素材线里（草稿链路也产它），这里保留原来的导入位置：
+# ``from ..worldgen.models import ReferenceReportItem`` 全仓照旧可用。
+from ..inspiration.report import ReferenceReportItem
+
 
 class WorldSeedBrief(BaseModel):
     """Only `idea` is required. Every other dimension is optional and, when left empty,
@@ -63,6 +67,8 @@ class WorldExpandBrief(BaseModel):
     angle: str = Field(default="", max_length=2000)
     reference_mode: str = "灵感参考"
     reference_query: str = ""
+    # Ground the batch in the inspiration library too (on by default, mirrors WorldSeedBrief).
+    use_references: bool = True
     # Expansion grounds on the existing world by default — that IS the point — so project-fact
     # retrieval is on unless a caller deliberately wants a blank-slate side batch.
     use_project_facts: bool = True
@@ -70,14 +76,6 @@ class WorldExpandBrief(BaseModel):
     npc_count: int = Field(default=4, ge=0, le=16)
     quest_count: int = Field(default=3, ge=0, le=12)
     notes: str = ""
-
-
-class ReferenceReportItem(BaseModel):
-    source_ref: str
-    source_title: str
-    used_for: str
-    transformation: str
-    excluded: list[str] = Field(default_factory=list)
 
 
 class ExpandGrounding(BaseModel):
@@ -130,15 +128,14 @@ class WorldRefineRound(BaseModel):
     fixes: list[str] = Field(default_factory=list)
     summary: str = ""
     auto_review_ok: bool = True  # False when this round's critique could not be parsed
-    # Verbal self-reflection distilled from this round (Reflexion memory), carried forward.
+    # Feedback note distilled from this round and carried into later attempts.
     reflection: str = ""
     # Primary failing dimension of this round's critique (blocker>minor>non-ok), so the
     # worldgen genesis/expand path feeds real dimensions into calibration like the assist paths do.
     # "general" when the critique was unparsable or had no failing dimension.
     primary_dim: str = "general"
-    # Snapshot of the quest batch THIS round's critique evaluated ({"quests": [...]}), set only
-    # when the round goes on to revise — the recoverable "rejected" side of a complete preference
-    # pair (see assist/dpo_export.py). None on pass/terminal rounds and on all old trails.
+    # Snapshot of the quest batch evaluated by this round's critique ({"quests": [...]}),
+    # retained when a revision replaces it. None on pass/terminal rounds and old trails.
     artifact_before: dict[str, Any] | None = None
 
 

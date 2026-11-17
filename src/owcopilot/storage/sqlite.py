@@ -41,6 +41,24 @@ logger = logging.getLogger(__name__)
 # later layers (scope filtering, version inheritance) only have to *use* it, not add it.
 DEFAULT_WORLD_ID = "default"
 DEFAULT_VERSION = "v1"
+_TELEMETRY_ERROR_CATEGORIES = frozenset(
+    {
+        "auth",
+        "permission",
+        "bad_request",
+        "config",
+        "output_budget",
+        "timeout",
+        "rate_limit",
+        "conflict",
+        "circuit_open",
+        "deadline",
+        "retry_budget",
+        "connection",
+        "server_error",
+        "provider_error",
+    }
+)
 
 
 class SQLiteStore:
@@ -286,6 +304,10 @@ class SQLiteStore:
                 cache_hit INTEGER NOT NULL,
                 latency_ms REAL NOT NULL,
                 cost_usd REAL NOT NULL,
+                gateway_invocations INTEGER NOT NULL DEFAULT 0,
+                transport_attempt_cap INTEGER NOT NULL DEFAULT 0,
+                success INTEGER NOT NULL DEFAULT 1,
+                error_category TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -306,6 +328,9 @@ class SQLiteStore:
                 source_type TEXT NOT NULL,
                 original_filename TEXT,
                 allowed_uses_json TEXT NOT NULL,
+                -- 收录人声明的权利归属（owcopilot.inspiration.models.Provenance）。默认值取最
+                -- 保守的那一项，与模型默认同向：没声明就按第三方参考对待。
+                provenance TEXT NOT NULL DEFAULT 'third_party_reference',
                 text_hash TEXT NOT NULL,
                 metadata_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -433,6 +458,12 @@ class SQLiteStore:
                 ON reflections(model_id);
             """
         )
+        # Reliability telemetry added retry-layer counters and sanitized failure status. Upgrade
+        # legacy project DBs in place; defaults preserve the meaning of every historical success.
+        self._ensure_column("telemetry", "gateway_invocations", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("telemetry", "transport_attempt_cap", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("telemetry", "success", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("telemetry", "error_category", "TEXT NOT NULL DEFAULT ''")
         # Older runtime DBs predate the rollback column; content files are the source of truth,
         # but runtime DBs should still upgrade in place rather than force a delete.
         self._ensure_column("patches", "rollback_ops_json", "TEXT")
@@ -452,7 +483,8 @@ class SQLiteStore:
         # Primary failing dimension from last critique (dimension-aware lessons).
         self._ensure_column("review_items", "critic_primary_dim", "TEXT")
         # Episodic exemplars (T18): JSON array of rejected-draft object_refs attached to a lesson,
-        # so a lesson carries concrete past instances (LangMem few-shot / Reflexion failure detail),
+        # so a lesson carries concrete past instances (LangMem few-shot / feedback-memory failure
+        # detail),
         # not only an aggregate count. Ensure-only (not in CREATE TABLE) mirrors critic_primary_dim;
         # legacy rows back-fill to NULL, i.e. today's exact behaviour.
         self._ensure_column("lessons", "exemplar_ids", "TEXT")
@@ -469,6 +501,33 @@ class SQLiteStore:
         # the columns above; legacy rows back-fill to NULL = live, so existing behaviour is intact.
         self._ensure_column("agent_run_embeddings", "deleted_at", "TEXT")
         self._ensure_column("reflections", "deleted_at", "TEXT")
+        # D1: recency-by-last-access: recency decays
+        # from a memory's most recent *access*, not its creation. NULL until the first recall touch
+        # (``agent.episodic``'s post-recall write-back); ``_recency()`` falls back to ``created_at``
+        # for a never-recalled row, so a legacy/never-recalled row's ranking is unchanged.
+        self._ensure_column("agent_run_embeddings", "last_accessed_at", "TEXT")
+        self._ensure_column("reflections", "last_accessed_at", "TEXT")
+        # D2: memory namespace (LangGraph long-term memory is namespace+key organized). The value is
+        # the store's own ``world_id`` — the project/world boundary already threaded through every
+        # other scoped table by ``ProjectContext`` — not a checkpointer ``thread_id``; see the
+        # "Namespace / scope" note in ``agent/episodic.py`` for why that alternative was rejected.
+        # Every legacy row back-fills to the canonical 'default' scope, so a single-world project's
+        # existing recall/capacity behaviour is unchanged.
+        self._ensure_column("agent_run_embeddings", "scope", "TEXT NOT NULL DEFAULT 'default'")
+        self._ensure_column("reflections", "scope", "TEXT NOT NULL DEFAULT 'default'")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_run_embeddings_scope "
+            "ON agent_run_embeddings(scope)"
+        )
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_reflections_scope ON reflections(scope)")
+        # D3: the audit-driven importance signal of a run — how many deterministic-checker verdicts
+        # it obtained and how large the findings/repairs those verdicts carried. Lifted out of the
+        # transcript at write time (``agent.history.persist_agent_run`` calls
+        # ``agent.episodic.run_audit_signal``), exactly like the other scalar columns, so recall
+        # never parses a transcript. NULL = no signal recorded (a row written before D3, or one
+        # saved by a caller that had no ``AgentResult``); ``agent.episodic._run_importance`` then
+        # falls back to the pre-D3 step-count proxy, so a legacy row's ranking is unchanged.
+        self._ensure_column("agent_runs", "audit_signal", "INTEGER")
         # Hierarchical GraphRAG (T13) added a parent link + level to community reports. Older
         # runtime DBs predate them; the NULL parent / 0 level defaults back-fill existing
         # single-level rows to their (correct) flat semantics, so a legacy index keeps working.
@@ -488,6 +547,13 @@ class SQLiteStore:
             # open/reload, so clear it once here rather than back-filling fingerprints for rows we
             # are about to re-diff anyway.
             self.conn.execute("DELETE FROM graph_edges")
+        # 素材来源归属（B2）。旧库原地升级：ALTER 后的历史行一律拿到最保守的默认值，下一次
+        # sync 会与磁盘上的素材元数据比对，声明为自有/已授权的那些自动改正过来（
+        # ``_reference_source_unchanged`` 把这一列也纳入比对，正是为了让这次改正发生）。
+        # 必须排在下面的 PK 重建之前——重建按 PRAGMA 列清单逐列复制，列不存在就带不过去。
+        self._ensure_column(
+            "reference_sources", "provenance", "TEXT NOT NULL DEFAULT 'third_party_reference'"
+        )
         # The (world_id, version) scope columns. Older runtime DBs predate them,
         # so upgrade in place; the 'default'/'v1' defaults back-fill every existing row to the
         # canonical scope, losing no data and keeping single-world behaviour unchanged. The scope
@@ -971,11 +1037,16 @@ class SQLiteStore:
         *,
         dimension: str = "general",  # keyword-only; default "general" for compat
         exemplar_ids: list[str] | None = None,  # episodic exemplars (T18); None → NULL, no-op
+        observed_false_pass_count: int | None = None,
     ) -> None:
-        """Upsert a lesson for (item_type, dimension). Increments false_pass_count on repeat writes.
+        """Upsert a lesson for ``(item_type, dimension)``.
 
         Added dimension parameter. Callers that omit it get dimension='general',
         preserving exact backward-compatible behaviour.
+
+        Legacy direct observations increment ``false_pass_count``.  A calibration extractor may
+        instead pass its cumulative ``observed_false_pass_count`` snapshot; repeated extraction of
+        the same report then replaces the count rather than counting that report twice.
 
         exemplar_ids (T18): a small list of rejected-draft object_refs to attach as episodic
         exemplars. None/empty writes NULL — byte-identical to a pre-T18 save. On conflict the
@@ -986,18 +1057,32 @@ class SQLiteStore:
 
         now = datetime.now(UTC).isoformat()
         exemplars_json = json.dumps(exemplar_ids) if exemplar_ids else None
+        stored_count = observed_false_pass_count if observed_false_pass_count is not None else 1
         self.conn.execute(
             """
             INSERT INTO lessons (id, item_type, dimension, lesson_text, false_pass_count,
                                  created_at, last_seen_at, exemplar_ids)
-            VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(item_type, dimension) DO UPDATE SET
-                false_pass_count = false_pass_count + 1,
+                false_pass_count = CASE
+                    WHEN ? THEN excluded.false_pass_count
+                    ELSE lessons.false_pass_count + 1
+                END,
                 lesson_text = excluded.lesson_text,
                 last_seen_at = excluded.last_seen_at,
                 exemplar_ids = excluded.exemplar_ids
             """,
-            (str(uuid.uuid4()), item_type, dimension, lesson_text, now, now, exemplars_json),
+            (
+                str(uuid.uuid4()),
+                item_type,
+                dimension,
+                lesson_text,
+                stored_count,
+                now,
+                now,
+                exemplars_json,
+                observed_false_pass_count is not None,
+            ),
         )
         self.conn.commit()
 
@@ -1075,6 +1160,20 @@ class SQLiteStore:
         self.conn.commit()
         return True
 
+    def list_lessons(self, *, include_revoked: bool = False) -> list[dict[str, Any]]:
+        """Return the lesson archive for governance/audit, newest first."""
+        where = "" if include_revoked else " WHERE revoked_at IS NULL"
+        rows = self.conn.execute(
+            f"SELECT * FROM lessons{where} ORDER BY last_seen_at DESC, id ASC"
+        ).fetchall()
+        lessons: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            raw_exemplars = item.get("exemplar_ids")
+            item["exemplar_ids"] = json.loads(raw_exemplars) if raw_exemplars else []
+            lessons.append(item)
+        return lessons
+
     # --- telemetry persistence (Item 8) -------------------------------------------------------
 
     def record_telemetry(self, records: list[CallRecord]) -> None:
@@ -1093,8 +1192,9 @@ class SQLiteStore:
             """
             INSERT INTO telemetry (
                 task_type, tier, input_tokens, output_tokens,
-                cached_input_tokens, cache_hit, latency_ms, cost_usd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                cached_input_tokens, cache_hit, latency_ms, cost_usd,
+                gateway_invocations, transport_attempt_cap, success, error_category
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -1106,6 +1206,14 @@ class SQLiteStore:
                     int(r.cache_hit),
                     r.latency_ms,
                     r.cost_usd,
+                    r.gateway_invocations,
+                    r.transport_attempt_cap,
+                    int(r.success),
+                    (
+                        r.error_category
+                        if not r.success and r.error_category in _TELEMETRY_ERROR_CATEGORIES
+                        else ("provider_error" if not r.success else "")
+                    ),
                 )
                 for r in records
             ],
@@ -1117,7 +1225,8 @@ class SQLiteStore:
         rows = self.conn.execute(
             """
             SELECT id, task_type, tier, input_tokens, output_tokens,
-                   cached_input_tokens, cache_hit, latency_ms, cost_usd, created_at
+                   cached_input_tokens, cache_hit, latency_ms, cost_usd,
+                   gateway_invocations, transport_attempt_cap, success, error_category, created_at
             FROM telemetry
             ORDER BY id DESC
             LIMIT ?
@@ -1135,17 +1244,24 @@ class SQLiteStore:
                 "cache_hit": bool(row["cache_hit"]),
                 "latency_ms": float(row["latency_ms"]),
                 "cost_usd": float(row["cost_usd"]),
+                "gateway_invocations": int(row["gateway_invocations"]),
+                "transport_attempt_cap": int(row["transport_attempt_cap"]),
+                "success": bool(row["success"]),
+                "error_category": str(row["error_category"]),
                 "created_at": str(row["created_at"]),
             }
             for row in rows
         ]
 
     # --- agent run transcripts (T19: episodic / recall memory WRITE side) ---------------------
-    # Persist each ReAct run's full trajectory so no run is lost and it can be listed/replayed by
+    # Persist each reasoning-and-tool loop run's full trajectory so no run is lost and it can be
+    # listed/replayed by
     # id. Mirrors the audit_runs precedent (TEXT PK + a JSON transcript column) and the telemetry
     # precedent (newest-first query). The runtime table lives in the project's always-on
-    # runtime.sqlite; this is the store experience-from-earlier-decision-cycles primitive (CoALA
-    # episodic memory / MemGPT recall storage). The retrieval half (reading a run back into an
+    # runtime.sqlite; this is the store experience-from-earlier-decision-cycles primitive
+    # (execution-experience storage
+    # episodic memory / historical-message retrieval). The retrieval half (reading a run back into
+    # an
     # agent's working context) is deliberately not built here.
 
     def save_agent_run(
@@ -1160,16 +1276,22 @@ class SQLiteStore:
         agent_name: str,
         transcript_json: str,
         created_at: str | None = None,
+        audit_signal: int | None = None,
     ) -> None:
         """Persist one agent run. Idempotent on ``run_id`` (INSERT OR REPLACE: a re-save with the
         same id overwrites in place). ``transcript_json`` is the full serialized ``AgentResult``;
-        the scalar columns are lifted out for cheap listing without loading the transcript."""
+        the scalar columns are lifted out for cheap listing without loading the transcript.
+
+        ``audit_signal`` (D3) is one more such lifted scalar: the deterministic-audit signal
+        ``agent.episodic.run_audit_signal`` reads off the run's own steps, which the episodic
+        recall/capacity layer uses as the run's importance. ``None`` means "not recorded" — the
+        importance layer then falls back to its pre-D3 step-count proxy."""
         self.conn.execute(
             """
             INSERT OR REPLACE INTO agent_runs (
                 id, goal, stop_reason, step_count, cost_usd, latency_ms,
-                agent_name, transcript_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                agent_name, transcript_json, created_at, audit_signal
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -1181,23 +1303,27 @@ class SQLiteStore:
                 agent_name,
                 transcript_json,
                 created_at or _now_iso(),
+                audit_signal,
             ),
         )
         self.conn.commit()
 
-    def list_agent_runs(self, *, limit: int = 100) -> list[dict[str, Any]]:
+    def list_agent_runs(self, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         """Recent agent runs, newest first (created_at DESC, rowid DESC tiebreak).
 
         Lightweight: the heavy ``transcript_json`` is intentionally NOT selected — call
-        :meth:`get_agent_run` to load one run's full transcript."""
+        :meth:`get_agent_run` to load one run's full transcript. ``offset`` exists for the REST
+        cursor adapter; the browser never receives or controls it directly."""
+        if limit < 0 or offset < 0:
+            raise ValueError("agent run list limit/offset must be non-negative")
         rows = self.conn.execute(
             """
             SELECT id, goal, stop_reason, step_count, cost_usd, latency_ms, agent_name, created_at
             FROM agent_runs
             ORDER BY created_at DESC, rowid DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (limit,),
+            (limit, offset),
         ).fetchall()
         return [
             {
@@ -1212,6 +1338,28 @@ class SQLiteStore:
             }
             for row in rows
         ]
+
+    def agent_runs_snapshot(self) -> tuple[int, str]:
+        """Return ``(total, etag)`` for stable cursor pagination of the run history.
+
+        Agent runs are saved with ``INSERT OR REPLACE``.  SQLite gives every replacement a new
+        rowid, so count/max/sum(rowid) changes on every supported insert, replacement or delete.
+        Hashing those aggregates is constant-memory and avoids loading an unbounded history just
+        to validate a cursor.
+        """
+        row = self.conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                COALESCE(MAX(rowid), 0) AS max_rowid,
+                COALESCE(SUM(rowid), 0) AS rowid_sum
+            FROM agent_runs
+            """
+        ).fetchone()
+        total = int(row["total"])
+        marker = f"{total}:{int(row['max_rowid'])}:{int(row['rowid_sum'])}"
+        etag = hashlib.sha256(marker.encode("utf-8")).hexdigest()[:24]
+        return total, etag
 
     def get_agent_run(self, run_id: str) -> dict[str, Any] | None:
         """One run by id with its full transcript (``transcript`` = parsed JSON), or ``None``."""
@@ -1230,10 +1378,11 @@ class SQLiteStore:
             "transcript": json.loads(str(row["transcript_json"])),
         }
 
-    # --- episodic recall (MemGPT recall storage) ----------------------------------------------
+    # --- episodic recall (historical-message retrieval)
     # The READ half of episodic memory: a per-run embedding of (goal + outcome) so a later run can
-    # retrieve semantically-similar past runs and inject them as prompt context (MemGPT recall
-    # storage, Packer et al. 2023). The embedding lives beside the full transcript (agent_runs);
+    # retrieve semantically-similar past runs and inject them as prompt context
+    # (historical-message recall recall
+    # storage, . The embedding lives beside the full transcript (agent_runs);
     # recall joins the two so only a *finished* run (stop_reason == 'finished') is ever surfaced.
 
     def save_agent_run_embedding(
@@ -1250,34 +1399,41 @@ class SQLiteStore:
 
         ``model_id`` records the embedding space the vector was produced in — recall only ever
         compares vectors sharing the current embedder's id, since two embedders' vectors are not
-        comparable. ``vector`` is a float32 blob (see ``agent.episodic._to_blob``)."""
+        comparable. ``vector`` is a float32 blob (see ``agent.episodic._to_blob``). Stamped with
+        the store's current ``world_id`` as the D2 memory-namespace ``scope`` (a re-save via
+        REPLACE also resets ``last_accessed_at``/``deleted_at`` to NULL, matching the pre-D1/D2
+        REPLACE semantics for every other unlisted column)."""
         self.conn.execute(
             """
             INSERT OR REPLACE INTO agent_run_embeddings (
-                run_id, model_id, goal, summary, vector, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                run_id, model_id, goal, summary, vector, created_at, scope
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (run_id, model_id, goal, summary, vector, created_at or _now_iso()),
+            (run_id, model_id, goal, summary, vector, created_at or _now_iso(), self.world_id),
         )
         self.conn.commit()
 
     def query_agent_run_embeddings(self, *, model_id: str) -> list[dict[str, Any]]:
-        """Recall candidates: every FINISHED, live run embedding in the ``model_id`` space.
+        """Recall candidates: every FINISHED, live run embedding in the ``model_id`` space AND the
+        store's current ``world_id`` scope (D2 — a project/world never recalls another's memories).
 
         Joins ``agent_runs`` so only runs whose ``stop_reason == 'finished'`` are returned (a
         run that ran out of step budget carries no trustworthy conclusion to recall) and excludes
         soft-deleted rows (``deleted_at IS NULL``) — an over-capacity eviction stops surfacing them.
-        ``step_count`` is lifted from the run row so the retrieval layer can weigh an episode's
-        importance; the blob is returned raw and the three-factor ranking happens in
-        ``agent.episodic``."""
+        ``audit_signal`` (D3, nullable) is lifted from the run row so the retrieval layer can weigh
+        an episode's importance, with ``step_count`` alongside it as the pre-D3 fallback for a run
+        that recorded no signal; ``last_accessed_at`` (nullable) feeds D1 recency; the vector blob
+        is returned raw and the three-factor ranking happens in ``agent.episodic``."""
         rows = self.conn.execute(
             """
-            SELECT e.run_id, e.goal, e.summary, e.vector, e.created_at, r.step_count
+            SELECT e.run_id, e.goal, e.summary, e.vector, e.created_at, e.last_accessed_at,
+                   r.step_count, r.audit_signal
             FROM agent_run_embeddings AS e
             JOIN agent_runs AS r ON r.id = e.run_id
-            WHERE e.model_id = ? AND r.stop_reason = 'finished' AND e.deleted_at IS NULL
+            WHERE e.model_id = ? AND e.scope = ?
+              AND r.stop_reason = 'finished' AND e.deleted_at IS NULL
             """,
-            (model_id,),
+            (model_id, self.world_id),
         ).fetchall()
         return [
             {
@@ -1286,15 +1442,21 @@ class SQLiteStore:
                 "summary": str(row["summary"]),
                 "vector": bytes(row["vector"]),
                 "created_at": str(row["created_at"]),
+                "last_accessed_at": (
+                    str(row["last_accessed_at"]) if row["last_accessed_at"] is not None else None
+                ),
                 "step_count": int(row["step_count"]),
+                "audit_signal": (
+                    int(row["audit_signal"]) if row["audit_signal"] is not None else None
+                ),
             }
             for row in rows
         ]
 
-    # --- Reflexion cross-trial buffer ---------------------------------------------------------
+    # --- feedback-memory cross-trial buffer
     # Verbal reflections distilled from failed trials, persisted so a later run at a similar goal
-    # can prepend them to the actor's reflection slot (Reflexion episodic buffer, Shinn et al.
-    # 2023). Each row carries a goal embedding so recall is semantic, not exact-match.
+    # can prepend them to the actor's reflection slot (stored correction buffer).
+    # Each row carries a goal embedding so recall is semantic, not exact-match.
 
     def save_reflection(
         self,
@@ -1311,30 +1473,42 @@ class SQLiteStore:
 
         ``vector`` is the goal embedding (float32 blob) and ``model_id`` its embedding space; both
         are nullable so a reflection can still be recorded when the embedder is unavailable (it is
-        then simply not recallable — recall filters ``vector IS NOT NULL``)."""
+        then simply not recallable — recall filters ``vector IS NOT NULL``). Stamped with the
+        store's current ``world_id`` as the D2 memory-namespace ``scope``."""
         self.conn.execute(
             """
             INSERT OR REPLACE INTO reflections (
-                id, goal, reflection, source, created_at, vector, model_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                id, goal, reflection, source, created_at, vector, model_id, scope
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (reflection_id, goal, reflection, source, created_at or _now_iso(), vector, model_id),
+            (
+                reflection_id,
+                goal,
+                reflection,
+                source,
+                created_at or _now_iso(),
+                vector,
+                model_id,
+                self.world_id,
+            ),
         )
         self.conn.commit()
 
     def query_reflections(self, *, model_id: str) -> list[dict[str, Any]]:
-        """Recall candidates: every embedded reflection in the ``model_id`` embedding space.
+        """Recall candidates: every embedded reflection in the ``model_id`` embedding space AND the
+        store's current ``world_id`` scope (D2 — a project/world never recalls another's memories).
 
         Rows without a vector (embedder was unavailable at write time) are excluded — they cannot
         be ranked — as are soft-deleted rows (``deleted_at IS NULL``), so an over-capacity eviction
-        stops surfacing them. Ranking happens in the retrieval layer (``agent.episodic``)."""
+        stops surfacing them. ``last_accessed_at`` (nullable) feeds D1 recency. Ranking happens in
+        the retrieval layer (``agent.episodic``)."""
         rows = self.conn.execute(
             """
-            SELECT id, goal, reflection, source, created_at, vector
+            SELECT id, goal, reflection, source, created_at, last_accessed_at, vector
             FROM reflections
-            WHERE model_id = ? AND vector IS NOT NULL AND deleted_at IS NULL
+            WHERE model_id = ? AND scope = ? AND vector IS NOT NULL AND deleted_at IS NULL
             """,
-            (model_id,),
+            (model_id, self.world_id),
         ).fetchall()
         return [
             {
@@ -1343,6 +1517,9 @@ class SQLiteStore:
                 "reflection": str(row["reflection"]),
                 "source": str(row["source"]),
                 "created_at": str(row["created_at"]),
+                "last_accessed_at": (
+                    str(row["last_accessed_at"]) if row["last_accessed_at"] is not None else None
+                ),
                 "vector": bytes(row["vector"]),
             }
             for row in rows
@@ -1354,41 +1531,60 @@ class SQLiteStore:
     # dumb reads here; the recency/importance policy lives in the memory-policy module, not storage.
 
     def list_run_embedding_retention(self, *, model_id: str) -> list[dict[str, Any]]:
-        """Live (non-tombstoned) run embeddings in ``model_id`` with their retention inputs.
+        """Live (non-tombstoned) run embeddings in ``model_id`` + the store's scope, with their
+        retention inputs (D2 — capacity is enforced per project/world, not globally across a shared
+        ``runtime.sqlite``).
 
         Returns every un-deleted embedding — not only finished runs — because capacity bounds the
-        *stored volume* of the space. ``step_count`` (LEFT-joined, COALESCE 0 if the run row is
-        somehow absent) feeds the importance factor; ``created_at`` feeds recency."""
+        *stored volume* of the space. ``audit_signal`` (D3, nullable) feeds the importance factor
+        with ``step_count`` (LEFT-joined, COALESCE 0 if the run row is somehow absent) as its
+        pre-D3 fallback; ``last_accessed_at``/``created_at`` feed D1 recency (see
+        ``agent.episodic._recency_basis``)."""
         rows = self.conn.execute(
             """
-            SELECT e.run_id, e.created_at, COALESCE(r.step_count, 0) AS step_count
+            SELECT e.run_id, e.created_at, e.last_accessed_at,
+                   COALESCE(r.step_count, 0) AS step_count, r.audit_signal
             FROM agent_run_embeddings AS e
             LEFT JOIN agent_runs AS r ON r.id = e.run_id
-            WHERE e.model_id = ? AND e.deleted_at IS NULL
+            WHERE e.model_id = ? AND e.scope = ? AND e.deleted_at IS NULL
             """,
-            (model_id,),
+            (model_id, self.world_id),
         ).fetchall()
         return [
             {
                 "run_id": str(row["run_id"]),
                 "created_at": str(row["created_at"]),
+                "last_accessed_at": (
+                    str(row["last_accessed_at"]) if row["last_accessed_at"] is not None else None
+                ),
                 "step_count": int(row["step_count"]),
+                "audit_signal": (
+                    int(row["audit_signal"]) if row["audit_signal"] is not None else None
+                ),
             }
             for row in rows
         ]
 
     def list_reflection_retention(self, *, model_id: str) -> list[dict[str, Any]]:
-        """Live (non-tombstoned) reflection ids + ``created_at`` in ``model_id`` for retention."""
+        """Live (non-tombstoned) reflection ids + retention inputs in ``model_id`` + the store's
+        scope (D2 — same per-project/world capacity boundary as run embeddings)."""
         rows = self.conn.execute(
             """
-            SELECT id, created_at
+            SELECT id, created_at, last_accessed_at
             FROM reflections
-            WHERE model_id = ? AND vector IS NOT NULL AND deleted_at IS NULL
+            WHERE model_id = ? AND scope = ? AND vector IS NOT NULL AND deleted_at IS NULL
             """,
-            (model_id,),
+            (model_id, self.world_id),
         ).fetchall()
         return [
-            {"id": str(row["id"]), "created_at": str(row["created_at"])} for row in rows
+            {
+                "id": str(row["id"]),
+                "created_at": str(row["created_at"]),
+                "last_accessed_at": (
+                    str(row["last_accessed_at"]) if row["last_accessed_at"] is not None else None
+                ),
+            }
+            for row in rows
         ]
 
     def soft_delete_agent_run_embeddings(
@@ -1444,11 +1640,41 @@ class SQLiteStore:
         ).fetchone()
         if row is None:
             return False
-        self.conn.execute(
-            "UPDATE reflections SET deleted_at = NULL WHERE id = ?", (reflection_id,)
-        )
+        self.conn.execute("UPDATE reflections SET deleted_at = NULL WHERE id = ?", (reflection_id,))
         self.conn.commit()
         return True
+
+    # --- D1: recency-by-last-access write-back -------------------------------------------------
+    # Called by ``agent.episodic`` right after a recall actually surfaces a memory, so its recency
+    # clock resets to "now" instead of staying pinned to its write time (three-factor retrieval
+    # recency =
+    # decay since last *access*). ``run_id``/reflection ``id`` are each a table-wide primary key, so
+    # no scope filter is needed here — the caller only ever passes ids it just read back from its
+    # own (already scope-filtered) query.
+
+    def touch_agent_run_embeddings(self, run_ids: list[str], *, at: str | None = None) -> None:
+        """Stamp ``last_accessed_at`` on the given run embeddings. No-op on an empty list."""
+        if not run_ids:
+            return
+        placeholders = ",".join("?" for _ in run_ids)
+        self.conn.execute(
+            f"UPDATE agent_run_embeddings SET last_accessed_at = ? "  # noqa: S608 - own placeholders
+            f"WHERE run_id IN ({placeholders})",
+            (at or _now_iso(), *run_ids),
+        )
+        self.conn.commit()
+
+    def touch_reflections(self, ids: list[str], *, at: str | None = None) -> None:
+        """Stamp ``last_accessed_at`` on the given reflections. No-op on an empty list."""
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        self.conn.execute(
+            f"UPDATE reflections SET last_accessed_at = ? "  # noqa: S608 - own placeholders
+            f"WHERE id IN ({placeholders})",
+            (at or _now_iso(), *ids),
+        )
+        self.conn.commit()
 
     # ------------------------------------------------------------------------------------------
 
@@ -1832,27 +2058,35 @@ class SQLiteStore:
                 matched.append(row)
         return matched
 
-    def reference_chunks_by_refs(self, refs: list[str]) -> dict[str, sqlite3.Row]:
+    def reference_chunks_by_refs(
+        self, refs: list[str], *, use: str | None = None
+    ) -> dict[str, sqlite3.Row]:
         """Fetch full reference-chunk rows (with source title) for the given refs.
 
         Lets the hybrid reference retriever rank by ref, then materialise display rows with
-        correct source metadata regardless of which leg (BM25 or vector) surfaced each ref."""
+        correct source metadata regardless of which leg (BM25 or vector) surfaced each ref.
+
+        ``use`` restricts the result to sources whose ``allowed_uses`` permit that use. This is
+        also what keeps the semantic leg honest: a vector hit never touches the BM25 query, so
+        materialisation is the one place every candidate ref must pass through."""
         if not refs:
             return {}
         placeholders = ",".join("?" for _ in refs)
+        use_clause, use_params = _allowed_use_filter(use)
         # Scope-aware read. Materialise only this scope's chunks (and join the
         # source within the same scope, so a same-id source in another scope cannot supply the
         # title). In the single default scope this is the same rows as before.
         rows = self.conn.execute(
             f"""
-            SELECT c.ref, c.source_id, s.title AS source_title, c.title, c.body,
+            SELECT c.ref, c.source_id, s.title AS source_title,
+                   s.provenance AS source_provenance, c.title, c.body,
                    c.chunk_index, c.metadata_json
             FROM reference_chunks AS c
             LEFT JOIN reference_sources AS s
                 ON s.id = c.source_id AND s.world_id = c.world_id AND s.version = c.version
-            WHERE c.ref IN ({placeholders}) AND c.world_id = ? AND c.version = ?
+            WHERE c.ref IN ({placeholders}) AND c.world_id = ? AND c.version = ?{use_clause}
             """,  # noqa: S608
-            (*refs, self.world_id, self.version),
+            (*refs, self.world_id, self.version, *use_params),
         ).fetchall()
         return {str(row["ref"]): row for row in rows}
 
@@ -2042,7 +2276,7 @@ class SQLiteStore:
             for row in self.conn.execute(
                 """
                 SELECT id, title, source_type, original_filename, allowed_uses_json,
-                       text_hash, metadata_json, created_at
+                       provenance, text_hash, metadata_json, created_at
                 FROM reference_sources
                 WHERE world_id = ? AND version = ?
                 """,
@@ -2069,8 +2303,8 @@ class SQLiteStore:
                     """
                     INSERT INTO reference_sources (
                         world_id, version, id, title, source_type, original_filename,
-                        allowed_uses_json, text_hash, metadata_json, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        allowed_uses_json, provenance, text_hash, metadata_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         self.world_id,
@@ -2080,6 +2314,7 @@ class SQLiteStore:
                         source.source_type,
                         source.original_filename,
                         _json(list(source.allowed_uses)),
+                        _provenance_value(source),
                         source.text_hash,
                         _json(source.metadata),
                         source.created_at,
@@ -2166,6 +2401,7 @@ class SQLiteStore:
                 "source_type": str(row["source_type"]),
                 "original_filename": row["original_filename"],
                 "allowed_uses": json.loads(str(row["allowed_uses_json"])),
+                "provenance": str(row["provenance"]),
                 "text_hash": str(row["text_hash"]),
                 "metadata": json.loads(str(row["metadata_json"])),
                 "created_at": str(row["created_at"]),
@@ -2173,10 +2409,26 @@ class SQLiteStore:
             for row in rows
         ]
 
-    def search_reference_chunks(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    def search_reference_chunks(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        use: str | None = None,
+        source_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Lexical recall over the inspiration library.
+
+        ``use`` (see :data:`~owcopilot.inspiration.models.REFERENCE_USES`) restricts the search to
+        sources whose ``allowed_uses`` permit it; ``None`` searches the whole library (library
+        browsing, where the human is looking at their own shelf rather than grounding a draft).
+        ``source_ids`` restricts candidates before ranking/LIMIT; ``None`` keeps the whole
+        library and an empty set explicitly selects nothing."""
         match_query = build_fts_match_query(query)
         if match_query is None:
-            return self._fallback_reference_search(query, limit=limit)
+            return self._fallback_reference_search(
+                query, limit=limit, use=use, source_ids=source_ids
+            )
         # bm25 weights are positional, one per reference_fts column. Column order is now
         # (ref, source_id, source_title, world_id, version, title, body) after the scope columns
         # were added, so the title boost (4.0) and body (1.0) weights moved to positions 6/7; the
@@ -2185,8 +2437,10 @@ class SQLiteStore:
         # columns, so the MATCH is constrained to the current scope, and the chunk join is scope-
         # qualified so a same-ref chunk in another scope cannot be paired in. Single default scope:
         # identical rows to the un-scoped path.
+        use_clause, use_params = _allowed_use_filter(use)
+        source_clause, source_params = _reference_source_filter(source_ids)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT
                 f.ref, f.source_id, f.source_title, c.title, c.body,
                 c.chunk_index, c.metadata_json,
@@ -2195,39 +2449,51 @@ class SQLiteStore:
             JOIN reference_chunks AS c
                 ON c.ref = f.ref AND c.world_id = f.world_id AND c.version = f.version
             WHERE reference_fts MATCH ? AND f.world_id = ? AND f.version = ?
+                {use_clause}{source_clause}
             ORDER BY rank
             LIMIT ?
-            """,
-            (match_query, self.world_id, self.version, limit),
+            """,  # noqa: S608
+            (match_query, self.world_id, self.version, *use_params, *source_params, limit),
         ).fetchall()
         hits = [_reference_hit_from_row(row, score=-float(row["rank"])) for row in rows]
         if len(hits) < limit:
             seen = {str(hit["ref"]) for hit in hits}
             hits.extend(
                 hit
-                for hit in self._fallback_reference_search(query, limit=limit)
+                for hit in self._fallback_reference_search(
+                    query, limit=limit, use=use, source_ids=source_ids
+                )
                 if hit["ref"] not in seen
             )
         return hits[:limit]
 
-    def _fallback_reference_search(self, query: str, *, limit: int) -> list[dict[str, Any]]:
+    def _fallback_reference_search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        use: str | None = None,
+        source_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         # Scope-aware read. The lexical fallback is a full scan of the chunk
         # table, so scoping it to the current (world_id, version) both isolates the scope and is a
         # reduce-N win: it scans only this scope's chunks. The source join is scope-qualified for
         # the same reason as the FTS path. Single default scope: identical scan/result to the
         # un-scoped path.
+        use_clause, use_params = _allowed_use_filter(use)
+        source_clause, source_params = _reference_source_filter(source_ids)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT
                 c.ref, c.source_id, s.title AS source_title, c.title, c.body,
                 c.chunk_index, c.metadata_json
             FROM reference_chunks AS c
             LEFT JOIN reference_sources AS s
                 ON s.id = c.source_id AND s.world_id = c.world_id AND s.version = c.version
-            WHERE c.world_id = ? AND c.version = ?
+            WHERE c.world_id = ? AND c.version = ?{use_clause}{source_clause}
             ORDER BY c.ref
-            """,
-            (self.world_id, self.version),
+            """,  # noqa: S608
+            (self.world_id, self.version, *use_params, *source_params),
         ).fetchall()
         hits: list[dict[str, Any]] = []
         for row in rows:
@@ -2594,9 +2860,23 @@ def _reference_source_unchanged(prior: sqlite3.Row, source: Any) -> bool:
         and str(prior["source_type"]) == str(source.source_type)
         and prior["original_filename"] == source.original_filename
         and str(prior["allowed_uses_json"]) == _json(list(source.allowed_uses))
+        and str(prior["provenance"]) == _provenance_value(source)
         and str(prior["metadata_json"]) == _json(source.metadata)
         and str(prior["created_at"]) == str(source.created_at)
     )
+
+
+def _provenance_value(source: Any) -> str:
+    """素材来源归属的落库取值。
+
+    素材模型给的是 ``Provenance`` 枚举，但这个函数的入参是鸭子类型（``replace_reference_index``
+    对 source 只要求几个属性），所以直接给字符串的调用方也接受；两处（写入与"是否变更"比对）
+    必须走同一个换算，否则每次 sync 都会误判成变更、把整本书重新分块。"""
+    # 延迟导入：``owcopilot.inspiration`` 会导入本模块（它的检索器读这个库），模块级导入会成环。
+    from ..inspiration.models import Provenance
+
+    raw = getattr(source, "provenance", None) or Provenance.THIRD_PARTY_REFERENCE
+    return str(getattr(raw, "value", raw))
 
 
 # Tier threshold: the minimum persisted-vector count at which ``make_vector_backend(ann=True)``
@@ -2645,6 +2925,46 @@ def _vec0_int8_table(table: str) -> str:
     if table not in _VEC0_INT8_TABLES:
         raise ValueError(f"unknown vectors table: {table!r}")
     return _VEC0_INT8_TABLES[table]
+
+
+def _reference_source_filter(source_ids: set[str] | None) -> tuple[str, tuple[str, ...]]:
+    """Select reference candidates before top-k without widening an explicit empty selection."""
+    if source_ids is None:
+        return "", ()
+    values = tuple(sorted(source_ids))
+    if not values:
+        return " AND 0", ()
+    placeholders = ",".join("?" for _ in values)
+    return f" AND c.source_id IN ({placeholders})", values
+
+
+def _allowed_use_filter(use: str | None) -> tuple[str, tuple[str, ...]]:
+    """Build the SQL fragment that keeps a reference read to sources permitting ``use``.
+
+    ``allowed_uses`` is stored as a JSON array of strings (``_json`` writes it compactly, so a
+    value appears as ``"inspiration"`` with its quotes). Matching the *quoted* token is therefore a
+    member test rather than a substring test — ``"drafting"`` matches neither ``"redrafting"`` nor
+    ``"drafting_extra"``. (SQLite's LIKE is ASCII case-insensitive, so the only extra thing it can
+    match is the same use spelled in another case.) The vocabulary is validated first, so no
+    caller-controlled text reaches the pattern; the EXISTS form leaves the query plan of the
+    un-filtered read untouched when ``use`` is None."""
+    if use is None:
+        return "", ()
+    # Deferred import: ``owcopilot.inspiration`` imports this module (its retriever reads from the
+    # store), so a module-level import here would close the cycle.
+    from ..inspiration.models import REFERENCE_USES
+
+    if use not in REFERENCE_USES:
+        raise ValueError(
+            f"未知的素材用途「{use}」。可用值：{'、'.join(sorted(REFERENCE_USES))}；"
+            "不传则检索整个素材库。"
+        )
+    clause = (
+        " AND EXISTS (SELECT 1 FROM reference_sources AS src"
+        " WHERE src.id = c.source_id AND src.world_id = c.world_id"
+        " AND src.version = c.version AND src.allowed_uses_json LIKE ?)"
+    )
+    return clause, (f'%"{use}"%',)
 
 
 def _reference_hit_from_row(row: sqlite3.Row, *, score: float) -> dict[str, Any]:

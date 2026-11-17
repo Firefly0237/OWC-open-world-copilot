@@ -6,6 +6,8 @@ golden-testable and reproducible.
 
 from __future__ import annotations
 
+import json
+
 from pydantic import BaseModel
 
 from .content.models import ContentBundle
@@ -62,6 +64,27 @@ def _candidates(bundle: ContentBundle) -> list[tuple[str, str, str, str]]:
         rows.append(("dialogue_tree", tree.id, tree.title or tree.id, ""))
     for text in bundle.localized_texts.values():
         rows.append(("localized_text", text.id, text.text_key, text.text))
+    for relation in bundle.relations:
+        relation_id = f"{relation.source}:{relation.kind}:{relation.target}"
+        title = f"{relation.source} —{relation.kind}→ {relation.target}"
+        body = json.dumps(relation.metadata, ensure_ascii=False, sort_keys=True)
+        rows.append(("relation", relation_id, title, body))
+    for event_ref in bundle.quest_event_refs.values():
+        body = " ".join(
+            [event_ref.quest_id, event_ref.event_id, event_ref.ref_kind.value, event_ref.note]
+        )
+        rows.append(("quest_event_ref", event_ref.id, event_ref.id, body))
+    for guide in bundle.style_guides.values():
+        rows.append(("style_guide", guide.id, guide.id, f"{guide.body} {' '.join(guide.rules)}"))
+    for rubric in bundle.style_rubrics.values():
+        element_text = " ".join(
+            " ".join([element.text, *element.terms, *element.patterns, element.note])
+            for element in rubric.elements
+        )
+        body = " ".join(
+            [rubric.abstract_tag, rubric.version, rubric.author, element_text]
+        )
+        rows.append(("style_rubric", rubric.id, rubric.label or rubric.id, body))
     return rows
 
 

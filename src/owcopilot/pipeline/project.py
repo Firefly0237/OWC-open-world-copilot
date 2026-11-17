@@ -22,6 +22,7 @@ from ..retrieval.neural_rerank import reranker_for_corpus
 from ..retrieval.policy import RetrievalPolicy
 from ..retrieval.vector import VectorRetriever
 from ..storage import SQLiteStore
+from ..storage.world_lock import world_write_lock
 
 # The canonical default scope. A project opened without an explicit scope lives entirely under
 # ("default", "v1") and behaves byte-for-byte as a single-world project: the scope dimension is
@@ -62,25 +63,25 @@ class ProjectContext:
     ) -> ProjectContext:
         root = Path(content_root)
         content_store = ContentStore(root)
-        # ``migrate=True`` transparently opens the world on its working line (creating it once, on
-        # first open) instead of the baseline -- so editing/ingest write to the working version and
-        # the baseline stays a frozen seed. It is opt-in so the huge existing single-world test/CLI
-        # surface is untouched; the "open a world" boundary (managed worlds) turns it on. The
-        # migration is lossless: a fresh working line is a byte-identical copy-on-write branch.
-        if migrate:
-            version = content_store.ensure_migrated()
-        sqlite_store = SQLiteStore(sqlite_path, world_id=world_id, version=version)
-        # Load the *effective* bundle for this (world, version) scope via the copy-on-write
-        # overlay. The graph, audit and impact analysis then all run on the current version's
-        # effective content, not the whole multi-version tree, so their cost scales with one
-        # version's size. The default scope has no version overlay, so load_scoped equals load()
-        # and single-world behaviour is byte-identical.
-        bundle = content_store.load_scoped(world_id=world_id, version=version)
-        graph = build_content_graph(bundle)
-        sqlite_store.replace_content_index(bundle)
-        sqlite_store.replace_graph_edges(graph)
-        reference_store = ReferenceStore(root)
-        reference_store.sync_index(sqlite_store)
+        with world_write_lock(root):
+            # ``migrate=True`` transparently opens the world on its working line (creating it once,
+            # on first open) instead of the baseline. Migration, the effective bundle snapshot,
+            # and all derived SQLite indexes must describe one serialized world revision.
+            if migrate:
+                version = content_store.ensure_migrated()
+            sqlite_store = SQLiteStore(sqlite_path, world_id=world_id, version=version)
+            # Load the *effective* bundle for this (world, version) scope via the copy-on-write
+            # overlay. The graph, audit and impact analysis then all run on the current version's
+            # effective content, not the whole multi-version tree.
+            bundle = content_store.load_scoped(world_id=world_id, version=version)
+            graph = build_content_graph(bundle)
+            sqlite_store.replace_content_index(bundle)
+            sqlite_store.replace_graph_edges(graph)
+            reference_store = ReferenceStore(root)
+            # ``sync_index`` derives a whole-index SQLite snapshot from the file-backed reference
+            # library. Keeping its snapshot + commit under the same lock prevents a late open from
+            # pruning a reference that a concurrent writer has already published.
+            reference_store.sync_index(sqlite_store)
         # One embedder per project: semantic (bge-m3) when [semantic] is installed, else the
         # deterministic hashing stub. Callers (e.g. the acceptance gate) may pin one explicitly
         # for reproducibility; otherwise it is resolved by env. Reused on reload.
@@ -133,12 +134,15 @@ class ProjectContext:
         )
 
     def reload(self) -> None:
-        # Re-resolve the effective bundle for the current scope (see open()).
-        self.bundle = self.content_store.load_scoped(world_id=self.world_id, version=self.version)
-        self.graph = build_content_graph(self.bundle)
-        self.sqlite_store.replace_content_index(self.bundle)
-        self.sqlite_store.replace_graph_edges(self.graph)
-        self.reference_store.sync_index(self.sqlite_store)
+        # Re-resolve one effective world revision and atomically refresh all of its derived indexes.
+        with world_write_lock(self.content_root):
+            self.bundle = self.content_store.load_scoped(
+                world_id=self.world_id, version=self.version
+            )
+            self.graph = build_content_graph(self.bundle)
+            self.sqlite_store.replace_content_index(self.bundle)
+            self.sqlite_store.replace_graph_edges(self.graph)
+            self.reference_store.sync_index(self.sqlite_store)
         self.context_builder = ContextPackBuilder(
             bm25=BM25Retriever(self.sqlite_store),
             vector=VectorRetriever(self.sqlite_store, embedder=self.embedder, auto_tier=True),
@@ -157,11 +161,12 @@ class ProjectContext:
         is now the previous one. This picks up the advanced working line from the head and rebuilds
         the scope so subsequent reads/writes hit the freshly merged content. A no-op on an
         un-migrated world (no head)."""
-        head = self.content_store.read_head()
-        if head is not None:
-            self.version = str(head["working"])
-            self.sqlite_store.set_scope(self.world_id, self.version)
-        self.reload()
+        with world_write_lock(self.content_root):
+            head = self.content_store.read_head()
+            if head is not None:
+                self.version = str(head["working"])
+                self.sqlite_store.set_scope(self.world_id, self.version)
+            self.reload()
 
     def close(self) -> None:
         self.sqlite_store.close()

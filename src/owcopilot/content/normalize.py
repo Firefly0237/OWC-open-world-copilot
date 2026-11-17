@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import warnings
 from typing import Any
@@ -11,7 +12,11 @@ from .importers.base import RawObject
 from .models import (
     POI,
     ContentBundle,
+    DialogueChoice,
+    DialogueNode,
     DialogueRef,
+    DialogueTree,
+    Effect,
     Entity,
     EntityType,
     LocalizedText,
@@ -200,6 +205,19 @@ def normalize_raw_objects(raw_objects: list[RawObject]) -> ContentBundle:
             style = _style_guide_from_raw(raw)
             _check_duplicate("style_guide", style.id, raw.source_path)
             bundle.style_guides[style.id] = style
+        elif raw.kind in _DIALOGUE_TREE_KINDS:
+            tree = _dialogue_tree_from_raw(raw)
+            _check_duplicate("dialogue_tree", tree.id, raw.source_path)
+            bundle.dialogue_trees[tree.id] = tree
+
+    # 对白树是三种行组装出来的一个对象（头行 / 节点行 / 选项行），所以和 relation 一样走后续遍：
+    # 头行在上面的主遍里已经建好骨架，这里先挂节点、再挂选项——选项要挂到节点上，顺序不能反。
+    for raw in raw_objects:
+        if raw.kind in _DIALOGUE_TREE_NODE_KINDS:
+            _apply_dialogue_tree_node(bundle, raw)
+    for raw in raw_objects:
+        if raw.kind in _DIALOGUE_TREE_CHOICE_KINDS:
+            _apply_dialogue_tree_choice(bundle, raw)
 
     for raw in raw_objects:
         if raw.kind == "relation":
@@ -450,6 +468,148 @@ def _dialogue_from_raw(raw: RawObject) -> DialogueRef:
             },
         ),
         source_ref=_source_ref(raw),
+    )
+
+
+# --- 对白树：一行一节点 + 显式前驱/后继 -----------------------------------------------------------
+# 表格表达一棵树的成熟做法（Morrowind 的 DIAL/INFO 用 mPrev/mNext 串起有序行；articy 导出同构）。
+# 三种行合成一个对象，所以节点行/选项行走后续遍。导入期只拦"这一行挂不上去"的身份问题；结构问题
+# （断链、不可达、未声明变量、缺本地化键）一律放行，交给既有审计规则裁决——策划的表本来就是半成品，
+# 把半成品挡在门外等于逼人先手工修好才能用工具，而工具的价值恰恰是帮他找出要修什么。
+# 契约全文见 src/owcopilot/content/normalize.py。
+
+_DIALOGUE_TREE_KINDS = frozenset({"dialogue_tree", "dialoguetree", "dialogue_tree_head"})
+_DIALOGUE_TREE_NODE_KINDS = frozenset({"dialogue_tree_node", "dialoguetreenode", "dialogue_node"})
+_DIALOGUE_TREE_CHOICE_KINDS = frozenset(
+    {"dialogue_tree_choice", "dialoguetreechoice", "dialogue_choice"}
+)
+
+
+def _dialogue_tree_from_raw(raw: RawObject) -> DialogueTree:
+    title = str(raw.data.get("title") or "").strip()
+    tree_id = _resolve_id(
+        raw.data.get("id"),
+        slug_id(title, prefix="dialogue_tree"),
+        context=f"dialogue tree row from {raw.source_path}",
+    )
+    return DialogueTree(
+        id=tree_id,
+        title=title,
+        quest_id=_optional_str(raw.data.get("quest_id") or raw.data.get("quest")),
+        participants=_list(raw.data.get("participants")),
+        root_node=str(raw.data.get("root_node") or raw.data.get("root") or "").strip(),
+        tags=_list(raw.data.get("tags")),
+        metadata=_metadata(
+            raw.data,
+            exclude={
+                "kind",
+                "object_type",
+                "id",
+                "title",
+                "quest_id",
+                "quest",
+                "participants",
+                "root_node",
+                "root",
+                "tags",
+            },
+        ),
+        source_ref=_source_ref(raw),
+    )
+
+
+def _tree_for_row(bundle: ContentBundle, raw: RawObject, *, what: str) -> DialogueTree:
+    """把一行归到它所属的树；归不上就是身份问题，必须当场报错而不是静默丢行。"""
+    tree_id = str(raw.data.get("tree_id") or raw.data.get("tree") or "").strip()
+    if not tree_id:
+        raise ValueError(
+            f"{what}没有写它属于哪棵对白树（{raw.source_path}）。给这一行补一个对白树 id，"
+            "或者确认这一行的类型写对了。"
+        )
+    tree = bundle.dialogue_trees.get(tree_id)
+    if tree is None:
+        known = "、".join(sorted(bundle.dialogue_trees)) or "（本次导入没有任何对白树）"
+        raise ValueError(
+            f"{what}挂在对白树 '{tree_id}' 上，但这次导入里没有这棵树（{raw.source_path}）。"
+            f"本次导入到的对白树有：{known}。请先补一行这棵树的头行，或者改成已有的树 id。"
+        )
+    return tree
+
+
+def _effects_from_cell(value: Any, *, context: str) -> list[Effect]:
+    """``[{"var":…,"op":"set|inc|dec","value":…}]``——与导出器用的是同一套词汇，不另起一套。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return []
+    payload = value
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"{context}的后果一列不是合法的 JSON：{value!r}（{exc.msg}）。"
+                '正确写法形如 [{"var":"好感度","op":"inc","value":1}]。'
+            ) from exc
+    if not isinstance(payload, list):
+        raise ValueError(
+            f"{context}的后果一列应该是一个数组，实际是 {type(payload).__name__}。"
+            '正确写法形如 [{"var":"好感度","op":"inc","value":1}]。'
+        )
+    effects: list[Effect] = []
+    for item in payload:
+        if not isinstance(item, dict) or not str(item.get("var") or "").strip():
+            raise ValueError(
+                f"{context}的后果一列里有一项没写变量名：{item!r}。"
+                '每一项都要形如 {"var":"变量名","op":"set|inc|dec","value":…}。'
+            )
+        effects.append(Effect.model_validate(item))
+    return effects
+
+
+def _apply_dialogue_tree_node(bundle: ContentBundle, raw: RawObject) -> None:
+    tree = _tree_for_row(bundle, raw, what="对白节点行")
+    node_id = _require_valid_id(
+        str(raw.data.get("id") or raw.data.get("node_id") or ""),
+        context=f"dialogue tree node row from {raw.source_path}",
+    )
+    if node_id in tree.nodes:
+        raise ValueError(
+            f"对白树《{tree.id}》里出现了两个 id 都是 '{node_id}' 的节点（{raw.source_path}）——"
+            "后一个会把前一个悄悄顶掉。请给其中一个改个 id。"
+        )
+    tree.nodes[node_id] = DialogueNode(
+        id=node_id,
+        speaker_id=_optional_str(raw.data.get("speaker_id") or raw.data.get("speaker")),
+        text=str(raw.data.get("text") or ""),
+        next_node=_optional_str(raw.data.get("next_node") or raw.data.get("next")),
+        text_key=str(raw.data.get("text_key") or raw.data.get("key") or ""),
+    )
+
+
+def _apply_dialogue_tree_choice(bundle: ContentBundle, raw: RawObject) -> None:
+    tree = _tree_for_row(bundle, raw, what="对白选项行")
+    from_node = str(raw.data.get("from_node") or raw.data.get("node") or "").strip()
+    if not from_node:
+        raise ValueError(
+            f"对白选项行没有写它挂在哪个节点下（{raw.source_path}）。给这一行补上来源节点 id。"
+        )
+    node = tree.nodes.get(from_node)
+    if node is None:
+        raise ValueError(
+            f"对白选项挂在节点 '{from_node}' 下，但对白树《{tree.id}》里没有这个节点"
+            f"（{raw.source_path}）。请先补一行这个节点，或者把来源节点改成已有的节点 id。"
+        )
+    # 选项顺序 = 行在文件里出现的顺序：除 relations 外所有列表顺序敏感，导入不排序、不去重。
+    node.choices.append(
+        DialogueChoice(
+            text=str(raw.data.get("text") or ""),
+            next_node=_optional_str(raw.data.get("next_node") or raw.data.get("next")),
+            condition=str(raw.data.get("condition") or ""),
+            effects=_effects_from_cell(
+                raw.data.get("effects"),
+                context=f"对白树《{tree.id}》节点 '{from_node}' 下的选项",
+            ),
+            text_key=str(raw.data.get("text_key") or raw.data.get("key") or ""),
+        )
     )
 
 

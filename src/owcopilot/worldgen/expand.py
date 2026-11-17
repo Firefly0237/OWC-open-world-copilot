@@ -39,6 +39,7 @@ from ..content.models import (
     QuestStage,
     ReviewStatus,
 )
+from ..inspiration.models import USE_INSPIRATION
 from ..inspiration.retrieval import ReferenceContextBuilder
 from ..llm.gateway import LLMGateway
 from ..llm.spotlight import spotlight_references
@@ -133,8 +134,12 @@ class WorldExpandService:
             else ContextPack(query=query, budget_tokens=budget_tokens // 2)
         )
         reference_query = brief.reference_query.strip() or query
-        inspiration_pack = self.reference_context_builder.build(
-            reference_query, budget_tokens=budget_tokens, limit=8
+        inspiration_pack = (
+            self.reference_context_builder.build(
+                reference_query, budget_tokens=budget_tokens, limit=8, use=USE_INSPIRATION
+            )
+            if brief.use_references
+            else ContextPack(query=reference_query, budget_tokens=budget_tokens)
         )
 
         canon_lines = _canon_lines(self.bundle, focus)
@@ -219,7 +224,17 @@ class WorldExpandService:
             inspiration_pack=inspiration_pack,
             project_pack=project_pack,
         )
-        report = _reference_report(payload, inspiration_pack, brief.reference_mode)
+        # Only the NEW batch is checked for reference leakage — ``bundle`` here holds just the new
+        # content, and the existing world is the exemption list (reusing a canon name is grounding,
+        # which is the entire point of expansion). ``base_user`` is everything the creator typed.
+        report = _reference_report(
+            payload,
+            inspiration_pack,
+            brief.reference_mode,
+            draft=bundle,
+            canon=self.bundle,
+            human_input=base_user,
+        )
         return WorldExpandDraft(
             id=draft_id,
             brief=brief,

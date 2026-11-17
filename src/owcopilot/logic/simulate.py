@@ -73,6 +73,8 @@ def simulate_quest(
     initial_state: dict[str, Value] | None = None,
     max_steps: int = 200,
 ) -> SimRun:
+    from .stepper import apply_effects, prepare_quest_stage
+
     logic = quest.logic
     stages = [s.id for s in quest.stages]
     stage_set = set(stages)
@@ -88,7 +90,6 @@ def simulate_quest(
             message=f"任务前置不满足：{logic.precondition}",
             final_state=state.as_mapping(),
         )
-    stage_logic = {sl.stage_id: sl for sl in logic.stage_logic}
     branches_from: dict[str, list] = {}
     for branch in logic.branches:
         branches_from.setdefault(branch.from_stage, []).append(branch)
@@ -103,18 +104,15 @@ def simulate_quest(
             run.status, run.message = "cycle", f"在阶段 '{pos}' 检测到循环"
             break
         visited.add(pos)
-        sl = stage_logic.get(pos)
-        precondition_ok = _truthy(state, sl.precondition) if sl else True
-        step = SimStep(stage_id=pos, precondition_ok=precondition_ok)
-        if not precondition_ok:
+        frame = prepare_quest_stage(quest, pos, state.as_mapping())
+        step = SimStep(stage_id=pos, precondition_ok=frame.precondition_ok)
+        if not frame.precondition_ok:
             run.steps.append(step)
             run.path.append(pos)
             run.status, run.message = "blocked", f"阶段 '{pos}' 的前置不满足"
             break
-        if sl:
-            for effect in sl.effects_on_complete:
-                state.apply(effect.var, effect.op, effect.value)
-                step.effects.append(f"{effect.var} {effect.op} {effect.value}")
+        state = WorldState(frame.values)
+        step.effects.extend(frame.effects)
 
         outgoing = branches_from.get(pos, [])
         nxt, chosen, terminal = _next_stage(outgoing, stages, pos, state, queued_choices)
@@ -122,9 +120,7 @@ def simulate_quest(
             step.branch_taken = chosen.id
             # A taken branch applies its consequences (Branch.effects) — the model has always
             # declared them "applied when this branch is taken"; the simulator now honours that.
-            for effect in chosen.effects:
-                state.apply(effect.var, effect.op, effect.value)
-                step.effects.append(f"{effect.var} {effect.op} {effect.value}")
+            step.effects.extend(apply_effects(state, chosen.effects))
         run.steps.append(step)
         run.path.append(pos)
         if terminal:

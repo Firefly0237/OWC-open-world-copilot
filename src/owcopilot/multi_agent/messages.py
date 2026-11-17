@@ -4,9 +4,9 @@
 Every message has a stable ``id``, carries ``from_agent``/``to_agent`` routing fields, and holds a
 ``payload`` that is frozen on first write. The ``status`` field is the ONLY mutable column.
 
-Design rationale (matches SUPERVISOR_rubric P3-3, P3-4, P3-6):
+Message invariants:
 - Explicit ``from_agent`` / ``to_agent`` → every blackboard row is attributed to a specific agent.
-- ``payload`` carries both ``original_goal`` and ``subtask`` in task_assign messages (P3-4).
+- ``payload`` carries both ``original_goal`` and ``subtask`` in task_assign messages (invariant).
 - Immutability of payload (enforced at blackboard layer) → no post-hoc revision by workers.
 """
 
@@ -25,7 +25,7 @@ MsgType = Literal[
     "verify_request",  # orchestrator → verifier: validate a task_result
     "verify_result",  # verifier → blackboard: pass/fail verdict
     "synthesize",  # orchestrator: final report after all workers + verifier done
-    # T2 Reflexion (Shinn et al., 2023): the Self-Reflection trail for one bounded retry —
+    # T2 feedback-memory : the Self-Reflection trail for one bounded retry —
     # a verbal reflection distilled from a failing verifier verdict and fed back to the worker.
     "reflection",
 ]
@@ -78,7 +78,7 @@ class AgentMessage:
 class TaskAssignPayload:
     """Payload for a task_assign message (orchestrator → worker).
 
-    Both ``original_goal`` AND ``subtask`` are required (SUPERVISOR_rubric P3-4:
+    Both ``original_goal`` AND ``subtask`` are required (execution contract invariant:
     "Worker prompt must contain overall_goal and sub_task"). Injecting the
     original goal prevents cascade hallucination where a worker only sees its
     narrow subtask and forgets global constraints.
@@ -120,7 +120,7 @@ class TaskResultPayload:
     # invoked ``audit_project``) — an honest "no claim" the verifier must not read as 0.
     open_errors: int | None
     stop_reason: str  # "finished" | "max_steps"
-    step_count: int  # number of ReAct steps taken
+    step_count: int  # number of reasoning-and-tool loop steps taken
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -179,7 +179,7 @@ class VerifyResultPayload:
 
 @dataclass
 class ReflectionPayload:
-    """Payload for a ``reflection`` message — the T2 Reflexion (Shinn et al., 2023) trail.
+    """Payload for a ``reflection`` message — the T2 feedback-memory  trail.
 
     Records ONE bounded retry driven by a failing verifier verdict: the verdict that triggered
     it (``trigger_verdict``), the verifier rationale fed into Self-Reflection (``feedback``), the
@@ -192,7 +192,7 @@ class ReflectionPayload:
     """
 
     target_msg_id: str  # the flagged task_result the retry answers
-    worker: str  # the worker agent_id that re-ran (the Reflexion Actor)
+    worker: str  # the worker agent_id that re-ran (the feedback-memory Actor)
     trigger_verdict: str  # "fail" | "needs_more" that triggered the retry
     feedback: str  # the verifier rationale distilled into the reflection
     reflection: str  # the distilled verbal reflection ("" when the retry aborted)

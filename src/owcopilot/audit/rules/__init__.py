@@ -10,6 +10,7 @@ from .dialogue_rules import (
     DialogueTreeUnreachableNodeRule,
     DialogueUngatedSiblingChoiceRule,
 )
+from .flag_rules import WorldFlagConsistencyRule
 from .graph_rules import (
     DuplicateRelationRule,
     FactionConflictRule,
@@ -84,5 +85,6 @@ __all__ = [
     "TextTooLongForUIRule",
     "TimelineViolationRule",
     "UnreviewedAIContentRule",
+    "WorldFlagConsistencyRule",
     "detect_import_conflicts",
 ]

@@ -23,12 +23,14 @@ continues from. This module owns three things the raw saver does not:
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
@@ -50,6 +52,129 @@ CREATE TABLE IF NOT EXISTS checkpoint_threads (
 )
 """
 
+_MODEL_BUDGET_DDL = """
+CREATE TABLE IF NOT EXISTS checkpoint_model_budget (
+    thread_id       TEXT PRIMARY KEY,
+    contract_json   TEXT NOT NULL,
+    used            INTEGER NOT NULL,
+    by_kind_json    TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+)
+"""
+
+
+class CheckpointModelBudgetLedger:
+    """Crash-durable pre-dispatch reservations beside a ``SqliteSaver`` checkpoint.
+
+    LangGraph channel writes are committed at graph-node boundaries. Compression, generate and
+    reflection calls can happen inside or outside those boundaries, so a process kill immediately
+    after dispatch could otherwise lose their in-memory increment. This side ledger uses the same
+    checkpoint SQLite connection and saver lock, committing a conservative reservation *before*
+    every provider dispatch. On resume the channel count is reconciled with this durable maximum.
+    """
+
+    def __init__(self, saver: BaseCheckpointSaver[Any]) -> None:
+        conn = getattr(saver, "conn", None)
+        lock = getattr(saver, "lock", None)
+        if not isinstance(conn, sqlite3.Connection) or lock is None:
+            raise TypeError(
+                "crash-durable model budgets require a SqliteSaver-compatible checkpointer"
+            )
+        self._conn = conn
+        self._lock: threading.Lock = lock
+        with self._lock:
+            self._conn.execute(_MODEL_BUDGET_DDL)
+            self._conn.commit()
+
+    @staticmethod
+    def _contract_json(contract: dict[str, object]) -> str:
+        return json.dumps(contract, sort_keys=True, separators=(",", ":"))
+
+    def initialise(
+        self, thread_id: str, contract: dict[str, object], *, fresh: bool
+    ) -> tuple[int, dict[str, int]]:
+        encoded = self._contract_json(contract)
+        with self._lock:
+            if fresh:
+                self._conn.execute(
+                    "INSERT INTO checkpoint_model_budget "
+                    "(thread_id, contract_json, used, by_kind_json, updated_at) "
+                    "VALUES (?, ?, 0, '{}', ?) "
+                    "ON CONFLICT(thread_id) DO UPDATE SET "
+                    "contract_json=excluded.contract_json, used=0, by_kind_json='{}', "
+                    "updated_at=excluded.updated_at",
+                    (thread_id, encoded, _now_iso()),
+                )
+                self._conn.commit()
+                return 0, {}
+            row = self._conn.execute(
+                "SELECT contract_json, used, by_kind_json FROM checkpoint_model_budget "
+                "WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"checkpoint thread {thread_id!r} has no durable model-budget ledger"
+                )
+            if row[0] != encoded:
+                raise ValueError("durable model-budget contract differs from checkpoint contract")
+            decoded = json.loads(row[2])
+            by_kind = {str(key): int(value) for key, value in decoded.items()}
+            return int(row[1]), by_kind
+
+    def reserve(
+        self,
+        thread_id: str,
+        contract: dict[str, object],
+        kind: str,
+        *,
+        total_limit: int,
+        kind_limit: int | None = None,
+    ) -> tuple[int, int]:
+        encoded = self._contract_json(contract)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT contract_json, used, by_kind_json FROM checkpoint_model_budget "
+                "WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()
+            if row is None or row[0] != encoded:
+                raise ValueError("durable model-budget ledger is missing or has a stale contract")
+            used = int(row[1])
+            by_kind_raw = json.loads(row[2])
+            kind_used = int(by_kind_raw.get(kind, 0))
+            if used >= total_limit:
+                raise ValueError(f"total model-call budget exhausted ({used}/{total_limit})")
+            if kind_limit is not None and kind_used >= kind_limit:
+                raise ValueError(f"{kind} model-call budget exhausted ({kind_used}/{kind_limit})")
+            used += 1
+            kind_used += 1
+            by_kind_raw[kind] = kind_used
+            self._conn.execute(
+                "UPDATE checkpoint_model_budget SET used = ?, by_kind_json = ?, updated_at = ? "
+                "WHERE thread_id = ?",
+                (
+                    used,
+                    json.dumps(by_kind_raw, sort_keys=True, separators=(",", ":")),
+                    _now_iso(),
+                    thread_id,
+                ),
+            )
+            self._conn.commit()
+            return used, kind_used
+
+    def snapshot(self, thread_id: str) -> tuple[int, dict[str, int]] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT used, by_kind_json FROM checkpoint_model_budget WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return int(row[0]), {
+            str(key): int(value) for key, value in json.loads(row[1]).items()
+        }
+
 
 def _now_iso() -> str:
     # UTC ISO-8601 with a fixed-width ``+00:00`` offset, so string ordering == chronological order
@@ -66,7 +191,7 @@ def _env_max_threads() -> int:
 
 
 def resolve_thread_id(
-    checkpointer: BaseCheckpointSaver | None,
+    checkpointer: BaseCheckpointSaver[Any] | None,
     *,
     thread_id: str | None,
     resume: bool,
@@ -126,6 +251,7 @@ class CheckpointStore:
         self.saver = SqliteSaver(self._conn)
         self.saver.setup()  # idempotent CREATE TABLE checkpoints/writes
         self._conn.execute(_REGISTRY_DDL)
+        self._conn.execute(_MODEL_BUDGET_DDL)
         self._conn.commit()
         self.ttl_seconds = ttl_seconds if ttl_seconds is not None else _env_ttl_seconds()
         self.max_threads = max_threads if max_threads is not None else _env_max_threads()
@@ -148,6 +274,7 @@ class CheckpointStore:
     def delete_thread(self, thread_id: str) -> None:
         """Drop a thread's checkpoints/writes AND its registry row (full lifecycle removal)."""
         self.saver.delete_thread(thread_id)
+        self._conn.execute("DELETE FROM checkpoint_model_budget WHERE thread_id = ?", (thread_id,))
         self._conn.execute("DELETE FROM checkpoint_threads WHERE thread_id = ?", (thread_id,))
         self._conn.commit()
 
@@ -200,4 +327,4 @@ class CheckpointStore:
         return len(excess)
 
 
-__all__ = ["CheckpointStore", "resolve_thread_id"]
+__all__ = ["CheckpointModelBudgetLedger", "CheckpointStore", "resolve_thread_id"]

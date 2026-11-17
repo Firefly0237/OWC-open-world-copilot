@@ -313,7 +313,7 @@ def parse_critique(raw: str) -> CritiqueResult:
     )
 
 
-# --- character & dialogue critics (same Reflexion pattern, kind-specific rubric) ----------------
+# --- character & dialogue critics (same feedback-memory pattern, kind-specific rubric)
 #
 # Each is just a system rubric + a user-message builder; both route through ``critique_with_retry``
 # so the parse/retry/honest-failure behaviour is identical to the quest critic. Adding a critic for

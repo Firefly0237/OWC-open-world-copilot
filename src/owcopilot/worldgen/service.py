@@ -35,6 +35,14 @@ from ..content.models import (
     StyleGuide,
     Term,
 )
+from ..inspiration.leakage import (
+    ReferenceLeakage,
+    declared_names,
+    detect_reference_leakage,
+    draft_prose,
+)
+from ..inspiration.models import USE_INSPIRATION
+from ..inspiration.report import UNVERIFIED_TRANSFORMATION
 from ..inspiration.retrieval import ReferenceContextBuilder
 from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json_object
@@ -75,11 +83,11 @@ class WorldSeedService:
         # staged generation (deterministic audit + human review still downstream either way).
         self.critic = critic
         self.max_refine_rounds = max_refine_rounds if critic is not None else 0
-        # Tree-of-Thoughts on the premise stage is opt-in: with >1 candidate the service explores
+        # Premise search is opt-in: with >1 candidate the service explores
         # several dramatic spines and keeps the best-scoring one before committing the chain to it.
         # 1 (default) is the original single-shot premise — no behaviour change.
         self.premise_candidates = max(1, premise_candidates)
-        # The ToT value function. None = the deterministic ``score_premise`` ($0). Pass an
+        # The candidate score function. None = the deterministic ``score_premise`` ($0). Pass an
         # ``LLMPremiseEvaluator`` to discriminate among already-complete spines a strong model
         # produces (the deterministic score saturates there — see worldgen/tot.py).
         self.premise_evaluator = premise_evaluator or score_premise
@@ -105,7 +113,7 @@ class WorldSeedService:
         reference_query = brief.reference_query.strip() or query
         inspiration_pack = (
             self.reference_context_builder.build(
-                reference_query, budget_tokens=budget_tokens, limit=8
+                reference_query, budget_tokens=budget_tokens, limit=8, use=USE_INSPIRATION
             )
             if brief.use_references
             else ContextPack(query=reference_query, budget_tokens=budget_tokens)
@@ -220,7 +228,16 @@ class WorldSeedService:
             inspiration_pack=inspiration_pack,
             project_pack=project_pack,
         )
-        report = _reference_report(payload, inspiration_pack, brief.reference_mode)
+        # ``base_user`` is literally everything the creator typed, so a name they asked for by hand
+        # is exempted from the leakage check even if the material happens to use it too.
+        report = _reference_report(
+            payload,
+            inspiration_pack,
+            brief.reference_mode,
+            draft=bundle,
+            canon=self.bundle,
+            human_input=base_user,
+        )
         return WorldSeedDraft(
             id=draft_id,
             brief=brief,
@@ -277,7 +294,7 @@ class WorldSeedService:
 
     def _select_premise(self, premise_system: str, base_user: str) -> dict[str, Any]:
         """Generate the premise. With ``premise_candidates == 1`` this is the original single shot;
-        with more, it is a Tree-of-Thoughts search: propose N candidate spines (each nudged toward a
+        with more, it searches N candidate spines (each nudged toward a
         distinct angle), score each with ``self.premise_evaluator`` (deterministic by default, an
         ``LLMPremiseEvaluator`` when one is wired), and keep the best."""
         if self.premise_candidates <= 1:
@@ -649,7 +666,7 @@ _SPINE_REQUIRED_RETRY = (
 
 
 def _premise_variant_hint(index: int) -> str:
-    """Nudge each Tree-of-Thoughts premise candidate toward a DISTINCT take, so the search explores
+    """Nudge each premise candidate toward a DISTINCT take, so the search explores
     genuinely different spines rather than re-sampling one. The marker is inert for the offline
     double (it returns its canned premise) and reads as a diversification instruction to a real
     model; it also lets a test provider tell the candidates apart."""
@@ -1168,24 +1185,57 @@ def _reference_report(
     payload: dict[str, Any],
     inspiration_pack: ContextPack,
     reference_mode: str,
+    *,
+    draft: ContentBundle,
+    canon: ContentBundle,
+    human_input: str,
 ) -> list[ReferenceReportItem]:
+    """Build the per-source reference report: the model's account **plus** a recomputed check.
+
+    Only the model can say how it transformed a source, so ``used_for`` / ``transformation`` /
+    ``excluded`` are either the model's own words or a retrieval fact the code actually knows
+    (``source_ref`` / ``source_title`` / the requested ``reference_mode``). When the model says
+    nothing, the row records that silence
+    (:data:`~owcopilot.inspiration.report.UNVERIFIED_TRANSFORMATION`) instead of speaking for it.
+
+    ``leakage`` is the other half and is never the model's word: ``draft`` (what this chain just
+    produced) is diffed against the chunk text the model was actually shown, with the established
+    world (``canon``) and the human's own brief (``human_input``) exempted — reusing a name that
+    already exists in the world, or that the creator asked for by hand, is grounding rather than
+    copying. See :mod:`owcopilot.inspiration.leakage` for the thresholds and how they were
+    calibrated.
+    """
     rows: list[ReferenceReportItem] = []
     by_ref = {hit.ref: hit for hit in inspiration_pack.hits}
+    prose = draft_prose(draft)
+    names = declared_names(draft)
+    exempt = [*declared_names(canon), *(name for name in names if name in human_input)]
+
+    def leakage_for(hit: RetrievalHit, title: str) -> ReferenceLeakage:
+        return detect_reference_leakage(
+            draft_texts=prose,
+            candidate_names=names,
+            reference_text=hit.body,
+            source_title=title,
+            provenance=hit.metadata.get("provenance") or None,
+            excluded_names=exempt,
+        )
+
     for item in _list(payload.get("reference_report")):
         raw = _dict(item)
         source_ref = str(raw.get("source_ref") or "")
         hit = by_ref.get(source_ref)
         if not source_ref or hit is None:
             continue
+        title = str(raw.get("source_title") or hit.metadata.get("source_title") or hit.title)
         rows.append(
             ReferenceReportItem(
                 source_ref=source_ref,
-                source_title=str(
-                    raw.get("source_title") or hit.metadata.get("source_title") or hit.title
-                ),
+                source_title=title,
                 used_for=str(raw.get("used_for") or reference_mode),
-                transformation=str(raw.get("transformation") or "转化为新的世界设定元素。"),
+                transformation=str(raw.get("transformation") or UNVERIFIED_TRANSFORMATION),
                 excluded=[str(entry) for entry in _list(raw.get("excluded"))],
+                leakage=leakage_for(hit, title),
             )
         )
     if rows:
@@ -1194,9 +1244,10 @@ def _reference_report(
         ReferenceReportItem(
             source_ref=hit.ref,
             source_title=hit.metadata.get("source_title") or hit.title,
-            used_for=f"{reference_mode}：主题、人物关系或任务节奏参考",
-            transformation="转化为新的阵营关系、地点功能和任务目标；参考资料不进入正式设定事实库。",
-            excluded=["未复用参考材料中的专有名词", "未复用长段原文"],
+            used_for=reference_mode,
+            transformation=UNVERIFIED_TRANSFORMATION,
+            excluded=[],
+            leakage=leakage_for(hit, hit.metadata.get("source_title") or hit.title),
         )
         for hit in inspiration_pack.hits[:5]
     ]

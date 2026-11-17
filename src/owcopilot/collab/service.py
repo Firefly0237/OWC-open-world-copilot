@@ -8,7 +8,7 @@ acquisition; a stale etag on a guarded write is a conflict — both make concurr
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from ..errors import OWCopilotError
 from .models import Assignment, CollabState, Comment, Lock
@@ -16,6 +16,9 @@ from .models import Assignment, CollabState, Comment, Lock
 
 class ConflictError(OWCopilotError, ValueError):
     """A concurrent-edit conflict: stale etag, or a lock held by someone else."""
+
+
+LOCK_LEASE_SECONDS = 120
 
 
 def _now() -> str:
@@ -52,11 +55,35 @@ def acquire_lock(state: CollabState, *, object_ref: str, holder: str) -> Lock:
     if not holder.strip():
         raise ValueError("请先填写署名")
     existing = state.locks.get(object_ref)
+    if existing is not None and lock_is_expired(existing):
+        state.locks.pop(object_ref, None)
+        existing = None
     if existing is not None and existing.holder != holder:
         raise ConflictError(f"该对象正被 {existing.holder} 编辑锁定")
     lock = Lock(object_ref=object_ref, holder=holder)
     state.locks[object_ref] = lock
     return lock
+
+
+def lock_is_expired(lock: Lock, *, now: datetime | None = None) -> bool:
+    """Treat edit locks as leases so a crashed or disconnected browser cannot block forever."""
+
+    try:
+        acquired = datetime.fromisoformat(lock.at)
+    except ValueError:
+        return True
+    if acquired.tzinfo is None:
+        acquired = acquired.replace(tzinfo=UTC)
+    return (now or datetime.now(UTC)) >= acquired + timedelta(seconds=LOCK_LEASE_SECONDS)
+
+
+def expire_locks(state: CollabState, *, now: datetime | None = None) -> bool:
+    """Remove expired leases and report whether the ledger changed."""
+
+    expired = [ref for ref, lock in state.locks.items() if lock_is_expired(lock, now=now)]
+    for ref in expired:
+        state.locks.pop(ref, None)
+    return bool(expired)
 
 
 def release_lock(state: CollabState, *, object_ref: str, holder: str) -> None:

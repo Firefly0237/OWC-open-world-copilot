@@ -88,6 +88,7 @@ def extract_lessons_from_report(
             lesson_text,
             dimension=dimension,
             exemplar_ids=exemplars.get((item_type, dimension)) or None,
+            observed_false_pass_count=count,
         )
         written += 1
     return written
@@ -169,7 +170,8 @@ def build_critic_lesson_block(
             .replace("生成时请整体提高", "评判时请整体核查")
         )
         dim_hint = f"（重点核查「{dim}」维度）" if dim != "general" else ""
-        # T18: same episodic exemplars on the critic side — Reflexion's concrete failure detail
+        # T18: same episodic exemplars on the critic side — feedback-memory's concrete failure
+        # detail
         # (which specific rejected instances) to scrutinise, not just an aggregate count.
         refs = _exemplar_refs(lesson)
         exemplar_hint = f"（参见历史被拒实例：{'、'.join(refs)}）" if refs else ""

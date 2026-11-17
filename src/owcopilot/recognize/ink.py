@@ -6,8 +6,7 @@ labelled gathers) as narrative nodes, ``->`` diverts and player choices as edges
 declared variables. Character/faction inference from dialogue prose stays in the optional
 §8-guarded LLM pass — never guessed here.
 
-The whole file is read once by :func:`_scan`, a single structural pass shared by BOTH the importer
-(:func:`recognize_ink`) and the losslessness ledger (``recognize/ink_losslessness.py``) so there is
+The whole file is read once by :func:`_scan`, the importer's single structural pass, so there is
 never a second, drifting parser. ``_scan`` tracks block-comment and brace-nesting state so a leading
 ``-``/``*`` is only read as a weave gather/choice at statement level (brace depth 0) — inside a
 ``{…}`` conditional block those bullets are block branches, not weave markers (the file's opening

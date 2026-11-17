@@ -21,6 +21,7 @@ from ...llm.telemetry import TelemetryCollector
 from ...retrieval.embedding import resolve_embedder
 from ...util import load_dotenv
 from .._common import PROJECT_NAMESPACE as _PROJECT_NAMESPACE
+from .._common import PROJECT_TELEMETRY_SINK as _PROJECT_TELEMETRY_SINK
 
 
 def _merge_preview(existing: ContentBundle, new: ContentBundle) -> ContentBundle:
@@ -109,8 +110,10 @@ def _gateway(
     llm_model: str,
     offline_provider: Any,
     extra_tasks: list[str] | None = None,
+    cache_override: CacheBackend | None = None,
+    namespace_override: str | None = None,
 ) -> tuple[LLMGateway, TelemetryCollector]:
-    telemetry = TelemetryCollector()
+    telemetry = TelemetryCollector(record_sink=_PROJECT_TELEMETRY_SINK.get())
     real = llm_mode == "real"
     if real:
         load_dotenv()  # pick up provider keys from .env; shell env wins
@@ -126,11 +129,22 @@ def _gateway(
     gateway = LLMGateway(
         providers={"cheap": provider},
         router=StaticRouter(mapping=mapping),
-        cache=_action_cache() if real else NoOpCache(),
+        # The FastAPI composition root injects its app-lifetime cache so repeated offline and real
+        # HTTP requests share one client cache. CLI/action callers keep the original behaviour:
+        # real calls use the process cache, offline test doubles remain isolated.
+        cache=(
+            cache_override
+            if cache_override is not None
+            else _action_cache()
+            if real
+            else NoOpCache()
+        ),
         telemetry=telemetry,
         max_retries=1 if real else 0,
         retry_backoff_seconds=1.0 if real else 0.0,
-        namespace=_PROJECT_NAMESPACE.get(),
+        namespace=(
+            namespace_override if namespace_override is not None else _PROJECT_NAMESPACE.get()
+        ),
     )
     return gateway, telemetry
 

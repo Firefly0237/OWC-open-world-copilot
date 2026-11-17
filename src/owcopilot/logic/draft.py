@@ -1,5 +1,5 @@
 # AI 辅助的任务逻辑起草。
-"""WS-M · B7 — AI-assisted quest logic drafting.
+"""AI-assisted quest logic drafting.
 
 The native logic layer (WS-A) is hand-authored today. B7 lets a model *draft* the variables /
 preconditions / effects / branches, then runs the **deterministic logic audit (WS-A) as the hard
@@ -19,6 +19,7 @@ from ..assist.critic import CritiqueResult
 from ..assist.industry import LOGIC_RUBRIC_SOURCES, industry_source_block
 from ..assist.refine import RefineStep, run_refine_loop
 from ..content.models import Quest, QuestLogic
+from ..llm.execution_policy import LLMExecutionPolicy
 from ..llm.gateway import LLMGateway
 from ..llm.structured import StructuredOutputError, complete_structured
 from .audit import LogicIssue, audit_quest_logic
@@ -87,6 +88,7 @@ def draft_quest_logic(
     quest: Quest,
     intent: str = "",
     max_rounds: int = 2,
+    execution_policy: LLMExecutionPolicy | None = None,
 ) -> LogicDraftResult:
     """Draft a quest's logic with the model, gated by the deterministic audit. Returns the best
     draft plus any audit issues still open (so review sees them) and the refine trail. Raises
@@ -106,6 +108,9 @@ def draft_quest_logic(
                 system=_SYSTEM,
                 user=_user_prompt(quest, intent, feedback),
                 model_cls=QuestLogic,
+                max_repair_retries=(
+                    execution_policy.json_repair_retries if execution_policy else 1
+                ),
             )
         except StructuredOutputError:
             return None
@@ -138,7 +143,11 @@ def draft_quest_logic(
         return nxt
 
     outcome = run_refine_loop(
-        initial=initial, max_rounds=max_rounds, assess=assess, regenerate=regenerate
+        initial=initial,
+        max_rounds=max_rounds,
+        assess=assess,
+        regenerate=regenerate,
+        execution_policy=execution_policy,
     )
     final_issues = audit_quest_logic(quest.model_copy(update={"logic": outcome.artifact}))
     return LogicDraftResult(

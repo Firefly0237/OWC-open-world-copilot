@@ -18,6 +18,7 @@ from .models import (
     Principal,
     Role,
     Tenant,
+    TenantId,
     User,
 )
 from .store import PlatformStore
@@ -33,6 +34,7 @@ __all__ = [
     "Principal",
     "Role",
     "Tenant",
+    "TenantId",
     "User",
     "mint_token",
     "require_role",

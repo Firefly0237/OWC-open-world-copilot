@@ -1,47 +1,15 @@
 # 内容图上的社区检测：GraphRAG 索引的底座。
-"""Community detection over the content graph — the GraphRAG indexing substrate.
+"""Community detection over the substantive content graph.
 
-Line-level retrieval cannot answer macro/holistic questions ("what are the main powers and how do
-they relate?") once a world is large: the relations of every recalled entity overflow the token
-budget, so the truly global picture never fits. GraphRAG's answer is to partition the graph into
-communities, summarise each (and then summarise across them), and answer the macro question over the
-summaries instead of the raw rows.
+The default backend uses ``networkx.community.greedy_modularity_communities``. An optional
+Leiden backend uses a fixed seed and requires ``python-igraph`` and ``leidenalg``.
+Community members and output groups are sorted after partitioning to assign readable IDs;
+this does not guarantee identical partitions across dependency versions or tie-breaking changes.
 
-**Algorithm: greedy modularity maximisation (Clauset–Newman–Moore / CNM)**
-
-``networkx.community.greedy_modularity_communities`` is used.  CNM is a good default for
-worlds in the ~50–300 node range typical of this project: it runs in milliseconds, needs no
-external dependencies, and produces reasonable faction/region clusters.
-
-**Stability note (important -- do NOT mark this as "DETERMINISTIC")**
-
-CNM's internal priority queue can break ties differently across Python versions or when the
-graph has equally-weighted edges.  The *output order* is stabilised by the explicit
-``sorted(...)`` calls in ``detect_communities()``: members within each community are sorted
-lexicographically, and communities are ordered by (desc size, first member ref).  This
-means the community IDs (``c0``, ``c1``, …) and ``member_refs`` lists are **stable for the
-same graph structure**, but are not guaranteed bit-for-bit reproducible if tie-breaking in
-the CNM heap changes across dependency versions.
-
-For a fully deterministic, academically rigorous alternative, ``leidenalg`` with
-``seed=42`` can be used (Leiden algorithm, Traag et al. 2019 -- fixes Louvain's
-connectivity-violation problem).  It is available as an opt-in by setting
-``OWCOPILOT_COMMUNITY=leiden`` (requires ``pip install python-igraph leidenalg``).
-At the 50–300 node scale of current worlds, CNM and Leiden produce equivalent clusters
-in practice; Leiden is the better choice for larger or denser graphs.
-
-**Hierarchical (multi-level) detection.** ``detect_hierarchical_communities`` is a faithful
-re-implementation of graspologic's ``hierarchical_leiden`` — the algorithm Microsoft GraphRAG's
-``cluster_graph`` calls (Edge et al. 2024, *From Local to Global*, arXiv:2404.16130). It runs the
-base partition on the whole graph (level 0), then isolates any community larger than
-``max_cluster_size`` into its induced sub-graph and re-runs the SAME primitive, one level deeper,
-recursing until nothing is oversized or a community can no longer be subdivided. This yields the
-multi-granularity community hierarchy GraphRAG generates a report per level for. It is strictly
-opt-in and only produces level ≥ 1 layers once a single level-0 community exceeds the threshold —
-i.e. at the hundreds-of-thousands-of-items narrative scale, not the current acceptance scale.
-
-Only the per-community *prose* is written by an LLM later; the structural partition is
-machine-decided and testable, keeping the "stable / auditable" north star intact.
+Hierarchical detection partitions the whole graph, then recursively partitions oversized
+communities in their induced subgraphs. It stops when a group meets ``max_cluster_size``
+or cannot be split. Parents and leaves retain their hierarchy; only leaves carry their
+intra-community relations. Textual reports are generated separately from this structural pass.
 """
 
 from __future__ import annotations
@@ -122,8 +90,8 @@ def detect_communities(bundle: ContentBundle) -> list[Community]:
     * ``cnm`` (default): greedy modularity maximisation (networkx built-in, no extra deps).
       Tie-breaking is stabilised by the post-sort but is not guaranteed bit-for-bit
       reproducible across Python/networkx versions.
-    * ``leiden``: Leiden algorithm (Traag et al. 2019) with fixed seed -- truly
-      reproducible; requires ``pip install python-igraph leidenalg``.
+    * ``leiden``: optional fixed-seed partition; requires
+      ``pip install python-igraph leidenalg``. Dependency changes may affect results.
     """
     graph = build_content_graph(bundle)
     projection = _projection(graph)
@@ -165,9 +133,7 @@ def detect_hierarchical_communities(
     max_cluster_size: int,
     partition: Callable[[nx.Graph], list[list[str]]] | None = None,
 ) -> list[Community]:
-    """Multi-level community detection — a faithful re-implementation of graspologic's
-    ``hierarchical_leiden`` (the algorithm Microsoft GraphRAG's ``cluster_graph`` calls; Edge et al.
-    2024, arXiv:2404.16130).
+    """Recursively partition oversized communities using one selected primitive.
 
     Level 0 is the base partition of the whole projection (ids ``c0``, ``c1``, … exactly as
     :func:`detect_communities` orders them). Any community whose member count exceeds

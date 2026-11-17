@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..storage.atomic_file import atomic_write_text, read_json_file
 from .models import RemediationCase
 
 _DIR = ".compliance"
@@ -24,12 +25,12 @@ class CaseStore:
     def load(self) -> dict[str, RemediationCase]:
         if not self.path.exists():
             return {}
-        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        raw = read_json_file(self.path)
         return {cid: RemediationCase.model_validate(data) for cid, data in raw.items()}
 
     def save(self, cases: dict[str, RemediationCase]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {cid: case.model_dump(mode="json") for cid, case in cases.items()}
-        self.path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
+        atomic_write_text(
+            self.path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
         )

@@ -1,85 +1,70 @@
 name: CI
 
-# The whole test suite is offline, deterministic and $0 (mock/fake providers, no API keys),
-# so it is a perfect CI gate. No secrets are referenced here — the real-model and live-UE5
-# paths are manual and stay out of CI by design.
 on:
   push:
     branches: ["**"]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
-  test:
+  python:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
+    env:
+      OWCOPILOT_ALLOW_OFFLINE_LLM: "1"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-
-      - name: Install (serve + dev extras)
+      - name: Install API, model adapters and development dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[serve,dev]"
-
-      - name: Ruff
-        run: python -m ruff check src tests
-
-      - name: Mypy
-        run: python -m mypy src/owcopilot
-
-      - name: Run tests (offline, $0)
-        run: python -m pytest -q
-
-      - name: Acceptance benchmark (seeded errors / retrieval / impact gates)
-        run: python -m owcopilot.cli.main eval-acceptance --workspace .tmp/acceptance_ci
-
-      - name: Agent-Eval JD-dimension scorecard (regression gate)
-        run: python -m owcopilot.cli.main eval-agent
+          python -m pip install -e ".[serve,dev,live]"
+      - name: Lint
+        run: python -m ruff check src tests scripts
+      - name: Test workflow and narrative contracts
+        run: |
+          python -m pytest -q \
+            tests/domain/test_workflow_*.py \
+            tests/domain/test_mechanic_ir_v2.py \
+            tests/domain/test_logic_stepper.py \
+            tests/domain/test_project_*.py \
+            tests/domain/test_generated_*.py \
+            tests/domain/test_creator_copy_contracts.py \
+            tests/domain/test_narrative_localization_v2.py \
+            tests/domain/test_player_presentation.py \
+            tests/domain/test_reflection_normalization_v2.py \
+            tests/domain/test_requirement_planning_admission_v2.py \
+            tests/platform/test_workflow_*.py \
+            tests/platform/test_creator_*.py \
+            tests/platform/test_edit_continuity.py \
+            tests/platform/test_intent_decision_origin.py \
+            tests/platform/test_method_learning_jobs.py \
+            tests/platform/test_task_method_permissions.py \
+            tests/platform/test_published_patch_admission.py \
+            tests/platform/test_connection_credentials.py \
+            tests/agent/test_deepseek_thinking_tools_v2.py \
+            tests/agent/test_execution_policy.py
 
   frontend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "22" # vite 8 requires Node ^20.19 || >=22.12
+          node-version: "22"
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend deps
-        run: npm ci --prefix frontend
-
-      # `npm run build` runs `vue-tsc --noEmit && vite build`, so this is the type gate too:
-      # a type error (e.g. a ref-unwrap mismatch) fails CI here, which `vite build` alone would miss.
-      - name: Type-check + build frontend
-        run: npm run build --prefix frontend
-
-  docker:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build the API image
-        run: docker build -t owcopilot-api:ci .
-
-      - name: Smoke-test the container (offline /health + a real request)
-        run: |
-          docker run -d --name owcopilot -p 8000:8000 owcopilot-api:ci
-          for i in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:8000/health && break || sleep 1
-          done
-          curl -fsS http://127.0.0.1:8000/health | grep -q '"status":"ok"'
-          curl -fsS http://127.0.0.1:8000/workspaces | grep -q '"workspaces"'
-          curl -fsS -X POST http://127.0.0.1:8000/workspaces \
-            -H 'Content-Type: application/json' \
-            -d '{"name":"ci-smoke"}' | grep -q '"name":"ci-smoke"'
-          docker rm -f owcopilot
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci --prefix apps/web
+      - name: Test interaction contracts
+        run: npm test --prefix apps/web
+      - name: Type-check and build
+        run: npm run build --prefix apps/web

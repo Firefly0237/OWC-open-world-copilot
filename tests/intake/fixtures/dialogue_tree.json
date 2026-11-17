@@ -1,0 +1,88 @@
+{
+  "id": "tree_fixture",
+  "title": "导入往返检查",
+  "quest_id": "quest_fixture",
+  "root_node": "start",
+  "participants": [
+    "speaker_a",
+    "speaker_b"
+  ],
+  "tags": [
+    "fixture",
+    "Unicode"
+  ],
+  "nodes": {
+    "start": {
+      "id": "start",
+      "speaker_id": "speaker_a",
+      "text": "甲：核对编号「A-01」。🌙",
+      "text_key": "fixture.start",
+      "next_node": "choice",
+      "choices": []
+    },
+    "choice": {
+      "id": "choice",
+      "speaker_id": "speaker_b",
+      "text": "乙：现在继续吗？",
+      "text_key": "fixture.choice",
+      "next_node": null,
+      "choices": [
+        {
+          "text": "继续核对",
+          "text_key": "fixture.option.continue",
+          "next_node": "confirmed",
+          "condition": "ready == true",
+          "effects": [
+            {
+              "var": "count",
+              "op": "inc",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "text": "暂缓",
+          "text_key": "fixture.option.wait",
+          "next_node": "waiting",
+          "condition": "ready == false",
+          "effects": [
+            {
+              "var": "ready",
+              "op": "set",
+              "value": false
+            }
+          ]
+        },
+        {
+          "text": "更正编号",
+          "text_key": "fixture.option.correct",
+          "next_node": "confirmed",
+          "condition": "count > 0",
+          "effects": [
+            {
+              "var": "count",
+              "op": "dec",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    "confirmed": {
+      "id": "confirmed",
+      "speaker_id": "speaker_a",
+      "text": "记录：已确认，保留“引号”与换行。\n第二行。",
+      "text_key": "fixture.confirmed",
+      "next_node": null,
+      "choices": []
+    },
+    "waiting": {
+      "id": "waiting",
+      "speaker_id": "speaker_b",
+      "text": "稍后继续。",
+      "text_key": "fixture.waiting",
+      "next_node": null,
+      "choices": []
+    }
+  }
+}

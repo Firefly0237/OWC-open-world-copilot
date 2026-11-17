@@ -1,16 +1,13 @@
 # quests 阶段的世界级评审（generate→critique→refine 的 critique 半边）。
-"""World-level reviewer for the quests stage (the critic half of a generate→critique→refine loop).
+"""Review the whole quests batch after staged world generation.
 
-This is the same Reflexion / Self-Refine pattern as ``assist/critic.py``'s ``QuestCritic`` — and it
-reuses that module's tolerant ``parse_critique`` and ``CritiqueResult`` so a broken critique can
-never wedge the loop — but it reviews the *whole quests batch* the staged world-seed chain produced,
-not a single approved-content quest. The capstone stage is the one most likely to drift: quests are
-generated last and must actually connect the cast and places the earlier stages established, so a
-review-and-refine pass here is where coherence is won or lost.
+Reuse the critique parser and ``CritiqueResult`` from ``assist/critic.py`` so malformed replies
+remain incomplete rather than becoming passing results. The review covers the entire batch, with
+deterministic grounding checks against the cast and places established by earlier stages.
 
-Discipline (identical to the round-22 quest loop): the critic is a *signal*, not a gate. The
-deterministic grounding check (:func:`quest_grounding_gaps`) is the objective bar; the human review
-queue is the final sign-off. The critic only raises autonomous quality before a human looks.
+The optional revision loop records each critique, carries earlier feedback into later attempts,
+and checks both parsed verdicts and grounding gaps before stopping. Human review remains a
+separate final decision; these records do not establish the author's acceptance.
 """
 
 from __future__ import annotations
@@ -188,7 +185,7 @@ def run_quest_refine_loop(
     human scrutiny. ``regenerate(prior_quests, fixes)`` (returns quests, relations, reference_rows)
     is the stage-specific re-call the caller supplies."""
     trail: list[WorldRefineRound] = []
-    reflections: list[str] = []  # accumulated Reflexion memory across rounds
+    reflections: list[str] = []  # accumulated feedback notes across rounds
     auto_review_incomplete = False
     for round_index in range(max_rounds):
         gaps = quest_grounding_gaps(quests, npc_refs=npc_refs, place_refs=place_refs)
@@ -222,10 +219,9 @@ def run_quest_refine_loop(
         if not fixes:
             break
         emit("refining")
-        # Feed the whole reflection history forward (Reflexion), not just this round's fixes.
+        # Feed all earlier feedback notes forward, not just this round's fixes.
         reflections.append(reflection)
-        # This round revises: snapshot the quest batch being replaced so complete preference
-        # pairs stay recoverable (see assist/dpo_export.py).
+        # Keep the quest batch being replaced so the revision remains inspectable.
         trail[-1].artifact_before = {"quests": [snapshot_artifact(q) for q in quests]}
         quests, relations, reference_rows = regenerate(
             quests, with_reflection_memory(fixes, reflections)

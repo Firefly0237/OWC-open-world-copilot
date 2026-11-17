@@ -4,6 +4,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+/.pytest-tmp-*/
+/.test-tmp-*/
+/tmp_test_runs/
 .env
 .env.*
 !.env.example
@@ -12,66 +15,44 @@ build/
 dist/
 .idea/
 .vscode/
-# Local editor/tool configuration
-.claude/
+/.claude/
+# Local editor configuration
 .Rhistory
-# benchmark output at repo root only — project_docs/reports/ (real-LLM test records) stays tracked
+# generated report output at repo root
 /reports/
 .tmp/
-# runtime DBs are rebuildable indexes; content files + baselines stay tracked
+# Local databases can contain persistent task history and must not be committed.
 *.sqlite
-# experiment data packs stay local (rebuildable from F:/wuyin)
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.db
+*.pem
+*.key
+*.p12
+*.pfx
+.npmrc
+.pypirc
+# experiment data packs stay local (rebuildable from an operator-provided source directory)
 /*.zip
-# personal project notes/docs stay local only
-/frontend/scripts/
-/scripts/collect_preference_pairs.py
-/scripts/gen_runner_traces.py
-/scripts/prompt_ab_followup.py
-/scripts/run_ab_eval.py
-/scripts/run_complexity_benchmark.py
-/scripts/run_demo_pipeline.py
-/scripts/run_ink_losslessness.py
-/scripts/run_live_eval.py
-/scripts/run_scale_benchmark.py
-/tests/fixtures/
-/unity/com.owcopilot.content-import/Tests/
-/unity/com.owcopilot.content-import/Tests.meta
-/unity/offengine-tests/
-
+# Generated frontend utilities stay local. Product scripts and frozen fixtures are versioned because
+# a clean clone must be able to run the documented gates.
+/apps/web/scripts/
 # Local scratch/working area - not product
 scratchpad/
 
-# UE content-only plugin: never commit regenerated engine artifacts (content-only plugins don't
-# even produce these, but guard defensively). The .uplugin + Content/Python/*.py are the payload.
-integrations/unreal/**/Binaries/
-integrations/unreal/**/Intermediate/
+# Model weights and Hugging Face caches are provisioned from pinned revisions in
+# model-revisions.json; never commit multi-GB local snapshots.
+/.cache/huggingface/
+/.huggingface/
+/model-cache/
+/models/
 
-# Unity UPM package: the payload is text (.cs/.asmdef/package.json/.md) + committed .meta (GUIDs must
-# be tracked). Ignore only Unity/dotnet build artifacts from any throwaway authoring/test project —
-# never .meta.
-unity/**/[Ll]ibrary/
-unity/**/[Tt]emp/
-unity/**/[Oo]bj/
-unity/**/[Ll]ogs/
-unity/**/*.csproj
-unity/**/*.sln
+# --- Local working notes ----------------------------------------------------
+# The complete docs workspace is intentionally outside the public repository.
+/docs/
 
-# --- 文档与证据的入库范围(2026-07-25 定稿)---------------------------------
-# 原则:**面向使用者的手册与可复核的证据入库;内部设计稿、研究过程稿、个人备考稿不入库。**
-# (此前整个 docs/ 与 benchmarks/ 都被排除,克隆者连集成手册和验证证据都看不到,过犹不及。)
-#
-# 不入库 —— 内部过程产物:
-/docs/研究/
-/docs/research/
-/docs/求职材料/
-/docs/interview_prep/
-/docs/演示动线.md
-/docs/product_thesis.md
-/docs/live_agent_showcase.md
-/docs/零调用能力扫描报告.md
-/docs/数据形态_输入与产物.md
-#
-# 入库 —— 面向使用者与可复核的:
-#   README / ARCHITECTURE / docs/UE_INTEGRATION.md / docs/UNITY_INTEGRATION.md
-#   docs/agent_memory.md / docs/中国大陆商业游戏剧情策划工作调查报告_2026.md
-#   benchmarks/(评测报告与真机运行留档 —— 项目声称的数字要能被别人复核)
+# Local service data and validation output
+/var/
+/content/
+.owcopilot/

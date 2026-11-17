@@ -20,6 +20,7 @@ def probe_llm_connection_action(
     api_key: str,
     model: str,
     timeout: float = 12.0,
+    provider_kind: str | None = None,
     provider: Any | None = None,
 ) -> dict[str, Any]:
     """Probe the configured provider with a minimal completion (BYO-key onboarding).
@@ -31,7 +32,13 @@ def probe_llm_connection_action(
 
     from ...llm.gateway import _classify_provider_error
 
-    overrides = {"OPENAI_BASE_URL": base_url.strip(), "OPENAI_API_KEY": api_key.strip()}
+    overrides = {
+        "OWCOPILOT_OPENAI_BASE_URL": base_url.strip(),
+        "OPENAI_BASE_URL": base_url.strip(),
+        "OWCOPILOT_OPENAI_API_KEY": api_key.strip(),
+        "OPENAI_API_KEY": api_key.strip(),
+        "OWCOPILOT_LLM_PROVIDER": (provider_kind or "").strip(),
+    }
     saved = {key: os.environ.get(key) for key in overrides}
     try:
         for key, value in overrides.items():
@@ -39,7 +46,12 @@ def probe_llm_connection_action(
                 os.environ[key] = value
             else:
                 os.environ.pop(key, None)
-        probe = provider or ChatModelProvider(model=model, timeout=timeout, max_output_tokens=64)
+        probe = provider or ChatModelProvider(
+            model=model,
+            timeout=timeout,
+            max_output_tokens=64,
+            provider_kind=provider_kind,
+        )
         started = time.perf_counter()
         result = probe.complete(
             system="You are a connectivity probe.",

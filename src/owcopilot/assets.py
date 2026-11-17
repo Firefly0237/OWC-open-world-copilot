@@ -17,6 +17,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from .storage.atomic_file import atomic_write_text, read_json_file
+
 _MAX_URI = 2048
 _MAX_TITLE = 200
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")  # a uri/title is single-line: strip ALL control chars
@@ -83,13 +85,13 @@ class AssetStore:
     def load(self) -> AssetState:
         if not self.path.exists():
             return AssetState()
-        return AssetState.model_validate_json(self.path.read_text(encoding="utf-8"))
+        return AssetState.model_validate(read_json_file(self.path))
 
     def save(self, state: AssetState) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
+        atomic_write_text(
+            self.path,
             json.dumps(state.model_dump(mode="json"), ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
         )
 
 

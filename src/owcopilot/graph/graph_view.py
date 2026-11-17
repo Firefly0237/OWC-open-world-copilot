@@ -31,6 +31,8 @@ class GraphNode(BaseModel):
     sublabel: str = ""  # secondary line under the label (e.g. the dialogue node's speaker)
     x: float
     y: float
+    z: float = 0.0
+    pinned: bool = False
     focus: bool = False
     flag: str = ""  # impact level when an overlay is requested: must_change | suggest_check
 
@@ -99,19 +101,25 @@ def _build_nodes(
     focus_ref: str,
     flags: dict[str, str],
 ) -> list[GraphNode]:
-    return [
-        GraphNode(
-            ref=ref,
-            kind=_kind_of(bundle, ref),
-            label=_label_of(bundle, ref),
-            x=positions[ref][0],
-            y=positions[ref][1],
-            focus=ref == focus_ref,
-            flag=flags.get(ref, ""),
+    nodes: list[GraphNode] = []
+    for ref in refs:
+        if ref not in positions:
+            continue
+        saved = _graph_pos(bundle, ref)
+        nodes.append(
+            GraphNode(
+                ref=ref,
+                kind=_kind_of(bundle, ref),
+                label=_label_of(bundle, ref),
+                x=positions[ref][0],
+                y=positions[ref][1],
+                z=saved[2] if saved is not None and saved[2] is not None else 0.0,
+                pinned=saved is not None,
+                focus=ref == focus_ref,
+                flag=flags.get(ref, ""),
+            )
         )
-        for ref in refs
-        if ref in positions
-    ]
+    return nodes
 
 
 def _build_edges(graph: ContentGraph, visible: set[str], bundle: ContentBundle) -> list[GraphEdge]:
@@ -221,11 +229,11 @@ def _apply_overrides(
     for ref in list(positions):
         override = _graph_pos(bundle, ref)
         if override is not None:
-            positions[ref] = override
+            positions[ref] = (override[0], override[1])
     return positions
 
 
-def _graph_pos(bundle: ContentBundle, ref: str) -> tuple[float, float] | None:
+def _graph_pos(bundle: ContentBundle, ref: str) -> tuple[float, float, float | None] | None:
     object_type, object_id = _split(ref)
     collections: dict[str, Mapping[str, Any]] = {
         "entity": bundle.entities,
@@ -237,9 +245,9 @@ def _graph_pos(bundle: ContentBundle, ref: str) -> tuple[float, float] | None:
     if collection is None or object_id not in collection:
         return None
     pos = collection[object_id].metadata.get("graph_pos")
-    if isinstance(pos, list) and len(pos) == 2:
+    if isinstance(pos, list) and len(pos) in {2, 3}:
         try:
-            return (float(pos[0]), float(pos[1]))
+            return (float(pos[0]), float(pos[1]), float(pos[2]) if len(pos) == 3 else None)
         except (TypeError, ValueError):
             return None
     return None

@@ -1,70 +1,19 @@
 # WS-E · 有界全路径探索（叙事模型检查）：结局可达性 / 死分支 / 覆盖率。
-"""Bounded explicit-state exploration of a quest's branch graph — narrative model checking.
+"""Bounded explicit-state exploration of a quest's branch graph.
 
-Where :mod:`owcopilot.logic.simulate` walks ONE deterministic path, this explores the WHOLE
-reachable state graph within a bound and reports, as an authoring-QA diagnostic: which outcomes are
-reachable (with a replayable *witness* input sequence), which branches are dead, stage/branch
-coverage, and dead ends — plus an honest ``truncated`` flag when the bound was hit.
+The search enumerates reachable ``(stage, variable-state)`` pairs with a breadth-first
+frontier and a visited set. It reuses the simulator's state seeding and condition checks,
+and applies stage effects followed by the selected branch's effects. The report records
+reachable outcomes, branch witnesses, coverage and dead ends within the explored bounds.
 
-Method — explicit-state on-the-fly search, four canonical references (adopted, not invented):
+The explorer can revisit a stage with different variable values; the single-path simulator
+instead detects cycles by stage. A witness that visits every stage at most once can be
+replayed with ``simulate_quest(quest, choices=witness)``. Witnesses that revisit a stage
+may stop as ``cycle`` in that simulator, even when the state-space explorer reaches an end.
 
-* **Lester, ScAmPER (TAP 2020, LNCS 12165)** — heuristic-guided *explicit-state* search over
-  interactive-fiction game states to decide whether each scripted branch is executable, emitting
-  the input sequence (our ``witness``) that reaches it. Explicit-state beats symbolic when the
-  next-state function is complex but cheap to evaluate — exactly our case (``evaluate`` + ``apply``
-  is cheap, the int domain is unbounded so no SMT). ScAmPER candidly states its coverage side CANNOT
-  prove unreachability: the licence for our "reachable *within the explored boundary*" honesty, and
-  for shipping this as a coverage/diagnostic tool, not a sound audit gate.
-* **Lester, ScAmPI (WPTE 2020, arXiv:2012.15365)** — the complementary bounded-model-checking
-  direction that PROVES reachability of end states but only scales to small games. Justifies the
-  split: bounded exhaustive exploration proves completeness only when it terminates without hitting
-  a bound — precisely our ``truncated=False`` vs ``truncated=True`` distinction.
-* **Holzmann, The Model Checker SPIN (IEEE TSE 23(5), 1997)** — the explicit-state lineage:
-  on-the-fly BFS over a reachable-state graph with a hashed visited-set for dedup (our BFS over
-  ``(stage, frozen var-state)``), and bounded/bitstate search that reports incompleteness honestly
-  rather than claiming full coverage (our ``truncated`` flag + truncation stats).
-* **Kreminski et al. (AIIDE 2020)** — analysing interactive-narrative structure via
-  graph/reachability metrics to *augment* human playtesting, framing branch-outcome reachability and
-  coverage as authoring-QA signals. Positions :func:`explore_quest` as a diagnostic report over the
-  branch graph, not a pass/fail correctness gate.
-
-Fidelity to the simulator (the anti-divergence contract). Exploration reuses the SAME primitives as
-:mod:`.simulate` so its transition relation is identical, branch-by-branch:
-
-* quest-level gating before any stage is explored: the quest-level ``precondition`` is evaluated in
-  the seeded state, and when it is false the report mirrors :func:`.simulate.simulate_quest`'s
-  ``unavailable`` status — zero states explored, every outcome unreachable, and a single
-  ``unavailable`` dead end carrying the gate expression;
-* seeding via :func:`.simulate._seed_state` (variable defaults + every expr ref ``setdefault
-  False``);
-* condition truth via :func:`.simulate._truthy` (short-circuit, strict-bool ``int`` is not ``bool``,
-  broken-expr == unsatisfiable);
-* it applies ``StageLogic.effects_on_complete`` on leaving a stage AND — matching the simulator —
-  ``Branch.effects`` on the branch actually taken, so each satisfiable branch expands into its OWN
-  successor state (two branches out of one stage may now lead to different var-states).
-
-The only intended difference: where the simulator takes ONE branch, exploration enqueues EVERY
-satisfiable branch — and it dedups in ``(stage, var-state)`` space, so it can traverse a stage more
-than once (with a changed state) where the simulator's stage-space visited set cannot.
-
-Witness replay — a BOUNDED equivalence, not a universal one. For a STAGE-SIMPLE witness (each stage
-visited at most once — the forward-DAG shape of every real quest graph, and of the whole N2 corpus)
-the witness replays exactly through the unmodified ``simulate_quest(quest, choices=witness)``, and
-that is the self-check the benchmark enforces. It does NOT hold for a witness that REVISITS a stage
-with a changed var-state — e.g. a counter-gated finale (loop ``s1 <-> s2`` incrementing ``n``, a
-terminal branch gated on ``n >= 2``): exploration correctly reports that outcome reachable with
-witness ``[b_s1s2, b_loop, b_s1s2, b_win]``, but ``simulate_quest`` cycle-aborts in STAGE space
-(:mod:`.simulate`'s ``if pos in visited``) and returns ``status='cycle'``. Reporting the outcome
-reachable is correct — only the replay guarantee is bounded. This is a DELIBERATE, documented
-boundary: widening the simulator's cycle detection to (stage, var-state) space would silently
-change the meaning of ``status='cycle'`` for every existing caller, a cost not worth the corner
-case (real quest graphs are forward DAGs; the N2 corpus contains no looping witness).
-
-Boundary note (honesty, per ScAmPER): a witness is a simple path in the explored region; the visited
-set makes the search terminate on any finite state space and the ``max_states`` / ``max_depth``
-bounds make it terminate on an infinite one (e.g. an unbounded ``inc`` counter). When ``truncated``
-is True the ``unreachable``/``dead`` lists mean "not reached *within the boundary*", never "provably
-unreachable".
+``max_states`` and ``max_depth`` bound the search, including unbounded counter domains.
+When ``truncated`` is true, absent outcomes and dead-branch lists mean not reached within
+the explored boundary. They do not establish unreachability or replace human playtesting.
 """
 
 from __future__ import annotations
@@ -92,8 +41,9 @@ class OutcomeReach(BaseModel):
     ``kind`` is ``"terminal"`` (a ``Branch`` with an empty ``to_stage`` — its ``branch_id`` and
     ``outcome`` label) or ``"linear"`` (the quest completes by reaching a last stage with no
     outgoing branches; label ``"completed"``). ``witness`` is the branch-id sequence that reaches
-    it, replayable verbatim as ``simulate_quest(quest, choices=witness)``; empty when unreachable
-    within the boundary.
+    it. Stage-simple witnesses replay with ``simulate_quest(quest, choices=witness)``;
+    witnesses that revisit a stage have the simulator cycle-detection limitation above.
+    Empty when not reached within the boundary.
     """
 
     outcome: str

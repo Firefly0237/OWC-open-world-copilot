@@ -4,8 +4,8 @@
 
 Following FastAPI's "Bigger Applications" layout, cross-cutting concerns live here rather than in
 the app factory: the auth + rate-limit gate (:func:`_require_client`), project-id resolution
-(:func:`_open_project_context`, :func:`_project_root_or_404`), the tenancy principal resolver and
-role gate, and a handful of small pure helpers. Routers depend on these via ``Depends`` or plain
+(:func:`_open_project_context`, :func:`_project_root_or_404`), and small pure helpers.
+Routers depend on these via ``Depends`` or plain
 calls; the app factory wires the per-process resources onto ``app.state``.
 
 The real-mode admission gate (``_require_real_allowed`` / ``_is_loopback`` / ``load_dotenv``) and
@@ -29,20 +29,14 @@ from typing import Any
 from fastapi import Header, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.gzip import GZipMiddleware
 
-from ..app.workspaces import sanitize_world_name, worlds_home
+from ..app.workspaces import managed_world_path
 from ..config import DEFAULT_LLM_MODE
 from ..content.models import ContentBundle
 from ..graph.index import build_content_graph
 from ..llm.cache import build_cache_backend
 from ..pipeline.project import ProjectContext
-from ..platform import (
-    AuthError,
-    Principal,
-    Role,
-    require_role,
-    resolve_principal,
-)
 from ..retrieval.bm25 import BM25Retriever
 from ..retrieval.context_pack import ContextPackBuilder
 from ..retrieval.embedding import resolve_embedder
@@ -51,6 +45,8 @@ from ..retrieval.neural_rerank import reranker_for_corpus
 from ..retrieval.vector import VectorRetriever
 from ..storage import SQLiteStore
 from ..telemetry import deterministic_step, summarize_workflow
+from ..trust.identifiers import validate_path_segment
+from ..trust.security import PathSecurityError, resolve_under_root
 
 
 # --------------------------------------------------------------------------- settings (env-driven)
@@ -194,10 +190,7 @@ def _require_client(
     during dependency solving, i.e. before body validation, so an unauthenticated call is a clean
     401 rather than a 422. The rate limiter is read from ``app.state`` (set per ``create_app``)."""
     path = request.url.path
-    # /platform/* runs its own principal-based auth (bearer JWT OR the API key), so the api-key gate
-    # here would 401 a valid bearer caller before it ever reaches that logic. Those routes still
-    # reject unauthenticated callers via resolve_principal.
-    if path in _PUBLIC_PATHS or path.startswith("/platform/"):
+    if path in _PUBLIC_PATHS:
         return
     # api-key check first so an unauthenticated caller 401s without consuming rate-limit budget.
     _require_api_key(x_api_key)
@@ -217,19 +210,11 @@ def _context_builder_for_bundle(bundle: ContentBundle) -> tuple[SQLiteStore, Con
     )
 
 
-# Managed world names double as project ids and are frequently CJK, so the rule is
-# "no path-hostile characters", not "ASCII only". Traversal is impossible by charset.
-PROJECT_ID_FORBIDDEN_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
-
 def _validate_project_id(project: str) -> None:
-    if (
-        not project
-        or len(project) > 64
-        or project.strip(".") == ""
-        or PROJECT_ID_FORBIDDEN_RE.search(project)
-    ):
-        raise HTTPException(status_code=400, detail="invalid project id")
+    try:
+        validate_path_segment(project, label="project id", max_length=64)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid project id: {exc}") from exc
 
 
 def _project_registry() -> dict[str, Path]:
@@ -250,6 +235,13 @@ def _project_registry() -> dict[str, Path]:
                 status_code=500,
                 detail="OWCOPILOT_PROJECTS_JSON entries must map string ids to string paths",
             )
+        try:
+            validate_path_segment(key, label="project id", max_length=64)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"OWCOPILOT_PROJECTS_JSON contains an invalid project id: {exc}",
+            ) from exc
         registry[key] = Path(value).expanduser().resolve()
     return registry
 
@@ -261,7 +253,7 @@ def _project_content_root(project: str) -> Path | None:
         # Zero-config path: a managed world's NAME doubles as its project id, so a fresh
         # install needs no OWCOPILOT_PROJECTS_JSON at all — create a world, use its name.
         try:
-            managed = worlds_home() / sanitize_world_name(project)
+            managed = managed_world_path(project)
         except ValueError:
             return None
         if managed.exists() and managed.is_dir():
@@ -280,7 +272,8 @@ def _project_sqlite_path(project: str, content_root: Path) -> Path:
         suffix = hashlib.sha256(str(content_root).encode("utf-8")).hexdigest()[:12]
         return base / f"{project}-{suffix}.sqlite"
 
-    local_runtime = content_root / ".owcopilot"
+    resolved_content_root = content_root.expanduser().resolve()
+    local_runtime = resolve_under_root(resolved_content_root, resolved_content_root / ".owcopilot")
     local_runtime.mkdir(parents=True, exist_ok=True)
     return local_runtime / "runtime.sqlite"
 
@@ -296,7 +289,13 @@ def _open_project_context(project: str) -> ProjectContext | None:
 
 
 def _registered_project(project: str) -> ProjectContext:
-    project_context = _open_project_context(project)
+    try:
+        project_context = _open_project_context(project)
+    except PathSecurityError as exc:
+        # A configured project's runtime parent may itself be a symlink/junction. Convert the
+        # fail-closed filesystem assertion at this shared REST boundary before any project writer
+        # opens, instead of leaking an internal 500 from individual routers.
+        raise HTTPException(status_code=400, detail=f"unsafe project runtime path: {exc}") from exc
     if project_context is None:
         raise HTTPException(
             status_code=404,
@@ -312,6 +311,14 @@ def _project_root_or_404(project: str) -> str:
             status_code=404,
             detail=f"project {project!r} is not registered (OWCOPILOT_PROJECTS_JSON)",
         )
+    try:
+        resolved_content_root = content_root.expanduser().resolve()
+        resolve_under_root(resolved_content_root, resolved_content_root / ".owcopilot")
+    except PathSecurityError as exc:
+        # Action-based routes no longer open a ProjectContext up front, but they still write
+        # service state below .owcopilot. Preserve the old fail-closed boundary before any
+        # action gets a chance to follow a symlink/junction outside the project.
+        raise HTTPException(status_code=400, detail=f"unsafe project runtime path: {exc}") from exc
     return str(content_root)
 
 
@@ -341,25 +348,6 @@ def _deterministic_cost_budget(step_name: str) -> dict[str, Any]:
     return summarize_workflow([deterministic_step(step_name)]).budget.model_dump(mode="json")
 
 
-# --------------------------------------------------------------------------- tenancy principal
-def _principal(authorization: str | None, x_api_key: str | None) -> Principal:
-    try:
-        return resolve_principal(
-            authorization=authorization,
-            x_api_key=x_api_key,
-            expected_api_key=os.getenv("OWCOPILOT_API_KEY"),
-        )
-    except AuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
-
-
-def _require_role_http(principal: Principal, minimum: Role) -> None:
-    try:
-        require_role(principal, minimum)
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-
-
 # --------------------------------------------------------------------------- frontend (SPA) assets
 def _frontend_dist_dir() -> Path | None:
     """Locate the built Vue app: explicit env first, then the repo-relative default."""
@@ -368,8 +356,8 @@ def _frontend_dist_dir() -> Path | None:
         [Path(override)]
         if override
         else [
-            Path(__file__).resolve().parents[3] / "frontend" / "dist",
-            Path.cwd() / "frontend" / "dist",
+            Path(__file__).resolve().parents[3] / "apps" / "web" / "dist",
+            Path.cwd() / "apps" / "web" / "dist",
         ]
     )
     for candidate in candidates:
@@ -379,13 +367,94 @@ def _frontend_dist_dir() -> Path | None:
 
 
 class _SpaStaticFiles(StaticFiles):
-    """Serve the built frontend; unknown paths fall back to index.html so client-side
-    routes (/overview, /review …) survive a hard refresh."""
+    """Serve the SPA without turning missing assets or API typos into fake HTML 200s."""
+
+    _VITE_HASHED_ASSET = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^/]+$")
+
+    def __init__(self, *args: Any, asset_mount: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._asset_mount = asset_mount
+        # Keep compression scoped to the mounted frontend. A global middleware can buffer API
+        # streams; in particular, it must never sit in front of the job-event SSE endpoints.
+        self._gzip_static = GZipMiddleware(self._serve_static, minimum_size=500)
+
+    async def _serve_static(self, scope, receive, send) -> None:
+        await super().__call__(scope, receive, send)
+
+    async def __call__(self, scope, receive, send) -> None:
+        headers = scope.get("headers", []) if isinstance(scope, dict) else []
+        if any(key.lower() == b"range" for key, _value in headers):
+            # Preserve byte-range semantics for media and other large static files.
+            await self._serve_static(scope, receive, send)
+            return
+        await self._gzip_static(scope, receive, send)
+
+    @staticmethod
+    def _accepts_html(scope: object) -> bool:
+        if not isinstance(scope, dict) or scope.get("type") != "http":
+            return False
+        headers = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        return "text/html" in headers.get("accept", "")
+
+    @staticmethod
+    def _clean_path(path: str) -> str:
+        # StaticFiles.get_path() returns an OS-normalized path. On Windows/Starlette 1.4 this
+        # means backslashes, while URL-derived asset checks must stay separator-independent.
+        return path.replace("\\", "/").lstrip("/")
+
+    @staticmethod
+    def _decorate(response, *, html: bool, immutable_asset: bool):
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), geolocation=(), microphone=(), payment=(), usb=()"
+        )
+        if html:
+            # A deployment may replace hashed chunks. Revalidate the shell so browsers never keep
+            # an index that points at assets removed by the next release.
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; "
+                "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+            )
+            response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive"
+        elif immutable_asset:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            # Unversioned public files may change between releases and must be revalidated.
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
     async def get_response(self, path: str, scope):
         try:
-            return await super().get_response(path, scope)
+            response = await super().get_response(path, scope)
+            content_type = response.headers.get("content-type", "").lower()
+            clean = self._clean_path(path)
+            return self._decorate(
+                response,
+                html="text/html" in content_type,
+                immutable_asset=(
+                    (self._asset_mount or clean.startswith("assets/"))
+                    and bool(self._VITE_HASHED_ASSET.search(clean.rsplit("/", 1)[-1]))
+                ),
+            )
         except StarletteHTTPException as e:
-            if e.status_code == 404:
-                return await super().get_response("index.html", scope)
+            clean = self._clean_path(path)
+            method = scope.get("method") if isinstance(scope, dict) else None
+            is_asset = clean.startswith("assets/")
+            looks_like_file = "." in clean.rsplit("/", 1)[-1]
+            if (
+                e.status_code == 404
+                and method in {"GET", "HEAD"}
+                and self._accepts_html(scope)
+                and not is_asset
+                and not looks_like_file
+            ):
+                response = await super().get_response("index.html", scope)
+                return self._decorate(response, html=True, immutable_asset=False)
             raise

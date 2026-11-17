@@ -26,6 +26,7 @@ from ..patches import (
     apply_patch_to_store,
     rollback_patch_in_store,
 )
+from ..storage.world_lock import world_write_lock
 from .audit import run_full_audit
 from .project import ProjectContext
 
@@ -87,6 +88,17 @@ class ApplyOutcome:
 
 
 def apply_patch_workflow(project: ProjectContext, patch_id: str, *, operator: str) -> ApplyOutcome:
+    """Serialize validation, canon mutation, and patch-ledger update as one world write."""
+    with world_write_lock(project.content_store.root):
+        # Callers such as REST and CLI construct the context before entering this workflow. If the
+        # lock had to wait, validate the patch against the now-current canon, not that stale view.
+        project.reload()
+        return _apply_patch_workflow_unlocked(project, patch_id, operator=operator)
+
+
+def _apply_patch_workflow_unlocked(
+    project: ProjectContext, patch_id: str, *, operator: str
+) -> ApplyOutcome:
     stored = project.sqlite_store.get_patch(patch_id)
     if stored is None:
         raise FileNotFoundError(f"patch not found: {patch_id}")
@@ -135,6 +147,15 @@ class RollbackOutcome:
 
 
 def rollback_patch_workflow(
+    project: ProjectContext, patch_id: str, *, operator: str
+) -> RollbackOutcome:
+    """Serialize canon rollback and the corresponding patch-ledger transition."""
+    with world_write_lock(project.content_store.root):
+        project.reload()
+        return _rollback_patch_workflow_unlocked(project, patch_id, operator=operator)
+
+
+def _rollback_patch_workflow_unlocked(
     project: ProjectContext, patch_id: str, *, operator: str
 ) -> RollbackOutcome:
     stored = project.sqlite_store.get_patch(patch_id)

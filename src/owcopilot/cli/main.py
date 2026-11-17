@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import sys
-import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -25,40 +24,17 @@ from ..audit.report import render_audit_markdown
 from ..audit.runner import AuditRunner
 from ..config import DEFAULT_CHEAP_MODEL, DEFAULT_LLM_MODE
 from ..content.hash import content_hash
-from ..content.ingest import ingest_raw_objects, parse_paths
+from ..content.ingest import IngestResult, ingest_raw_objects, parse_paths
 from ..content.mapping import FieldMapping, apply_field_mapping
-from ..evaluation import run_acceptance_evaluation, run_golden_evaluation
-from ..evaluation.agent_task_bench import (
-    DEFAULT_BUDGET_USD as DEFAULT_AGENT_TASK_BUDGET_USD,
-)
-from ..evaluation.agent_task_bench import (
-    DEFAULT_MAX_STEPS as DEFAULT_AGENT_TASK_MAX_STEPS,
-)
-from ..evaluation.agent_task_bench import (
-    DEFAULT_RUNG as AGENT_TASK_DEFAULT_RUNG,
-)
-from ..evaluation.agent_task_bench import (
-    DEFAULT_TRIALS as DEFAULT_AGENT_TASK_TRIALS,
-)
-from ..evaluation.agent_task_bench import (
-    PROMPT_VARIANTS as AGENT_TASK_PROMPT_VARIANTS,
-)
-from ..evaluation.agent_task_bench import (
-    RUNGS as AGENT_TASK_RUNGS,
-)
-from ..evaluation.report_actionability import (
-    DEFAULT_ACTIONABILITY_BUDGET_USD,
-    DEFAULT_FIXER_MAX_STEPS,
-)
-from ..exporters import EngineTarget, export_content_bundle
+from ..exporters import EngineTarget
 from ..impact import Change, ChangeSet, ChangeType, ImpactAnalyzer, ImpactLevel
+from ..inspiration.models import REFERENCE_USES, Provenance
 from ..llm.cache import NoOpCache
 from ..llm.gateway import LLMGateway, require_offline_llm_allowed
 from ..llm.resilience import build_real_provider
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
 from ..pipeline.audit import run_full_audit
-from ..pipeline.export_gate import assert_export_ready
 from ..pipeline.harness import run_quality_harness
 from ..pipeline.ingest import run_ingest
 from ..pipeline.patches import (
@@ -70,8 +46,7 @@ from ..pipeline.patches import (
 from ..pipeline.project import ProjectContext
 from ..pipeline.review import decide_review_item
 from ..qa.community_index import CommunityIndexService
-from ..qa.offline import OfflineCommunityReportProvider, OfflineQAProvider
-from ..qa.service import LoreQAService
+from ..qa.offline import OfflineCommunityReportProvider
 from ..readiness import assess_readiness
 from ..telemetry import deterministic_step, llm_step, summarize_workflow
 from ..util import load_dotenv
@@ -172,6 +147,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="List only items that are not yet complete.",
     )
     readiness.set_defaults(handler=_cmd_readiness)
+
+    flag_xref = subparsers.add_parser(
+        "flag-xref",
+        help=(
+            "Cross-reference world state flags: who declares / writes / reads each one, plus the "
+            "decidable problems (conflicting declarations, gates nothing can open, dead writes)."
+        ),
+    )
+    _add_project_args(flag_xref)
+    flag_xref.add_argument(
+        "--flag",
+        help="Narrow to one variable id; omitted, every flag in the world is listed.",
+    )
+    flag_xref.set_defaults(handler=_cmd_flag_xref)
 
     quest_explore = subparsers.add_parser(
         "quest-explore",
@@ -343,7 +332,27 @@ def build_parser() -> argparse.ArgumentParser:
             "--resume (the goal is recovered from the checkpoint being continued)."
         ),
     )
-    agent.add_argument("--max-steps", type=int, default=6, help="Tool-call budget for the loop.")
+    agent.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Planning-turn budget (fresh default: 6; resume restores its frozen value).",
+    )
+    agent.add_argument(
+        "--max-model-calls",
+        type=int,
+        default=None,
+        help=(
+            "Hard total across planning, compression, finish and reflection calls; fresh runs "
+            "derive a bounded compatibility default and resume restores its frozen value."
+        ),
+    )
+    agent.add_argument(
+        "--max-tool-calls",
+        type=int,
+        default=None,
+        help="Independent tool-call budget; defaults to --max-steps for compatibility.",
+    )
     agent.add_argument(
         "--skills",
         nargs="*",
@@ -356,10 +365,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     agent.add_argument(
+        "--tool-transport",
+        choices=["native", "mcp"],
+        default=None,
+        help=(
+            "Execution transport for audit_project: native runs it in-process; mcp crosses the "
+            "checked local stdio MCP boundary. Fresh runs default to native; on resume, omitting "
+            "this flag restores the frozen route. MCP failures never fall back silently."
+        ),
+    )
+    agent.add_argument(
         "--no-recall",
         action="store_true",
         help=(
-            "Disable episodic memory recall (MemGPT recall storage + Reflexion buffer). "
+            "Disable episodic run and reflection recall. "
             "By default the agent retrieves similar past runs and reflections and injects them "
             "as prompt context; this flag turns that read side off (writes still happen)."
         ),
@@ -371,8 +390,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Step-budget-exhaustion behaviour (default: force = stop immediately, unchanged). "
             "'generate' spends one extra LLM call asking for a real final answer from the "
-            "transcript collected so far (LangChain AgentExecutor's early_stopping_method="
-            "'generate'), instead of discarding it; stop_reason becomes 'max_steps_generate'."
+            "transcript collected so far, instead of discarding it; stop_reason becomes "
+            "'max_steps_generate'."
         ),
     )
     agent.add_argument(
@@ -443,6 +462,27 @@ def build_parser() -> argparse.ArgumentParser:
     _add_project_args(multi_agent)
     multi_agent.add_argument(
         "--goal", required=True, help="High-level goal for the orchestrator to decompose."
+    )
+    multi_agent.add_argument(
+        "--max-tool-calls",
+        type=int,
+        default=None,
+        help="Independent per-worker/verifier tool-call budget (default: each model budget).",
+    )
+    multi_agent.add_argument(
+        "--max-model-calls",
+        type=int,
+        default=None,
+        help=(
+            "Hard model-call budget shared by decomposition, all workers, verifier and "
+            "reflection retries (default: 128)."
+        ),
+    )
+    multi_agent.add_argument(
+        "--max-total-tool-calls",
+        type=int,
+        default=None,
+        help="Hard tool-call budget shared by every worker and verifier (default: 256).",
     )
     multi_agent.add_argument(
         "--checkpoint-path",
@@ -517,8 +557,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--agentic",
         action="store_true",
         help=(
-            "Enable agentic retrieval (CRAG/Self-RAG-style sufficiency judge + query-rewrite "
-            "multi-hop) — extra LLM calls per hop, so opt-in."
+            "Enable bounded retrieval with a sufficiency judge and follow-up queries. "
+            "Additional model calls may be made per hop, so this is opt-in."
         ),
     )
     ask.add_argument(
@@ -589,8 +629,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--llm-candidates",
         action="store_true",
         help=(
-            "Widen the MCTS move set with LLM-proposed fix candidates (LATS-style LM proposer, "
-            "arXiv:2310.04406). Off by default: the search stays $0/deterministic. Needs "
+            "Widen the MCTS move set with model-proposed fix candidates. "
+            "Off by default: the search stays $0/deterministic. Needs "
             "--llm-mode real; each model candidate is still shadow-validated and non-worsening-"
             "pruned like the deterministic fixers."
         ),
@@ -600,7 +640,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=_nonneg_int,
         default=32,
         help=(
-            "Hard cap on LLM proposer calls when --llm-candidates is set (LATS budget knob). "
+            "Hard cap on proposer calls when --llm-candidates is set. "
             "Once spent, the search falls back to the deterministic fixers."
         ),
     )
@@ -633,6 +673,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_project_args(draft)
     draft.add_argument("--brief", required=True)
     draft.add_argument("--budget-tokens", type=_nonneg_int, default=800)
+    draft.add_argument(
+        "--use-references",
+        action="store_true",
+        help=(
+            "Also ground the draft on the inspiration library (only sources whose allowed_uses "
+            "include 'drafting'). Off by default; an empty library still drafts normally. The "
+            "reply then carries inspiration_refs plus a recomputed reference-leakage report."
+        ),
+    )
     _add_llm_args(draft)
     draft.set_defaults(handler=_cmd_draft)
 
@@ -675,6 +724,16 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--title", help="Source title; defaults to the file stem.")
     extract.add_argument("--source-kind", default="文稿")
     extract.add_argument(
+        "--provenance",
+        default=Provenance.OWN_IP.value,
+        choices=[item.value for item in Provenance],
+        help=(
+            "Rights status of the manuscript. This door writes canon drafts, so "
+            "third_party_reference is refused here — put that material in the inspiration "
+            "library instead."
+        ),
+    )
+    extract.add_argument(
         "--fill-gaps",
         action="store_true",
         help="Ask the model to suggest values for missing fields and apply them.",
@@ -692,6 +751,59 @@ def build_parser() -> argparse.ArgumentParser:
     _add_llm_args(extract)
     extract.set_defaults(handler=_cmd_extract)
 
+    reference = subparsers.add_parser(
+        "reference",
+        help=(
+            "Manage the inspiration reference library (grounding material, never canon): "
+            "add / list / search reference sources."
+        ),
+    )
+    _add_project_args(reference)
+    reference.add_argument(
+        "action",
+        choices=["add", "list", "search"],
+        help=(
+            "add: ingest reference text. list: list stored sources. "
+            "search: retrieval lookup by query."
+        ),
+    )
+    reference.add_argument("--title", help="Reference title (action=add).")
+    reference.add_argument("--text", help="Reference text content (action=add).")
+    reference.add_argument(
+        "--source-type", default="uploaded_file", help="Source type label (action=add)."
+    )
+    reference.add_argument(
+        "--original-filename",
+        help="Original filename, if the text came from a file (action=add).",
+    )
+    reference.add_argument(
+        "--allowed-use",
+        action="append",
+        dest="allowed_uses",
+        choices=sorted(REFERENCE_USES),
+        help=(
+            "Repeatable; which pipelines may retrieve this source (action=add). "
+            "Omit to default to 'inspiration' only."
+        ),
+    )
+    reference.add_argument(
+        "--provenance",
+        default=Provenance.THIRD_PARTY_REFERENCE.value,
+        choices=[item.value for item in Provenance],
+        help=(
+            "Rights status of the material (action=add). Unlike `extract`, this library takes "
+            "all three provenances — it is physically separate from canon."
+        ),
+    )
+    reference.add_argument("--query", help="Search query text (action=search).")
+    reference.add_argument(
+        "--budget-tokens",
+        type=int,
+        default=1000,
+        help="Search token budget (action=search, default 1000).",
+    )
+    reference.set_defaults(handler=_cmd_reference)
+
     barks = subparsers.add_parser(
         "barks", help="Generate lint-filtered bark variants into the review queue."
     )
@@ -704,6 +816,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--allowed-entities",
         help="Comma-separated extra entity ids the bark text may reference.",
     )
+    barks.add_argument(
+        "--use-references",
+        action="store_true",
+        help=(
+            "Also ground the barks on the inspiration library (only sources whose allowed_uses "
+            "include 'drafting'). Off by default; an empty library still drafts normally. The "
+            "reply then carries inspiration_refs plus a recomputed reference-leakage report."
+        ),
+    )
     _add_llm_args(barks)
     barks.set_defaults(handler=_cmd_barks)
 
@@ -715,6 +836,31 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--reject", help="Review item id to reject.")
     review.add_argument("--operator", help="Required with --accept/--reject.")
     review.set_defaults(handler=_cmd_review)
+
+    style_sweep = subparsers.add_parser(
+        "style-sweep",
+        help=(
+            "Recall a versioned StyleRubric checklist across the whole world (L1 word/regex -> "
+            "L2 embedding concept -> L3 LLM judge cascade). A $0 diagnostic report for a human, "
+            "same shape as flag-xref/quest-explore -- never a pass/fail gate."
+        ),
+    )
+    _add_project_args(style_sweep)
+    style_sweep.add_argument(
+        "--rubric-id",
+        required=True,
+        help="StyleRubric id from the content bundle (bundle.style_rubrics).",
+    )
+    style_sweep.add_argument(
+        "--use-llm",
+        action="store_true",
+        help="Also run the L3 judge over the L2 candidate pool (needs --llm-mode real for a "
+        "real model).",
+    )
+    style_sweep.add_argument("--max-judge", type=_nonneg_int, default=400)
+    style_sweep.add_argument("--semantic-threshold", type=_nonneg_float, default=0.5)
+    _add_llm_args(style_sweep)
+    style_sweep.set_defaults(handler=_cmd_style_sweep)
 
     export = subparsers.add_parser(
         "export", help="Export project content as a data bundle + localization files."
@@ -754,7 +900,37 @@ def build_parser() -> argparse.ArgumentParser:
             "never remapped. Omit to keep the default field names (export unchanged)."
         ),
     )
+    export.add_argument(
+        "--planning-workbook",
+        action="store_true",
+        help=(
+            "Also write planning_workbook.xlsx: 任务表/台词表/实体表/术语表 as sheets in one "
+            "workbook, columns matching the generic CSV/XLSX import's own field names. "
+            "Engine-agnostic (written regardless of --target-engine). Off by default."
+        ),
+    )
+    export.add_argument(
+        "--planning-notes",
+        action="store_true",
+        help=(
+            "Also write planning_notes.docx: 世界概览/任务卡/人物设定卡, plus a 审查报告 section "
+            "listing every open audit finding. Engine-agnostic. Off by default."
+        ),
+    )
     export.set_defaults(handler=_cmd_export)
+
+    prose_check = subparsers.add_parser(
+        "prose-check",
+        help=(
+            "Check a pasted chapter against the archive: resolved mentions, forbidden-term "
+            "spellings, unknown proper-noun candidates. Deterministic, no LLM."
+        ),
+    )
+    _add_project_args(prose_check)
+    prose_check.add_argument(
+        "--input", required=True, help="Path to the prose/chapter text file to check (UTF-8)."
+    )
+    prose_check.set_defaults(handler=_cmd_prose_check)
 
     sync_back = subparsers.add_parser(
         "sync-back",
@@ -820,179 +996,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stage new/changed entities+relations into review (otherwise just print the plan).",
     )
     recognize.add_argument("--operator", default="import", help="Operator recorded on apply.")
-    recognize.set_defaults(handler=_cmd_recognize)
-
-    eval_golden = subparsers.add_parser("eval-golden", help="Run the offline Golden World eval.")
-    eval_golden.add_argument("--workspace", required=True)
-    eval_golden.add_argument(
-        "--output",
-        help="Write the JSON result to this file as well as stdout.",
-    )
-    eval_golden.set_defaults(handler=_cmd_eval_golden)
-
-    eval_acceptance = subparsers.add_parser(
-        "eval-acceptance",
-        help=(
-            "Run the acceptance benchmark: 65-entity bilingual world, 25 seeded errors, "
-            "impact recall, 30-query retrieval and QA gates. Offline, $0."
-        ),
-    )
-    eval_acceptance.add_argument("--workspace", required=True)
-    eval_acceptance.add_argument(
-        "--output",
-        help="Write the JSON result to this file as well as stdout.",
-    )
-    eval_acceptance.set_defaults(handler=_cmd_eval_acceptance)
-
-    eval_repair = subparsers.add_parser(
-        "eval-repair",
-        help=(
-            "Benchmark the MCTS repair planner vs a greedy baseline over the same move space "
-            "(independent-fix worlds + a controlled interacting world). Offline, $0."
-        ),
-    )
-    eval_repair.add_argument(
-        "--output", help="Write the JSON result to this file as well as stdout."
-    )
-    eval_repair.set_defaults(handler=_cmd_eval_repair)
-
-    eval_agent = subparsers.add_parser(
-        "eval-agent",
-        help=(
-            "Five-dimension agent scorecard for task completion, character consistency, "
-            "narrative plausibility, tool-call effectiveness, and safety."
-        ),
-    )
-    eval_agent.add_argument(
-        "--output", help="Write the JSON result to this file as well as stdout."
-    )
-    eval_agent.set_defaults(handler=_cmd_eval_agent)
-
-    eval_agent_tasks = subparsers.add_parser(
-        "eval-agent-tasks",
-        help=(
-            "Task-level agent benchmark: seeded defect worlds, the deterministic audit's open "
-            "findings as ground truth, k real-model trials per task, machine-scored recall / "
-            "precision / pass^k. Costs money with --llm-mode real."
-        ),
-    )
-    eval_agent_tasks.add_argument("--workspace", required=True)
-    eval_agent_tasks.add_argument(
-        "--trials",
-        type=int,
-        default=DEFAULT_AGENT_TASK_TRIALS,
-        help="Trials per task (k in pass^k). Must be >= 1.",
-    )
-    eval_agent_tasks.add_argument(
-        "--max-steps", type=int, default=DEFAULT_AGENT_TASK_MAX_STEPS, help="Agent step budget."
-    )
-    eval_agent_tasks.add_argument(
-        "--max-replans",
-        type=int,
-        default=1,
-        help="Bounded plan-and-execute replans per trial (0 disables; hard cap 2).",
-    )
-    eval_agent_tasks.add_argument(
-        "--budget-usd",
-        type=_nonneg_float,
-        default=DEFAULT_AGENT_TASK_BUDGET_USD,
-        help="Hard spend stop: the run aborts and reports budget_stopped when exceeded.",
-    )
-    eval_agent_tasks.add_argument(
-        "--task",
-        action="append",
-        dest="task_ids",
-        help="Run only these task ids (repeatable, e.g. --task T01 --task T02).",
-    )
-    eval_agent_tasks.add_argument(
-        "--rung",
-        choices=list(AGENT_TASK_RUNGS),
-        default=AGENT_TASK_DEFAULT_RUNG,
-        help=(
-            "Ablation rung; each adds ONE capability to the one below it. L0 = no tools at all. "
-            "L1 = + retrieval/graph tools (unaided discovery through the product's read surface). "
-            "L2 = + the winning prompt variant. L3 = + dialogue trees in the read surface. "
-            "L4 = + the deterministic checker (full production surface). Corpus, gold set, scorer "
-            "and thresholds are identical on every rung, so a rung-to-rung gap is that one "
-            "variable's measured contribution."
-        ),
-    )
-    eval_agent_tasks.add_argument(
-        "--prompt-variant",
-        choices=list(AGENT_TASK_PROMPT_VARIANTS),
-        default=None,
-        help=(
-            "Override the rung's prompt variant. Used for the prompt A/B (which sweeps variants at "
-            "a fixed rung) and for protocol-isolation runs; recorded in the report, so an "
-            "overridden run is never mistaken for the ladder's own rung."
-        ),
-    )
-    eval_agent_tasks.add_argument(
-        "--output", help="Write the JSON result to this file as well as stdout."
-    )
-    _add_llm_args(eval_agent_tasks)
-    eval_agent_tasks.set_defaults(handler=_cmd_eval_agent_tasks)
-
-    eval_report = subparsers.add_parser(
-        "eval-report-actionability",
-        help=(
-            "Measure whether the audit report is actionable: every open finding is handed, one at "
-            "a time, to a fresh fixer that gets ONLY that finding's report text plus read/write "
-            "access to the content files (no audit tool, no source). Judged by re-running the "
-            "audit. Costs money with --llm-mode real."
-        ),
-    )
-    eval_report.add_argument(
-        "--workspace", required=True, help="Scratch directory for the per-finding world copies."
-    )
-    eval_report.add_argument(
-        "--label",
-        default="未标注",
-        help="Which report generation this run measures, e.g. 改造前基线 / 改造后.",
-    )
-    eval_report.add_argument(
-        "--max-steps",
-        type=int,
-        default=DEFAULT_FIXER_MAX_STEPS,
-        help="Model-call budget for one fixer.",
-    )
-    eval_report.add_argument(
-        "--budget-usd",
-        type=_nonneg_float,
-        default=DEFAULT_ACTIONABILITY_BUDGET_USD,
-        help="Hard spend stop: the run aborts and reports budget_stopped when exceeded.",
-    )
-    eval_report.add_argument(
-        "--world",
-        action="append",
-        dest="world_ids",
-        help="Measure only these seeded worlds (repeatable, e.g. --world T01 --world T03).",
-    )
-    eval_report.add_argument(
-        "--no-file-listing",
+    recognize.add_argument(
+        "--enable-llm",
         action="store_true",
         help=(
-            "Stricter variant: take the file-tree listing away, so finding the right file depends "
-            "on the report alone. Use when the headline rate has saturated."
+            "Also run the §8-guarded LLM relation pass (closed-world + evidence-grounded, "
+            "default off) on top of the deterministic recognizers. Needs --llm-mode/--llm-model "
+            "for the model to use."
         ),
     )
-    eval_report.add_argument(
-        "--replay-report-text",
-        help=(
-            "Re-measure an OLDER report generation: read each finding's report text from a stored "
-            "run's JSON instead of rendering today's. Use to re-judge a past run under a changed "
-            "judging rule (e.g. the content-preservation clause) without restoring old code."
-        ),
-    )
-    eval_report.add_argument(
-        "--report-out",
-        help="Write the per-finding table + JSON record to this path stem (.md / .json).",
-    )
-    eval_report.add_argument(
-        "--output", help="Write the JSON result to this file as well as stdout."
-    )
-    _add_llm_args(eval_report)
-    eval_report.set_defaults(handler=_cmd_eval_report_actionability)
+    _add_llm_args(recognize)
+    recognize.set_defaults(handler=_cmd_recognize)
 
     return parser
 
@@ -1047,7 +1061,11 @@ def _add_llm_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max-cost-usd",
         type=_nonneg_float,
-        help="Soft budget: the cost_budget output flags over_budget when exceeded.",
+        help=(
+            "Agent runs: once completed-call telemetry reaches this value, block the next model "
+            "dispatch; one in-flight call may overshoot and illustrative prices remain estimates. "
+            "Other LLM workflows retain their report-only cost_budget semantics."
+        ),
     )
 
 
@@ -1084,34 +1102,19 @@ def _llm_gateway(
 
 
 def _agent_chat_model(args: argparse.Namespace) -> Any:
-    """The agent's LangChain chat model per ``--llm-mode`` (the ``create_agent`` assembly point).
+    """Resolve ``--llm-mode``/``--llm-model`` into the agent's LangChain chat model.
 
-    real: taken from :class:`~owcopilot.llm.chat_model.ChatModelProvider` — the ONE place that
-    knows how the real model is configured (env, key resolution, output cap) — then optionally
-    wrapped in ``build_chat_model_with_resilience`` (a no-op unless ``OWCOPILOT_FALLBACK_MODEL`` /
-    ``OWCOPILOT_CIRCUIT_BREAKER`` are set). offline: the deterministic ``tool_calls`` double, a
-    test/CI dry-run gated behind ``OWCOPILOT_ALLOW_OFFLINE_LLM`` — never a shipped product mode.
-    The retired text-path json_mode knob does not apply here: the agent's planning calls never
-    pass the provider's JSON gate.
+    The model assembly itself lives in
+    :func:`~owcopilot.app.actions.agent.build_agent_chat_model` (shared with the REST agent job);
+    this only reads the two flags off the parsed namespace, so both agent front-ends construct the
+    model exactly one way.
     """
-    if getattr(args, "llm_mode", "offline") == "real":
-        load_dotenv()  # pick up OPENAI_BASE_URL / OPENAI_API_KEY from .env; shell env wins
-        from ..llm.chat_model import (  # noqa: PLC0415 — live path only
-            ChatModelProvider,
-            build_chat_model_with_resilience,
-        )
+    from ..app.actions import build_agent_chat_model
 
-        # Opt-in failover + circuit breaker (OWCOPILOT_FALLBACK_MODEL / OWCOPILOT_CIRCUIT_BREAKER):
-        # a no-op unless the env is set, so the default agent path is unchanged. Covers both the
-        # create_agent host and the orchestrator's bare `invoke` (resilience parity with the text
-        # path — failover AND circuit breaker).
-        return build_chat_model_with_resilience(
-            ChatModelProvider(model=args.llm_model).chat_model()
-        )
-    require_offline_llm_allowed()  # `--llm-mode offline` is a test/CI dry-run, not a product
-    from ..agent.offline import OfflineReactChatModel  # noqa: PLC0415
-
-    return OfflineReactChatModel()
+    return build_agent_chat_model(
+        llm_mode=getattr(args, "llm_mode", "offline"),
+        llm_model=getattr(args, "llm_model", DEFAULT_CHEAP_MODEL),
+    )
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
@@ -1145,14 +1148,24 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
             )
             for path in input_paths
         ]
-        result = ingest_raw_objects(
-            [raw for _path, raws in raw_by_input for raw in raws],
-            store=project.content_store,
-            dry_run=not args.write,
-            write_non_conflicting=args.skip_conflicts,
-        )
-        if args.write and (not result.has_errors or args.skip_conflicts):
-            project.reload()
+
+        def ingest_mapped_objects() -> IngestResult:
+            return ingest_raw_objects(
+                [raw for _path, raws in raw_by_input for raw in raws],
+                store=project.content_store,
+                dry_run=not args.write,
+                write_non_conflicting=args.skip_conflicts,
+            )
+
+        if args.write:
+            from ..storage.world_lock import world_write_lock
+
+            with world_write_lock(project.content_store.root):
+                result = ingest_mapped_objects()
+                if not result.has_errors or args.skip_conflicts:
+                    project.reload()
+        else:
+            result = ingest_mapped_objects()
         return _emit(
             {
                 "dry_run": result.dry_run,
@@ -1223,7 +1236,13 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 
 def _cmd_readiness(args: argparse.Namespace) -> int:
     with _project(args) as project:
-        report = assess_readiness(project.bundle)
+        # N2.4 / B7: the CLI is the one readiness caller that already has the project's reference
+        # store in hand, so it is the natural (and lowest-friction) place to turn on the opt-in
+        # dangling-inspiration-ref check — see assess_readiness()'s docstring for why this landed
+        # in readiness rather than a new audit rule. REST/analytics/harness call assess_readiness
+        # without this kwarg and keep their pre-existing behaviour untouched.
+        known_chunk_ids = frozenset(chunk.id for chunk in project.reference_store.load_chunks())
+        report = assess_readiness(project.bundle, known_reference_chunk_ids=known_chunk_ids)
         payload = report.model_dump(mode="json")
         items = payload["items"]
         if args.kind:
@@ -1235,7 +1254,16 @@ def _cmd_readiness(args: argparse.Namespace) -> int:
         return _emit(payload, args)
 
 
-def _read_state_file(path: str | None) -> dict | None:
+def _cmd_flag_xref(args: argparse.Namespace) -> int:
+    from ..logic import build_flag_xref
+
+    with _project(args) as project:
+        payload = build_flag_xref(project.bundle).report(args.flag)
+        payload["cost_budget"] = _deterministic_cost_budget("flag_xref")
+        return _emit(payload, args)
+
+
+def _read_state_file(path: str | None) -> dict[str, Any] | None:
     if not path:
         return None
     state = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -1249,39 +1277,22 @@ def _split_choices(raw: str | None) -> list[str]:
 
 
 def _cmd_quest_simulate(args: argparse.Namespace) -> int:
-    from ..logic import simulate_quest, walk_dialogue_tree
+    from ..app.actions import simulate_quest_action
 
     initial_state = _read_state_file(args.initial_state)
-    choices = _split_choices(args.choices)
-    with _project(args) as project:
-        quest = project.bundle.quests.get(args.quest_id)
-        if quest is None:
-            raise ValueError(
-                f"任务「{args.quest_id}」不存在。"
-                "先用 `owcopilot readiness --content-root <root> --kind quest` 列出可用的任务 id。"
-            )
-        walk_dump = None
-        if args.dialogue_tree:
-            tree = project.bundle.dialogue_trees.get(args.dialogue_tree)
-            if tree is None:
-                raise ValueError(
-                    f"对白树「{args.dialogue_tree}」不存在。可用 id："
-                    f"{'、'.join(sorted(project.bundle.dialogue_trees)) or '（无）'}"
-                )
-            walk = walk_dialogue_tree(tree, choices=_split_choices(args.dialogue_choices) or None)
-            walk_dump = walk.model_dump(mode="json")
-            # composition contract: dialogue outcome seeds the quest; explicit overrides win
-            merged = dict(walk.final_state)
-            merged.update(initial_state or {})
-            initial_state = merged
-        run = simulate_quest(quest, choices=choices or None, initial_state=initial_state)
-        payload = {
-            **run.model_dump(mode="json"),
-            "cost_budget": _deterministic_cost_budget("quest_simulate"),
-        }
-        if walk_dump is not None:
-            payload["dialogue_walk"] = walk_dump
-        return _emit(payload, args)
+    result = simulate_quest_action(
+        args.content_root,
+        quest_id=args.quest_id,
+        choices=_split_choices(args.choices) or None,
+        initial_state=initial_state,
+        dialogue_tree_id=args.dialogue_tree,
+        dialogue_choices=_split_choices(args.dialogue_choices) or None,
+        sqlite_path=args.sqlite_path,
+    )
+    payload = {**result["run"], "cost_budget": result["cost_budget"]}
+    if "dialogue_walk" in result:
+        payload["dialogue_walk"] = result["dialogue_walk"]
+    return _emit(payload, args)
 
 
 def _cmd_dialogue_walk(args: argparse.Namespace) -> int:
@@ -1343,35 +1354,6 @@ def _cmd_quality_harness(args: argparse.Namespace) -> int:
         )
 
 
-def _recall_agent_memory(
-    episodic: Any,
-    store: Any,
-    embedder: Any,
-    goal: str,
-    *,
-    enabled: bool,
-) -> list[str] | None:
-    """Assemble the recalled episodic context for one agent run, or ``None`` when there is none.
-
-    Combines the two recall channels into the single ``reflections`` list ``ReActAgent.run`` already
-    accepts: the MemGPT similar-run block first (as one context block), then the Reflexion buffer's
-    reflections. ``enabled=False`` (--no-recall) short-circuits WITHOUT calling recall at all, so
-    the read side is genuinely off. Fail-open: any recall error is logged and treated as no hits, so
-    memory retrieval can never break the agent run. Empty ⇒ ``None`` (byte-identical prompt)."""
-    if not enabled:
-        return None
-    blocks: list[str] = []
-    try:
-        run_hits = episodic.recall_similar_runs(store, embedder, goal)
-        if run_hits:
-            blocks.append(episodic.format_history_block(run_hits))
-        blocks.extend(hit.reflection for hit in episodic.recall_reflections(store, embedder, goal))
-    except Exception as exc:  # noqa: BLE001 — recall is best-effort; never break the run
-        logger.warning("agent memory recall failed (%s); running without recalled context", exc)
-        return None
-    return blocks or None
-
-
 def _cmd_mcp_serve(args: argparse.Namespace) -> int:
     """Run the MCP server (blocks). The shared-project lifespan and concurrency reasoning live in
     ``mcp_server/serve.py``; this handler only validates the root and hands off to it."""
@@ -1393,56 +1375,16 @@ def _cmd_mcp_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _hitl_resume_decisions(args: argparse.Namespace) -> list[dict[str, Any]] | None:
-    """The HITL decision list for a --resume, or None for a plain (T4 crash) resume.
-
-    Maps the single ``--decision approve|reject`` to one HITLRequest decision; the agent replicates
-    it across every action in the pending gate. A bare --resume (no --decision) returns None so the
-    resume stays the T4 crash-continue path. Guards the misuse of --decision without --resume at the
-    call site (only invoked when resume is True)."""
-    decision = getattr(args, "decision", None)
-    if not decision:
-        return None
-    entry: dict[str, Any] = {"type": decision}
-    if decision == "reject" and getattr(args, "decision_message", None):
-        entry["message"] = args.decision_message
-    return [entry]
-
-
-def _resolve_agent_thread_id(store: Any, *, thread_id: str | None, resume: bool) -> str:
-    """Resolve the checkpoint thread id for a single-agent CLI run (guided errors, §5.2 matrix).
-
-    Always returns a concrete id (checkpointer is always-on): resume requires an existing thread,
-    an explicit id that already has a completed checkpoint is refused without --resume (never a
-    silent overwrite / chat-memory accumulation), and the default fresh run mints a unique id.
-    """
-    if resume:
-        if not thread_id:
-            raise ValueError(
-                "续跑需要 --thread-id <ID> 指出要继续的那次 run；"
-                "单独的 --resume 无法定位 checkpoint。"
-            )
-        if not store.thread_exists(thread_id):
-            raise ValueError(
-                f"找不到 thread '{thread_id}' 的可续 checkpoint；"
-                f"请先用 --thread-id {thread_id} 跑一次，或核对 id 是否正确。"
-            )
-        return thread_id
-    if thread_id:
-        if store.thread_exists(thread_id):
-            raise ValueError(
-                f"thread '{thread_id}' 已存在 checkpoint；续跑请加 --resume，或换一个 --thread-id。"
-            )
-        return thread_id
-    return str(uuid.uuid4())
-
-
 def _cmd_agent(args: argparse.Namespace) -> int:
-    from ..agent import ReActAgent, episodic, persist_agent_run
-    from ..mcp_server import tools as tools_mod
-    from ..retrieval.embedding import resolve_embedder
-    from ..skills import SideEffect, default_skill_registry, scoped_registry
-    from ..storage.checkpointer import CheckpointStore
+    """`owcopilot agent` — one bounded ReAct diagnosis over a project.
+
+    The assembly (checkpoint store, thread policy, scoped registry, recall, HITL gate, run
+    persistence) lives in :func:`~owcopilot.app.actions.run_agent_diagnose_action`, shared verbatim
+    with the ``agent_diagnose`` async job the REST surface exposes — there is exactly one agent
+    execution path. What stays here is CLI-shaped: flag-named guided errors, the unknown-skill
+    warning on stderr, and the copy-pasteable resume line printed after a HITL pause.
+    """
+    from ..app.actions import run_agent_diagnose_action
 
     content_root = Path(args.content_root)
     if not content_root.exists():
@@ -1461,254 +1403,74 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             "--decision 只用于恢复一次暂停在 HITL 审批门的 run（形态 a）；"
             "请配合 --thread-id <ID> --resume 使用，或去掉 --decision。"
         )
-    sqlite_path = str(args.sqlite_path or _default_sqlite_path(content_root))
-    if sqlite_path != ":memory:":
-        Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
-
-    # B always-on: a checkpointer is attached to EVERY run (single-agent), on an independent file,
-    # with an auto-minted unique thread id — so any run is resumable and a fresh thread keeps the
-    # produced AgentResult byte-identical to a no-checkpointer run. A per-run lifecycle sweep bounds
-    # the file. Resolve/validate the thread id here (guided errors, never a raw traceback).
-    checkpoint_path = str(args.checkpoint_path or _default_checkpoint_path(content_root))
-    checkpoint_store = CheckpointStore(checkpoint_path)
-    try:
-        checkpoint_store.sweep()  # opportunistic TTL/cap cleanup
-        thread_id = _resolve_agent_thread_id(
-            checkpoint_store, thread_id=args.thread_id, resume=resume
+    payload = run_agent_diagnose_action(
+        content_root,
+        goal=args.goal or "",
+        max_steps=args.max_steps,
+        max_model_calls=args.max_model_calls,
+        max_tool_calls=args.max_tool_calls,
+        skills=list(args.skills) if args.skills is not None else None,
+        recall=not args.no_recall,
+        hitl=bool(args.hitl),
+        early_stopping=args.early_stopping,
+        thread_id=args.thread_id,
+        resume=resume,
+        decision=args.decision,
+        decision_message=args.decision_message,
+        checkpoint_path=args.checkpoint_path,
+        llm_mode=args.llm_mode,
+        llm_model=args.llm_model,
+        sqlite_path=args.sqlite_path,
+        max_cost_usd=args.max_cost_usd,
+        tool_transport=args.tool_transport,
+        chat_model=_agent_chat_model(args),
+    )
+    # Cross-validation of --skills against the registry: warn (not fail) on unknown names so the
+    # user learns the typo/stale skill name was excluded. Popped off the payload so stdout carries
+    # exactly the run result.
+    unknown_skills = payload.pop("unknown_skills", None)
+    known_skills = payload.pop("known_skills", None)
+    if unknown_skills:
+        print(
+            json.dumps(
+                {
+                    "warning": "unknown skill(s) in --skills allowlist (will be ignored)",
+                    "unknown_skills": unknown_skills,
+                    "known_skills": known_skills,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
         )
-        checkpoint_store.record_thread(thread_id, source="agent")
-    except Exception:
-        # A guided validation error (dup/missing thread) must not leak the connection.
-        checkpoint_store.close()
-        raise
-
-    chat_model = _agent_chat_model(args)
-    # One collector for the whole run: the agent attaches it via the standard callback surface,
-    # so planning, compaction and generate-finish calls all land in the same summary().
-    telemetry = TelemetryCollector()
-    # Open one shared ProjectContext for the whole ReAct run so tool calls reuse the same
-    # parsed project state and see writes from earlier steps.
-    project = ProjectContext.open(content_root, sqlite_path=sqlite_path)
-    token = tools_mod._shared_project.set(project)
-    try:
-        registry = default_skill_registry(content_root=str(content_root), sqlite_path=sqlite_path)
-        # Wire --skills into a SCOPED registry so the allowlist gates EXECUTION, not only what the
-        # model sees. None means "all skills"; an empty list restricts to none. Handing the agent
-        # this one scoped registry converges the permission to a single place: both the tool schema
-        # (as_structured_tools iterates it) and the execution-layer fallback (registry.run) share
-        # the same scope, so a model call for an out-of-scope skill raises SkillError at run() and
-        # its handler never executes (fed back as a recoverable is_error observation).
-        allowed_skills: set[str] | None = set(args.skills) if args.skills is not None else None
-        # Cross-validate --skills against the registry; warn (not fail) on unknown names
-        # so the user knows the typo/stale skill name is silently excluded from the manifest.
-        if allowed_skills is not None:
-            unknown_skills = sorted(allowed_skills - set(registry.names()))
-            if unknown_skills:
-                print(
-                    json.dumps(
-                        {
-                            "warning": "unknown skill(s) in --skills allowlist (will be ignored)",
-                            "unknown_skills": unknown_skills,
-                            "known_skills": registry.names(),
-                        },
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
-                    file=sys.stderr,
-                )
-        agent_registry = scoped_registry(registry, allowed_skills)
-        # Episodic-memory READ side: recall semantically-similar past runs (MemGPT recall storage)
-        # and reflections (Reflexion buffer) and hand them to the actor's reflection slot — the one
-        # existing episodic-memory injection channel (no new injection surface). Default on;
-        # --no-recall disables it. Empty recall ⇒ reflections=None ⇒ byte-identical prompt.
-        # Recall is keyed on the goal, so it applies only to a fresh run — a resume continues a run
-        # whose reflections were already injected in the original attempt.
-        embedder = resolve_embedder()
-        reflections = (
-            None
-            if resume
-            else _recall_agent_memory(
-                episodic, project.sqlite_store, embedder, args.goal, enabled=not args.no_recall
-            )
-        )
-        # T6 HITL form a: --hitl gates the sensitive PROPOSES_PATCH skills (the agent's only
-        # write-adjacent action; it never writes canon) behind an inline human-approval interrupt.
-        # Derived from the scoped registry so the gate honours --skills, not a hardcoded name.
-        # Arm the HITL gate (T6 form a) for a FRESH --hitl run; when RESUMING, arm it iff a
-        # --decision is present (the middleware must be in the resumed graph to receive it). A bare
-        # --resume without --decision stays the T4 crash-continue path (no HITL middleware).
-        resume_decisions = _hitl_resume_decisions(args) if resume else None
-        enable_hitl = (bool(args.hitl) and not resume) or resume_decisions is not None
-        interrupt_before = (
-            {s.name for s in agent_registry if s.side_effect is SideEffect.PROPOSES_PATCH}
-            if enable_hitl
-            else None
-        )
-        result = ReActAgent(
-            model=chat_model,
-            registry=agent_registry,
-            max_steps=args.max_steps,
-            telemetry=telemetry,
-            # The scoped registry is the single source of scope; allowed_skills stays None so there
-            # is exactly one permission truth (no separate schema-layer filter to drift from it).
-            early_stopping=args.early_stopping,
-            checkpointer=checkpoint_store.saver,
-            interrupt_before=interrupt_before,
-        ).run(
-            args.goal or "",
-            reflections=reflections,
-            thread_id=thread_id,
-            resume=resume,
-            resume_decisions=resume_decisions,
-        )
-        # T19: persist the run's full trajectory (episodic/recall memory WRITE side) while the
-        # project store is still open. Best-effort — a failure logs a WARNING and yields None,
-        # so the agent's already-completed result is emitted unchanged either way.
-        agent_run_id = persist_agent_run(project.sqlite_store, result)
-        # Recall WRITE side: embed (goal + outcome) so a FUTURE run can recall this one. Runs only
-        # once the transcript is stored (needs the run_id) and is fail-open on the embed. Skipped on
-        # a HITL pause: there is no outcome yet (blank final_answer), so nothing worth embedding.
-        if agent_run_id is not None and not result.interrupted:
-            episodic.persist_run_embedding(
-                project.sqlite_store,
-                embedder,
-                run_id=agent_run_id,
-                goal=result.goal,
-                final_answer=result.final_answer,
-            )
-    finally:
-        tools_mod._shared_project.reset(token)
-        project.close()
-        checkpoint_store.close()
-    telemetry_summary = telemetry.summary()
-    cost_budget = summarize_workflow(
-        [llm_step("agent_react", telemetry_summary)], budget_usd=args.max_cost_usd
-    ).budget
-    payload: dict[str, Any] = {
-        **result.model_dump(mode="json"),
-        "agent_run_id": agent_run_id,
-        # The ACTUAL executable surface for this run (the --skills allow-set), not the full
-        # registry: the scoped registry's names() is the one permission truth the agent uses.
-        "skills": agent_registry.names(),
-        "llm_mode": args.llm_mode,
-        # The checkpoint thread this run wrote to — pass it to `--thread-id X --resume` to
-        # continue an interrupted run. Always present (checkpointer is always-on).
-        "thread_id": thread_id,
-        "telemetry": telemetry_summary,
-        "cost_budget": cost_budget.model_dump(mode="json"),
-    }
-    # T6 HITL form a: when the run paused at a human gate, make the state explicit and tell the
-    # operator exactly how to continue (the run already carries interrupt_request via model_dump).
-    if result.interrupted:
-        payload["status"] = "interrupted"
+    # T6 HITL form a: when the run paused at a human gate, tell the operator exactly how to
+    # continue (the pending gate itself is already on the payload as interrupt_request).
+    if payload["status"] == "interrupted":
         payload["next_step"] = (
             f"resume with: owcopilot agent --content-root {args.content_root} "
-            f"--thread-id {thread_id} --resume --decision approve|reject"
+            f"--thread-id {payload['thread_id']} --resume --decision approve|reject"
         )
-    else:
-        payload["status"] = "completed"
     return _emit(payload, args)
 
 
 def _cmd_multi_agent(args: argparse.Namespace) -> int:
-    from ..mcp_server import tools as tools_mod
-    from ..multi_agent import MultiAgentSession
-    from ..retrieval.embedding import resolve_embedder
-    from ..skills import default_skill_registry
-    from ..storage.checkpointer import CheckpointStore
+    """Expose the shared multi-agent action through the CLI adapter."""
+    from ..app.actions import run_multi_agent_action
 
-    if not args.goal.strip():
-        raise ValueError(
-            "--goal 不能为空字符串，请描述多 agent 系统要达成的目标。"
-            "例如: --goal '让世界达到可导出状态'"
-        )
-    content_root = Path(args.content_root)
-    if not content_root.exists():
-        raise FileNotFoundError(f"content root does not exist: {content_root}")
-    sqlite_path = str(args.sqlite_path or _default_sqlite_path(content_root))
-    if sqlite_path != ":memory:":
-        Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
-    # B always-on: the supervisor graph is compiled WITH a checkpointer (scheme Y) — report stays
-    # byte-identical, the infra is uniform with the single-agent path, and it is the substrate T6
-    # in-process HITL reuses. A unique thread id is minted per run and surfaced. NOTE (honest
-    # boundary): the CLI does NOT expose a cross-process `--resume` for multi-agent — the blackboard
-    # is in-memory and the two stores are not atomic, so a killed multi-agent run is not resumable
-    # from a fresh process (design §3). Only in-process suspend/continue is supported.
-    checkpoint_path = str(args.checkpoint_path or _default_checkpoint_path(content_root))
-    checkpoint_store = CheckpointStore(checkpoint_path)
-    checkpoint_store.sweep()
-    thread_id = str(uuid.uuid4())
-    checkpoint_store.record_thread(thread_id, source="multi-agent")
-    # One chat model, one collector: the orchestrator decompose calls and the worker/verifier
-    # ReAct loops all run on the SAME LangChain chat model instance and bill into one shared
-    # TelemetryCollector via the session's telemetry wiring. Decomposition asks for a raw JSON
-    # ARRAY (no response_format — json_object mode would reject it) and degrades gracefully to
-    # the built-in subtasks when the response is unparseable (e.g. the offline double, whose
-    # non-JSON reply degrades exactly as the retired MockProvider gateway did).
-    telemetry = TelemetryCollector()
-    chat_model = _agent_chat_model(args)
-    # Open one shared ProjectContext for the whole multi-agent session so every worker sees the
-    # same parsed project state and any issues persisted by earlier workers.
-    project = ProjectContext.open(content_root, sqlite_path=sqlite_path)
-    token = tools_mod._shared_project.set(project)
-    try:
-        registry = default_skill_registry(content_root=str(content_root), sqlite_path=sqlite_path)
-        # Wire the project store + embedder so the Reflexion buffer persists across sessions: a
-        # retry's distilled reflection is saved to the runtime DB, and a later worker dispatched on
-        # a similar subtask recalls it into its reflection slot. Absent these, the session behaves
-        # exactly as before (no persistence, no recall).
-        session = MultiAgentSession(
-            orchestrator_model=chat_model,
-            model=chat_model,
-            registry=registry,
-            store=project.sqlite_store,
-            embedder=resolve_embedder(),
-            telemetry=telemetry,
-            checkpointer=checkpoint_store.saver,
-        )
-        try:
-            report = session.run(args.goal, thread_id=thread_id)
-            # The blackboard message flow is the product-facing proof of true multi-agent
-            # collaboration: each row is attributed (from→to) and ordered.
-            flow = [
-                {
-                    "msg_type": msg.msg_type,
-                    "from_agent": msg.from_agent,
-                    "to_agent": msg.to_agent,
-                    "status": msg.status,
-                }
-                for msg in session.blackboard.session_flow(report.session_id)
-            ]
-        finally:
-            session.close()
-    finally:
-        tools_mod._shared_project.reset(token)
-        project.close()
-        checkpoint_store.close()
-    telemetry_summary = telemetry.summary()
-    cost_budget = summarize_workflow(
-        [llm_step("multi_agent", telemetry_summary)], budget_usd=args.max_cost_usd
-    ).budget
-    return _emit(
-        {
-            "session_id": report.session_id,
-            "goal": report.goal,
-            "participants": report.participants,
-            "blackboard_flow": flow,
-            "worker_summaries": report.worker_summaries,
-            "verifier_verdicts": report.verifier_verdicts,
-            "synthesis": report.synthesis,
-            # ② Surface decomposition degradation to CLI consumers — no silent downgrade
-            "decomposition_degraded": report.decomposition_degraded,
-            "llm_mode": args.llm_mode,
-            # The checkpoint thread compiled onto this run's supervisor graph (scheme Y — in-process
-            # resume / T6 substrate; NOT a cross-process resume handle for multi-agent).
-            "thread_id": thread_id,
-            "telemetry": telemetry_summary,
-            "cost_budget": cost_budget.model_dump(mode="json"),
-        },
-        args,
+    payload = run_multi_agent_action(
+        args.content_root,
+        goal=args.goal,
+        max_tool_calls=args.max_tool_calls,
+        max_total_tool_calls=args.max_total_tool_calls,
+        max_model_calls=args.max_model_calls,
+        checkpoint_path=args.checkpoint_path,
+        llm_mode=args.llm_mode,
+        llm_model=args.llm_model,
+        sqlite_path=args.sqlite_path,
+        max_cost_usd=args.max_cost_usd,
+        chat_model=_agent_chat_model(args),
     )
+    return _emit(payload, args)
 
 
 def _cmd_agent_history(args: argparse.Namespace) -> int:
@@ -1769,45 +1531,20 @@ def _cmd_context_pack(args: argparse.Namespace) -> int:
 
 
 def _cmd_ask(args: argparse.Namespace) -> int:
-    if args.faithfulness == "llm" and args.llm_mode != "real":
-        # No silent downgrade: the llm judge would otherwise be the offline QA double, which is not
-        # an entailment judge and would mislabel good answers. Fail fast, before any work.
-        raise ValueError(
-            "--faithfulness llm 需要 --llm-mode real（用真实模型当判官）；"
-            "离线场景请改用 --faithfulness offline（确定性 $0 判官）。"
-        )
-    with _project(args) as project:
-        gateway, telemetry = _llm_gateway(
-            args,
-            task="qa_answer",
-            offline_provider=OfflineQAProvider(),
-            extra_tasks=["qa_expand"],
-        )
-        service = LoreQAService(
-            gateway=gateway,
-            # also recall the GraphRAG macro-overview reports (a no-op until `build-overview` runs)
-            context_builder=project.qa_context_builder(),
-            bundle=project.bundle,
-            expand=(args.llm_mode == "real"),
-            agentic=args.agentic,
-            faithfulness=args.faithfulness,
-        )
-        answer = service.ask(args.query, budget_tokens=args.budget_tokens)
-        telemetry_summary = telemetry.summary()
-        cost_budget = summarize_workflow(
-            [llm_step("ask_lore", telemetry_summary)],
-            budget_usd=args.max_cost_usd,
-        ).budget
-        return _emit(
-            {
-                "answer": answer.model_dump(mode="json"),
-                "llm_mode": args.llm_mode,
-                "llm_model": args.llm_model if args.llm_mode == "real" else "offline",
-                "telemetry": telemetry_summary,
-                "cost_budget": cost_budget.model_dump(mode="json"),
-            },
-            args,
-        )
+    from ..app.actions import run_ask_action
+
+    payload = run_ask_action(
+        args.content_root,
+        query=args.query,
+        sqlite_path=args.sqlite_path,
+        budget_tokens=args.budget_tokens,
+        llm_mode=args.llm_mode,
+        llm_model=args.llm_model,
+        max_cost_usd=args.max_cost_usd,
+        agentic=args.agentic,
+        faithfulness=args.faithfulness,
+    )
+    return _emit(payload, args)
 
 
 def _cmd_build_overview(args: argparse.Namespace) -> int:
@@ -1836,28 +1573,38 @@ def _cmd_build_overview(args: argparse.Namespace) -> int:
 
 
 def _cmd_export(args: argparse.Namespace) -> int:
+    from ..app.actions import run_project_export_action
+
     row_struct_map = (
         _load_row_struct_map(Path(args.row_struct_map)) if args.row_struct_map else None
     )
-    with _project(args) as project:
-        target_engine = EngineTarget(args.target_engine)
-        output_dir = Path(args.output_dir) / target_engine.value
-        assert_export_ready(project)
-        manifest = export_content_bundle(
-            project.bundle,
-            output_dir,
-            target_engine=target_engine,
-            unity_localization=args.unity_localization,
+    return _emit(
+        run_project_export_action(
+            args.content_root,
+            output_dir=args.output_dir,
+            target_engine=args.target_engine,
             row_struct_map=row_struct_map,
-        )
-        return _emit(
-            {
-                "output_dir": str(output_dir),
-                "manifest": manifest.model_dump(mode="json"),
-                "cost_budget": _deterministic_cost_budget("export_project"),
-            },
-            args,
-        )
+            unity_localization=args.unity_localization,
+            planning_workbook=args.planning_workbook,
+            planning_notes=args.planning_notes,
+            sqlite_path=args.sqlite_path,
+        ),
+        args,
+    )
+
+
+def _cmd_prose_check(args: argparse.Namespace) -> int:
+    # Reuses the shared app action so CLI and REST (POST /projects/{p}/prose:check) behave
+    # identically; the action already existed (app/actions/export.py) but had zero callers.
+    from ..app.actions import run_prose_check_action
+
+    text = Path(args.input).read_text(encoding="utf-8")
+    result = run_prose_check_action(
+        args.content_root,
+        text=text,
+        sqlite_path=getattr(args, "sqlite_path", None),
+    )
+    return _emit(result, args)
 
 
 def _cmd_sync_back(args: argparse.Namespace) -> int:
@@ -1894,6 +1641,9 @@ def _cmd_recognize(args: argparse.Namespace) -> int:
         input_path=args.input,
         field_mapping=mapping,
         apply=args.apply,
+        enable_llm=args.enable_llm,
+        llm_mode=args.llm_mode,
+        llm_model=args.llm_model,
         operator=args.operator,
         sqlite_path=args.sqlite_path,
     )
@@ -1901,34 +1651,10 @@ def _cmd_recognize(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_eval_golden(args: argparse.Namespace) -> int:
-    report = run_golden_evaluation(args.workspace)
-    _emit(report.model_dump(mode="json"), args)
-    return 0 if report.passed else 1
 
 
-def _cmd_eval_repair(args: argparse.Namespace) -> int:
-    from ..evaluation.repair_bench import run_repair_benchmark
-
-    rows = run_repair_benchmark()
-    return _emit(
-        {
-            "comparisons": [row.model_dump(mode="json") for row in rows],
-            "invariant_mcts_never_worse": all(row.mcts_at_least_greedy for row in rows),
-            "cost_budget": _deterministic_cost_budget("eval_repair"),
-        },
-        args,
-    )
 
 
-def _cmd_eval_acceptance(args: argparse.Namespace) -> int:
-    from ..qa.offline_entailment import OfflineEntailmentJudge
-
-    # Default the faithfulness gate to the deterministic offline judge so it runs without
-    # requiring a configured model provider.
-    report = run_acceptance_evaluation(args.workspace, faithfulness_judge=OfflineEntailmentJudge())
-    _emit(report.model_dump(mode="json"), args)
-    return 0 if report.passed else 1
 
 
 def _cmd_prompts(args: argparse.Namespace) -> int:
@@ -2024,105 +1750,10 @@ def _cmd_lessons(args: argparse.Namespace) -> int:
     return _emit(result, args)
 
 
-def _cmd_eval_agent(args: argparse.Namespace) -> int:
-    from ..evaluation.agent_eval import AGENT_EVAL_FLOOR, run_jd_dimension_scorecard
-
-    # The five dimensions are deterministic; a drop below the floor indicates a regression.
-    scorecard = run_jd_dimension_scorecard()
-    _emit(scorecard.model_dump(mode="json"), args)
-    return 0 if scorecard.overall >= AGENT_EVAL_FLOOR else 1
 
 
-def _cmd_eval_agent_tasks(args: argparse.Namespace) -> int:
-    """Run the task-level agent benchmark (``evaluation/agent_task_bench.py``).
-
-    Unlike ``eval-agent`` (a deterministic $0 scorecard) this SPENDS MONEY in ``--llm-mode real``:
-    it drives the real agent over every seeded world ``--trials`` times. ``--budget-usd`` is a hard
-    stop checked before each trial. Progress is written to stderr so a long run is observable
-    without polluting the JSON on stdout.
-    """
-    from ..evaluation.agent_task_bench import TrialRecord, run_agent_task_bench
-
-    if args.trials < 1:
-        raise ValueError("--trials 必须 >= 1（pass^k 的 k 至少为 1）。")
-
-    def progress(record: TrialRecord) -> None:
-        print(
-            f"[{args.rung} {record.task_id} trial {record.trial}] "
-            f"recall={record.score.recall_pair:.2f} "
-            f"precision={record.score.precision_pair} "
-            f"contract={'Y' if record.score.contract_followed else 'N'} "
-            f"steps={record.step_count} cost=${record.cost_usd:.5f}"
-            + (f" ERROR={record.error}" if record.error else ""),
-            file=sys.stderr,
-            flush=True,
-        )
-
-    report = run_agent_task_bench(
-        args.workspace,
-        chat_model_factory=lambda: _agent_chat_model(args),
-        llm_mode=args.llm_mode,
-        model=args.llm_model if args.llm_mode == "real" else "offline-double",
-        trials=args.trials,
-        max_steps=args.max_steps,
-        max_replans=args.max_replans,
-        budget_usd=args.budget_usd,
-        task_ids=args.task_ids,
-        rung=args.rung,
-        prompt_variant=args.prompt_variant,
-        on_trial=progress,
-    )
-    _emit(report.model_dump(mode="json"), args)
-    # A budget abort is a real outcome, not a crash: report it and exit non-zero so a script
-    # notices the run was cut short rather than reading a partial table as complete.
-    return 1 if report.budget_stopped else 0
 
 
-def _cmd_eval_report_actionability(args: argparse.Namespace) -> int:
-    """Measure the audit report's actionability (``evaluation/report_actionability.py``).
-
-    SPENDS MONEY in ``--llm-mode real``: one fresh fixer per open finding. ``--budget-usd`` is a
-    hard stop checked before each finding. Progress goes to stderr so a long run is observable
-    without polluting the JSON on stdout.
-    """
-    from ..evaluation.report_actionability import (
-        ActionabilityTrial,
-        load_report_texts,
-        run_report_actionability,
-        write_actionability_artifacts,
-    )
-
-    def progress(trial: ActionabilityTrial) -> None:
-        # DAMAGED = 指纹判据算通过、内容保全没过 —— 也就是"删出来的通过",单独标出来。
-        outcome = "FIXED  " if trial.fixed else ("DAMAGED" if trial.fingerprint_ok else "MISS   ")
-        print(
-            f"[{trial.world_id} {trial.rule_code}] "
-            f"{outcome} "
-            f"files={len(trial.files_written)} calls={trial.llm_calls} "
-            f"cost=${trial.cost_usd:.5f} — {trial.verdict}",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    report = run_report_actionability(
-        args.workspace,
-        chat_model_factory=lambda: _agent_chat_model(args),
-        llm_mode=args.llm_mode,
-        model=args.llm_model if args.llm_mode == "real" else "offline-double",
-        label=args.label,
-        max_steps=args.max_steps,
-        budget_usd=args.budget_usd,
-        world_ids=set(args.world_ids) if args.world_ids else None,
-        file_listing=not args.no_file_listing,
-        report_texts=(
-            load_report_texts(args.replay_report_text) if args.replay_report_text else None
-        ),
-        on_trial=progress,
-    )
-    if args.report_out:
-        write_actionability_artifacts(report, args.report_out)
-    _emit(report.model_dump(mode="json"), args)
-    return 1 if report.budget_stopped else 0
 
 
 def _cmd_impact(args: argparse.Namespace) -> int:
@@ -2216,7 +1847,7 @@ def _cmd_repair_plan(args: argparse.Namespace) -> int:
         telemetry = TelemetryCollector()
         candidate_provider: CandidateProvider = deterministic_candidates
         used_llm = False
-        # Opt-in LATS-style widening: build the LLM proposer only in real mode (mirrors `suggest`,
+        # Optional model moves: build the proposer only in real mode (mirrors `suggest`,
         # which has no offline double for patch_suggest — the deterministic fixers ARE its $0 path).
         if args.llm_candidates and args.llm_mode == "real":
             gateway, telemetry = _llm_gateway(args, task="patch_suggest", offline_provider=None)
@@ -2315,6 +1946,7 @@ def _cmd_extract(args: argparse.Namespace) -> int:
         title=title,
         text=text,
         source_kind=args.source_kind,
+        provenance=args.provenance,
         sqlite_path=args.sqlite_path,
         llm_mode=args.llm_mode,
         llm_model=args.llm_model,
@@ -2337,6 +1969,7 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {
         "draft": draft,
         "stats": result["stats"],
+        "provenance": result["provenance"],
         "llm_mode": args.llm_mode,
         "cost_budget": result["cost_budget"],
     }
@@ -2364,19 +1997,35 @@ def _cmd_draft(args: argparse.Namespace) -> int:
             context_builder=project.context_builder,
             audit_runner=project.audit_runner,
             bundle=project.bundle,
+            reference_context_builder=project.reference_context_builder,
         )
-        result = service.draft_quest(args.brief, budget_tokens=args.budget_tokens)
+        result = service.draft_quest(
+            args.brief, budget_tokens=args.budget_tokens, use_references=args.use_references
+        )
         queue = ReviewQueue(project.sqlite_store)
         item = queue.add_quest_draft(
             result.quest.model_dump(mode="json", exclude_none=True),
             issue_refs=[issue_fingerprint(issue) for issue in result.issues],
         )
         telemetry_summary = telemetry.summary()
+        # 只有开了 --use-references 才多这两个键（开了但库里没素材时是两个空列表——那是"开关生效、
+        # 无可用素材"，与"没开"要分得清）；没开时输出与接线之前逐键一致。
+        reference_lineage: dict[str, Any] = (
+            {
+                "inspiration_refs": result.inspiration_refs,
+                "reference_report": [
+                    row.model_dump(mode="json") for row in result.reference_report
+                ],
+            }
+            if args.use_references
+            else {}
+        )
         return _emit(
             {
                 "quest": result.quest.model_dump(mode="json", exclude_none=True),
                 "issues": [issue.model_dump(mode="json") for issue in result.issues],
                 "context_refs": result.context_refs,
+                **reference_lineage,
                 "review_item_id": item.id,
                 "review_status": "pending_review",
                 "llm_mode": args.llm_mode,
@@ -2428,6 +2077,64 @@ def _cmd_expand(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_reference(args: argparse.Namespace) -> int:
+    """add/list/search over the inspiration reference library — a single `reference` subcommand
+    with a positional action (git-style), reusing exactly the store/builder calls the REST
+    add/list/search_references_action wrap (project.reference_store.* / .reference_context_builder,
+    same as `build_context_pack` reuses `project.context_builder` for canon)."""
+    with _project(args) as project:
+        if args.action == "add":
+            if not args.title or not args.text:
+                raise ValueError(
+                    "`reference add` 需要同时提供 --title 与 --text：请填写参考素材的标题和"
+                    "正文内容后重试。"
+                )
+            result = project.reference_store.add_text(
+                title=args.title,
+                text=args.text,
+                source_type=args.source_type,
+                original_filename=args.original_filename,
+                allowed_uses=args.allowed_uses,
+                provenance=args.provenance,
+            )
+            project.reference_store.sync_index(project.sqlite_store)
+            return _emit(
+                {
+                    "source": result.source.model_dump(mode="json"),
+                    "chunks": [chunk.model_dump(mode="json") for chunk in result.chunks],
+                    "indexed_count": result.indexed_count,
+                    "injection_flagged_chunks": result.injection_flagged_chunks,
+                    "cost_budget": _deterministic_cost_budget("reference_add"),
+                },
+                args,
+            )
+        if args.action == "list":
+            sources = project.reference_store.list_sources()
+            return _emit(
+                {
+                    "count": len(sources),
+                    "sources": [source.model_dump(mode="json") for source in sources],
+                    "cost_budget": _deterministic_cost_budget("reference_list"),
+                },
+                args,
+            )
+        # action == "search"
+        if not args.query:
+            raise ValueError(
+                "`reference search` 需要提供 --query：请填写要检索的关键词或问题后重试。"
+            )
+        pack = project.reference_context_builder.build(args.query, budget_tokens=args.budget_tokens)
+        return _emit(
+            {
+                "query": args.query,
+                "refs": pack.refs,
+                "hits": [hit.model_dump(mode="json") for hit in pack.hits],
+                "cost_budget": _deterministic_cost_budget("reference_search"),
+            },
+            args,
+        )
+
+
 def _cmd_barks(args: argparse.Namespace) -> int:
     with _project(args) as project:
         speakers = [item.strip() for item in args.speakers.split(",") if item.strip()]
@@ -2451,6 +2158,7 @@ def _cmd_barks(args: argparse.Namespace) -> int:
             gateway=gateway,
             bundle=project.bundle,
             review_queue=ReviewQueue(project.sqlite_store),
+            reference_context_builder=project.reference_context_builder,
         )
         result = service.generate(
             speaker_ids=speakers,
@@ -2458,8 +2166,21 @@ def _cmd_barks(args: argparse.Namespace) -> int:
             variants_per_speaker=args.variants,
             max_chars=args.max_chars,
             allowed_entity_ids=allowed,
+            use_references=args.use_references,
         )
         telemetry_summary = telemetry.summary()
+        # 只有开了 --use-references 才多这两个键（开了但库里没素材时是两个空列表——那是"开关生效、
+        # 无可用素材"，与"没开"要分得清）；没开时输出与接线之前逐键一致。
+        reference_lineage: dict[str, Any] = (
+            {
+                "inspiration_refs": result.inspiration_refs,
+                "reference_report": [
+                    row.model_dump(mode="json") for row in result.reference_report
+                ],
+            }
+            if args.use_references
+            else {}
+        )
         return _emit(
             {
                 "accepted": [
@@ -2474,6 +2195,7 @@ def _cmd_barks(args: argparse.Namespace) -> int:
                     }
                     for rejected in result.rejected
                 ],
+                **reference_lineage,
                 "review_item_ids": [item.id for item in result.review_items],
                 "llm_mode": args.llm_mode,
                 "telemetry": telemetry_summary,
@@ -2516,6 +2238,98 @@ def _cmd_review(args: argparse.Namespace) -> int:
             },
             args,
         )
+
+
+def _cmd_style_sweep(args: argparse.Namespace) -> int:
+    """Product entry for :class:`~owcopilot.assist.sweep.RubricSweepService` (N8.3): a standalone
+    leaf subcommand -- neither folded into ``review`` nor grafted onto the existing theme-sweep
+    REST route. Decision + reasoning (checked at execution time, not assumed):
+
+    * Not "review 家族": ``review`` is shaped around the queue's accept/reject decision
+      (``--accept``/``--reject``/``--operator``) -- it is the ONE AI-content write path in the
+      CLI. A rubric sweep never writes canon; it is a read-only diagnostic report over the whole
+      world, the same shape as ``flag-xref``/``quest-explore`` (already-standalone subcommands
+      with no ``app.actions`` wrapper). Bolting an unrelated argument surface
+      (``--rubric-id``/``--use-llm``/``--max-judge``/``--semantic-threshold``) onto a command
+      whose contract is "decide one queue item" would be MORE invasive than a new leaf command.
+    * Not "挂进既有 sweep 入口": ``ThemeSweepService`` (the ``/projects/{p}/sweeps:run`` REST
+      route) has no CLI counterpart at all to hook into, and its request/response schema is
+      theme-shaped (``theme: str``, flat ``hits``/``review_suggested``) -- widening it with
+      rubric-only fields (``rubric_id``, per-element L1/L2/L3 breakdown) for a shape that does
+      not fit is a bigger diff than a new command, and the task explicitly asks for a CLI entry.
+    """
+    from ..assist.sweep import OfflineSweepJudgeProvider, RubricSweepService, render_rubric_markdown
+
+    with _project(args) as project:
+        rubric = project.bundle.style_rubrics.get(args.rubric_id)
+        if rubric is None:
+            available = (
+                "、".join(sorted(project.bundle.style_rubrics)) or "（当前世界没有风格清单）"
+            )
+            raise ValueError(f"风格清单「{args.rubric_id}」不存在。当前世界可用清单：{available}")
+        gateway = None
+        telemetry = None
+        if args.use_llm:
+            # RubricSweepService's L3 judge reuses ThemeSweepService._judge_batch verbatim, which
+            # routes through the gateway with task="theme_sweep" -- match that here so --llm-mode
+            # real resolves the same provider mapping.
+            gateway, telemetry = _llm_gateway(
+                args, task="theme_sweep", offline_provider=OfflineSweepJudgeProvider()
+            )
+        report = RubricSweepService(
+            bundle=project.bundle, gateway=gateway, embedder=project.embedder
+        ).sweep(
+            rubric,
+            use_llm=args.use_llm,
+            max_judge=args.max_judge,
+            semantic_threshold=args.semantic_threshold,
+        )
+        payload: dict[str, Any] = {
+            "rubric_id": report.rubric_id,
+            "rubric_label": report.rubric_label,
+            "rubric_version": report.rubric_version,
+            "rubric_fingerprint": report.rubric_fingerprint,
+            "abstract_tag": report.abstract_tag,
+            "scanned_total": report.scanned_total,
+            "scanned_by_kind": report.scanned_by_kind,
+            "scanned_fields": report.scanned_fields,
+            "semantic_used": report.semantic_used,
+            "semantic_threshold": report.semantic_threshold,
+            "llm_used": report.llm_used,
+            "judged_count": report.judged_count,
+            "judge_skipped": report.judge_skipped,
+            "dismissed_count": report.dismissed_count,
+            # Per-level recall breakdown (design §6.3): each level's contribution to coverage
+            # stays separately inspectable instead of collapsing into one opaque hit count.
+            "l1_total": report.l1_total,
+            "l2_total": report.l2_total,
+            "l1_l2_overlap": report.l1_l2_overlap,
+            "hits": [finding.__dict__ for finding in report.hits],
+            "review_suggested": [finding.__dict__ for finding in report.review_suggested],
+            "elements": [
+                {
+                    "element_id": element.element_id,
+                    "element_text": element.element_text,
+                    "kind": element.kind,
+                    "polarity": element.polarity,
+                    "l1_refs": element.l1_refs,
+                    "l2_refs": element.l2_refs,
+                    "l3_refs": element.l3_refs,
+                    "candidate_refs": element.candidate_refs,
+                    "findings": [finding.__dict__ for finding in element.findings],
+                }
+                for element in report.elements
+            ],
+            "markdown": render_rubric_markdown(report),
+            "cost_budget": (
+                summarize_workflow(
+                    [llm_step("theme_sweep", telemetry.summary())]
+                ).budget.model_dump(mode="json")
+                if telemetry is not None
+                else _deterministic_cost_budget("style_sweep")
+            ),
+        }
+        return _emit(payload, args)
 
 
 class _ProjectHandle:
