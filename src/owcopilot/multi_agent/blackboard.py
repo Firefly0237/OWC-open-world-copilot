@@ -1,7 +1,7 @@
 # SQLite 黑板：append-only 消息板，多 agent 间唯一共享状态（可复盘、无隐藏内存态）。
 """SQLite-backed append-only blackboard for the multi-agent system.
 
-Architecture rationale (SUPERVISOR_rubric P3-3):
+Execution structure:
     "Must have an explicit communication channel — SQLite blackboard (shared table +
      append-only write), not function return values in the same call stack."
 
@@ -12,6 +12,21 @@ This class wraps the ``agent_messages`` table added to SQLiteStore.  The key inv
 - ``update_status`` only touches the ``status`` column — payload stays frozen.
 
 No business logic lives here.  Routing, decomposition, and synthesis belong to the agents.
+
+Why this exists next to LangGraph ``StateGraph`` state (it is a supplement, not a replacement):
+    the graph genuinely owns dispatch and ordering (see :mod:`owcopilot.multi_agent.session` —
+    ``Send`` fan-out plus an ``operator.add`` reducer), and its channels deliberately carry only
+    ids and flags. What channels do not give is (a) an append-only, attributed ``from→to`` trail
+    that can be replayed after the fact — the CLI echoes exactly these rows as the product-facing
+    evidence of collaboration — and (b) a single-claim CAS gate for a duplicate in-process
+    dispatch, which is what ``claim_assignment``'s conditional UPDATE is. This is duplicate
+    suppression, not an end-to-end delivery guarantee. Keeping payloads/transcripts/verdicts
+    here rather than in channels also keeps them out of the checkpoint.
+    Honest boundary: ``MultiAgentSession(db_path=":memory:")`` remains the library default for
+    isolated/tests calls. The product CLI explicitly supplies its runtime SQLite path, so normal
+    CLI sessions leave a durable attributed archive. This still does NOT make a killed run safely
+    resumable: blackboard and graph-checkpoint commits are not atomic and a claimed task may be
+    orphaned. Durable audit and cross-process orchestration recovery are separate guarantees.
 
 Thread-safety (parallel stage dispatch):
     The parallel fan-out waves in :class:`~owcopilot.multi_agent.session.MultiAgentSession` drain
@@ -163,16 +178,18 @@ class AgentBlackboard:
         return self._get_by_id(msg_id)
 
     def claim_assignment(self, msg_id: str) -> AgentMessage | None:
-        """Claim ONE specific ``task_assign`` by id — the exactly-once idempotent gate for Send.
+        """Claim ONE specific ``task_assign`` by id through a single-claim CAS gate.
 
         Unlike :meth:`claim_task` (which selects the OLDEST pending message for a mailbox and is the
         genuinely-contended arbiter the concurrency primitive tests pin down), this claims a
         SPECIFIC assignment id that a LangGraph ``Send`` routed straight to a worker node. The
         conditional ``UPDATE ... WHERE id=? AND status='pending'`` is atomic on its own, so it needs
-        no split TOCTOU window: it flips the row exactly once. A re-dispatched or recovered ``Send``
-        for the same id finds the row already ``claimed`` / ``done`` and gets ``None`` — the gate
-        that stops one assignment from being executed twice. The ``msg_type='task_assign'`` guard
-        keeps a stray id (a result / verify row) from ever being claimed as work.
+        no split TOCTOU window: at most one claimant changes the row. A duplicate in-process
+        ``Send`` for the same id finds the row already ``claimed`` / ``done`` and gets ``None``.
+        This prevents double execution after the claim, but a process crash between claim and
+        result can still orphan work; safe cross-process replay needs a lease/outbox or equivalent
+        recovery protocol. The ``msg_type='task_assign'`` guard keeps a stray id (a result / verify
+        row) from ever being claimed as work.
         """
         with self._lock:
             changed = self._conn.execute(

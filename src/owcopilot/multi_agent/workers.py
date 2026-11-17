@@ -5,13 +5,13 @@ Each worker is an *independent* object with its own ``agent_id``, its own ``ReAc
 instance, and its own transcript.  Workers do NOT share any state with each other or with
 the orchestrator.
 
-Architecture compliance (SUPERVISOR_rubric):
-  P3-1: DiagWorker and RepairWorker are distinct, independently instantiable classes — not
+Execution structure:
+  invariant: DiagWorker and RepairWorker are distinct, independently instantiable classes — not
         one ReActAgent with a different system prompt.
-  P3-4: The goal string passed to ReActAgent is always
+  invariant: The goal string passed to ReActAgent is always
         "{original_goal}\\n\\n[Your subtask]:\\n{subtask}" — both fields present.
-  P3-6: Each instance exposes a unique ``agent_id``.
-  P3-7: Workers are driven from MultiAgentSession, which calls them in sequence after
+  invariant: Each instance exposes a unique ``agent_id``.
+  invariant: Workers are driven from MultiAgentSession, which calls them in sequence after
         posting via the blackboard, not via a shared function call stack (the blackboard
         message is the hand-off, not a Python return value).
 
@@ -29,6 +29,7 @@ import logging
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from ..agent.middleware import SettledCostBudget, TotalModelCallBudget, TotalToolCallBudget
 from ..agent.react import AgentResult, ReActAgent
 from ..llm.telemetry import TelemetryCollector
 from ..skills import SkillRegistry
@@ -40,7 +41,8 @@ logger = logging.getLogger(__name__)
 
 
 class WorkerAgent:
-    """Base worker: receives a task_assign from the blackboard, runs a ReAct loop, posts result.
+    """Base worker: receives a task_assign from the blackboard, runs a reasoning-and-tool loop
+    loop, posts result.
 
     Subclasses set ``role`` and ``default_allowed_skills`` to specialise their tool face.
     Each instance has a unique ``agent_id`` and a fresh ``ReActAgent`` so there is zero
@@ -57,13 +59,21 @@ class WorkerAgent:
         model: BaseChatModel,
         registry: SkillRegistry,
         max_steps: int = 4,
+        max_tool_calls: int | None = None,
         telemetry: TelemetryCollector | None = None,
+        shared_model_budget: TotalModelCallBudget | None = None,
+        shared_cost_budget: SettledCostBudget | None = None,
+        shared_tool_budget: TotalToolCallBudget | None = None,
     ) -> None:
         self.agent_id = agent_id
         self._model = model
         self._registry = registry
         self._max_steps = max_steps
+        self._max_tool_calls = max_tool_calls
         self._telemetry = telemetry
+        self._shared_model_budget = shared_model_budget
+        self._shared_cost_budget = shared_cost_budget
+        self._shared_tool_budget = shared_tool_budget
         # The ReActAgent is created fresh per instance — its transcript list is private.
         # Creating it here (not inside run_task) lets tests inspect agent._transcript after
         # run_task to verify transcript isolation between two WorkerAgent instances.
@@ -84,17 +94,21 @@ class WorkerAgent:
             model=self._model,
             registry=scoped_registry(self._registry, allowed_skills),
             max_steps=max_steps if max_steps is not None else self._max_steps,
+            max_tool_calls=self._max_tool_calls,
             task=f"worker_{self.agent_id}",
             telemetry=self._telemetry,
             allowed_skills=allowed_skills,
+            shared_model_budget=self._shared_model_budget,
+            shared_cost_budget=self._shared_cost_budget,
+            shared_tool_budget=self._shared_tool_budget,
         )
 
     def build_goal(self, assign: TaskAssignPayload) -> str:
-        """Compose the ReActAgent goal for a subtask — BOTH original_goal + subtask (P3-4).
+        """Compose the ReActAgent goal for a subtask — BOTH original_goal + subtask (invariant).
 
         Injecting the overall goal alongside the narrow subtask is the cascade-hallucination
         guard.  This is the single source of truth for the goal string, reused by the T2
-        Reflexion retry driver so the Self-Reflection prompt and the retry actor see the exact
+        feedback-memory retry driver so the Self-Reflection prompt and the retry actor see the exact
         goal the initial attempt ran (no format drift between the two).
         """
         return (
@@ -112,16 +126,18 @@ class WorkerAgent:
         """Execute the subtask and post a task_result message to the blackboard.
 
         Key contract:
-        - Reads ``original_goal`` AND ``subtask`` from task_msg.payload (P3-4).
+        - Reads ``original_goal`` AND ``subtask`` from task_msg.payload (invariant).
         - Creates a fresh ReActAgent with the allowed_skills from the payload.
-        - Runs the ReAct loop (may be offline mock — stop_reason can be "max_steps").
+        - Runs the reasoning-and-tool loop loop (may be offline mock — stop_reason can be
+        "max_steps").
         - Posts a task_result message with the worker's answer.
         - Returns the posted task_result AgentMessage.
 
-        ``reflections`` is the T2 Reflexion (Shinn et al., 2023) episodic memory: verbal notes
+        ``reflections`` is the T2 feedback-memory  episodic memory: verbal notes
         distilled from a PRIOR failed attempt at this same subtask, forwarded verbatim to
         ``ReActAgent.run`` so the retry actor conditions on what went wrong.  Default ``None`` ⇒
-        byte-identical to the pre-Reflexion behaviour (``ReActAgent.run`` renders no reflection
+        byte-identical to the pre-feedback-memory behaviour (``ReActAgent.run`` renders no
+        reflection
         block, so the worker prompt and posted result are unchanged).
         """
         assign = TaskAssignPayload.from_dict(task_msg.payload)
@@ -171,7 +187,8 @@ class WorkerAgent:
         result: AgentResult = self.agent.run(goal, reflections=reflections)
 
         # The worker's "claimed open errors" is the REAL integer from its own audit_project
-        # tool call (extracted from the ReAct transcript), NOT a substring count of its prose.
+        # tool call (extracted from the reasoning-and-tool loop transcript), NOT a substring count
+        # of its prose.
         # If the worker never ran a successful audit_project, this is None — an honest
         # "no audit-backed claim" the verifier must not misread as a claim of zero.
         open_errors = _extract_claimed_open_errors(result)
@@ -216,14 +233,22 @@ class DiagWorker(WorkerAgent):
         model: BaseChatModel,
         registry: SkillRegistry,
         max_steps: int = 4,
+        max_tool_calls: int | None = None,
         telemetry: TelemetryCollector | None = None,
+        shared_model_budget: TotalModelCallBudget | None = None,
+        shared_cost_budget: SettledCostBudget | None = None,
+        shared_tool_budget: TotalToolCallBudget | None = None,
     ) -> None:
         super().__init__(
             agent_id=agent_id,
             model=model,
             registry=registry,
             max_steps=max_steps,
+            max_tool_calls=max_tool_calls,
             telemetry=telemetry,
+            shared_model_budget=shared_model_budget,
+            shared_cost_budget=shared_cost_budget,
+            shared_tool_budget=shared_tool_budget,
         )
 
 
@@ -244,14 +269,22 @@ class RepairWorker(WorkerAgent):
         model: BaseChatModel,
         registry: SkillRegistry,
         max_steps: int = 4,
+        max_tool_calls: int | None = None,
         telemetry: TelemetryCollector | None = None,
+        shared_model_budget: TotalModelCallBudget | None = None,
+        shared_cost_budget: SettledCostBudget | None = None,
+        shared_tool_budget: TotalToolCallBudget | None = None,
     ) -> None:
         super().__init__(
             agent_id=agent_id,
             model=model,
             registry=registry,
             max_steps=max_steps,
+            max_tool_calls=max_tool_calls,
             telemetry=telemetry,
+            shared_model_budget=shared_model_budget,
+            shared_cost_budget=shared_cost_budget,
+            shared_tool_budget=shared_tool_budget,
         )
 
 
@@ -267,7 +300,7 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset({"audit_project"})
 def _extract_claimed_open_errors(result: AgentResult) -> int | None:
     """Read the worker's REAL open-error claim from its own ``audit_project`` tool result.
 
-    Scans the ReAct transcript for a successful ``audit_project`` step and returns the
+    Scans the 思考与工具循环 transcript for a successful ``audit_project`` step and returns the
     ``open_errors`` integer straight from the tool's *structured* result (``AgentStep.result``,
     captured before the observation string is truncated).  The last successful audit wins, so a
     worker that re-audits after proposing fixes reports its final measured count.

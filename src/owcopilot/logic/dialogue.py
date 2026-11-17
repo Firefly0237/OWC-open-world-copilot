@@ -94,9 +94,9 @@ def _seed(tree: DialogueTree, initial_state: dict[str, Value] | None) -> WorldSt
 
 
 def _apply_choice(state: WorldState, step: DialogueWalkStep, choice: DialogueChoice) -> None:
-    for effect in choice.effects:
-        state.apply(effect.var, effect.op, effect.value)
-        step.effects.append(f"{effect.var} {effect.op} {effect.value}")
+    from .stepper import apply_effects
+
+    step.effects.extend(apply_effects(state, choice.effects))
 
 
 def walk_dialogue_tree(

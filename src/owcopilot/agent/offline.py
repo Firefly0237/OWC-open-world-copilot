@@ -1,18 +1,20 @@
 # agent 推理模型的离线替身（$0 确定性，供测试/CI/eval，需 OWCOPILOT_ALLOW_OFFLINE_LLM）。
-# 按固定合理的 ReAct 轨迹走（审计→接地→质量 harness→报告），让整条 agent 链路无需真模型即可测。
+# 按固定合理的 思考与工具循环 轨迹走（审计→接地→质量 harness→报告），让整条 agent
+# 链路无需真模型即可测。
 # LangChain chat model 形态(tool_calls 剧本)，喂真实的 create_agent 循环；
-# 文本 ReAct 版 Offline*Provider 已随文本路径退役(T2 S8)。
+# 文本 思考与工具循环 版 Offline*Provider 已随文本路径退役(T2 S8)。
 """Deterministic, $0 stand-ins for the agent's reasoning model — the offline test/CI/eval doubles.
 
 Like every other offline provider in the project, these are fixtures, never a shipped product mode
 (the runtime builders gate them behind ``OWCOPILOT_ALLOW_OFFLINE_LLM``). Each is a LangChain
-``BaseChatModel`` fake emitting a fixed, sensible ReAct trajectory as native ``tool_calls`` —
+``BaseChatModel`` fake emitting a fixed, sensible reasoning-and-tool loop trajectory as native
+``tool_calls`` —
 audit → grounding lookup → quality harness → report — driving the real
 ``langchain.agents.create_agent`` loop. Critically, the transcript-aware one *reads the
 conversation it is given*: the final answer quotes the open-error count scraped from the appended
 tool results, so a passing test proves the loop really feeds tool results back into the model
 (not just that it can replay a script). The text-format ``Offline*Provider`` doubles retired
-together with the text ReAct path.
+together with the text reasoning-and-tool loop path.
 """
 
 from __future__ import annotations

@@ -26,6 +26,9 @@ belongs in a separate, opt-in verifier — do not quietly upgrade this function'
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from ..content.models import ContentBundle
 from ..retrieval.models import ContextPack
 from .models import QAAnswer, QAVerification
@@ -44,16 +47,12 @@ def verify_qa_answer(
     if not answer.refused and not answer.citations:
         errors.append("non-refusal answer must cite at least one retrieved lore ref")
     allowed_refs = set(pack.refs)
-    citation_text_by_ref = {
-        hit.ref: " ".join(part for part in (hit.title, hit.body) if part).strip()
-        for hit in pack.hits
-    }
+    hit_by_ref = {hit.ref: hit for hit in pack.hits}
     for citation in answer.citations:
         canonical_ref = _canonical_ref(citation.ref, allowed_refs)
         if canonical_ref:
             citation.ref = canonical_ref
-            if not citation.text:
-                citation.text = citation_text_by_ref.get(canonical_ref, "")[:500]
+            _enrich_citation(citation, hit_by_ref[canonical_ref])
         else:
             errors.append(f"citation {citation.ref!r} was not in the context pack")
 
@@ -77,6 +76,46 @@ def verify_qa_answer(
         errors.append(f"mentioned entity {mention!r} could not be resolved")
 
     return QAVerification(valid=not errors, errors=errors, unresolved_mentions=unresolved)
+
+
+def _enrich_citation(citation: Any, hit: Any) -> None:
+    """Attach source coordinates and a bounded preview without requiring new model output."""
+    preview = " ".join(part for part in (hit.title, hit.body) if part).strip()[:500]
+    if not citation.text:
+        citation.text = preview
+    if not citation.source_preview:
+        citation.source_preview = preview
+    if not citation.source_title:
+        citation.source_title = hit.title
+    metadata = hit.metadata
+    if not citation.revision:
+        citation.revision = metadata.get("artifact_version_id") or metadata.get("revision", "")
+    locator = citation.locator or _first_locator(metadata)
+    if locator is None:
+        return
+    citation.locator = locator
+    if citation.page is None and isinstance(locator.get("page_index"), int):
+        citation.page = int(locator["page_index"]) + 1
+    if citation.bbox is None:
+        coordinates = [locator.get(key) for key in ("x0", "top", "x1", "bottom")]
+        numeric = [float(value) for value in coordinates if isinstance(value, (int, float))]
+        if len(numeric) == 4:
+            citation.bbox = numeric
+
+
+def _first_locator(metadata: dict[str, str]) -> dict[str, Any] | None:
+    for key in ("locators_json", "locator_start_json"):
+        raw = metadata.get(key)
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        candidate = parsed[0] if isinstance(parsed, list) and parsed else parsed
+        if isinstance(candidate, dict):
+            return candidate
+    return None
 
 
 def _canonical_ref(ref: str, allowed_refs: set[str]) -> str | None:

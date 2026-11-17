@@ -1,163 +1,107 @@
-<div align="center">
+# OWC
 
-# OWCopilot
+作者可调节 AI 参与、理解改动影响，并复用有效协作方式的叙事共创系统。
 
-**A local-first AI workbench for open-world game narrative and worldbuilding —
-keep a sprawling world consistent, searchable, and ready to ship.**
+## 核心机制
 
-English | [简体中文](README.zh-CN.md)
+- **Agent 可观测性与执行 Harness**：持久化请求、上下文来源、模型及工具事件；在派发和发布边界核验权限、版本与预算，支持按哈希核对本地调用参数。目前通过轮询展示运行中事件，尚未接通模型增量输出。
+- **工作图与技能演化**：根据执行反馈提出类型化图修改和参数化经验，通过端口、依赖、能力及来源检查后编译执行；保留父版本、试用范围、实际结果与撤回状态。
+- **协作控制**：支持连续委派、先确认大纲和分步确认。阶段约定改变真实调度；当前内容修改、任务内试用与长期方法采用分开处理。
+- **类型化叙事 IR 与状态机检查**：在受约束生成链中校验变量类型和条件表达式，将机制与对白转换为可执行分支及效果映射；通过实际运行时的有界路径遍历核验后果结算，支持跨章状态继承和兼容范围内的版本接续。
 
-![tests](https://img.shields.io/badge/tests-1623_passing-brightgreen)
-![python](https://img.shields.io/badge/python-3.11%2B-blue)
-![frontend](https://img.shields.io/badge/frontend-Vue%203%20%2B%20Vite-42b883)
-![license](https://img.shields.io/badge/license-MIT-lightgrey)
+## 使用入口
 
-<img src="docs/images/overview.png" alt="OWCopilot workbench — world overview" width="920">
-
-</div>
-
-## The idea in one line
-
-**An AI assistant whose every suggestion is checked by a machine before it can land.**
-
-Narrative teams fear two things above all: *continuity breaks* (a character contradicts an earlier
-scene) and *dead links* (a branch that can never be entered, or a state the player cannot leave).
-At tens of thousands of lines, across many versions, with several writers in parallel, neither is
-catchable by eye. Existing narrative tools help you **write** content; none of them tell you
-**what your last change broke**.
-
-So OWCopilot is built as two halves plus one feedback edge:
-
-```
-     AI side                          Deterministic side
- (reads, drafts, edits,   ──────►   (34 rules · logic simulation ·
-  proposes repairs)                  branch exhaustion · temporal checks)
-        ▲                                       │
-        └────────── verdict feeds back ─────────┘
-```
-
-The right half never lies, so it doubles as a **reward signal for the left half** — no human
-labelling, no learned reward model. A proposal that would add new errors is dropped before a human
-ever sees it, and a tree search uses the same signal to find the repair sequence that clears the
-most errors.
-
-## Features
-
-- 🗂️ **World content management** — factions, characters, locations, quests, events and their
-  relations live as plain, versionable files. Import from JSON / CSV / XLSX (Chinese headers
-  supported), Markdown, or full manuscripts.
-- 🛡️ **Consistency checking** — reference integrity, timeline order, quest logic (deadlocks,
-  unreachable stages, undefined variables), dialogue conditions, localization pre-flight and
-  more. Every finding comes with its location and evidence, ready to jump to and fix.
-- 🕸️ **Impact analysis** — before you change a faction, character or event, see exactly which
-  quests, dialogues and regions are affected.
-- 🔮 **World Q&A** — ask about a single fact or the shape of the whole world and get answers
-  with source citations. When the world doesn't contain the answer, it tells you what's missing
-  instead of guessing.
-- 🎭 **Grounded generation** — draft a whole starting world from one sentence, or expand
-  regions, quests, characters, barks and dialogue trees. Generated content only references
-  entities that exist in your world and is refined through an automatic critique pass before it
-  reaches your review queue.
-- 🤖 **Agent loop** — a reason-and-act agent diagnoses a world through a read-only/propose-only
-  tool surface: permissions converge at a single adjudication point, failures come back as
-  machine-readable error codes it can recover from, oversized observations are paged rather than
-  truncated, and it **can never write canon** (a structural ban, not a convention). Checkpointed,
-  resumable, and pausable for human approval.
-- ⚒️ **Repair loop** — every detected issue comes with fix candidates you can apply in one
-  click and roll back just as easily. Candidates are **shadow-validated**: applied to a copy,
-  re-audited, and dropped if they would introduce new errors. A Monte-Carlo tree search over the
-  fix space uses "errors cleared" as its reward — deterministic, reproducible, and free.
-- ✦ **Visual editing** — a draggable relationship star-graph, a chronology timeline, a dialogue
-  flow editor, and snapshot diffs between world versions.
-- 📦 **Delivery** — export the world as a checksummed data bundle plus CSV / XLIFF 1.2
-  localization files; quest rows edited on the engine side sync back for review.
-
-## Quick start
-
-```bash
-git clone <repo> && cd openworld
-python -m venv .venv && .venv/Scripts/pip install -e ".[dev,serve]"   # Windows
-# source .venv/bin/activate && pip install -e ".[dev,serve]"          # macOS/Linux
-# optional: ".[semantic]" adds multilingual semantic retrieval (downloads a model once)
-
-# sanity check: build the built-in bilingual sample world and run the quality gates
-.venv/Scripts/python -m owcopilot.cli.main eval-acceptance --workspace .tmp/demo
-```
-
-### Launch the workbench
-
-```bash
-npm --prefix frontend install && npm --prefix frontend run build   # first time only
-.venv/Scripts/python -m uvicorn owcopilot.service.api:create_app --factory --port 8000
-# open http://localhost:8000 — one process; worlds live in ~/.owcopilot/worlds/
-```
-
-A guided tour walks you through every area on first launch. If you're not comfortable with a
-terminal, have a teammate run the commands above once — after that, everything happens in the
-browser.
-
-**First run starts empty.** Populate your world by *importing* what you already have
-(manuscripts, spreadsheets, Markdown — under **Import**) or *generating* from a sentence
-(under **Create**, needs a connected model).
-
-**Bring your own model:** open Settings, pick a provider (DeepSeek / OpenAI / Anthropic / Kimi /
-Zhipu / Qwen / Doubao / custom), paste your API key, and test the connection. The key stays in
-local process memory and calls the provider directly. Browsing, checking, reviewing and
-exporting all work without any model connected.
-
-## Using OWCopilot
-
-- **Web workbench** — the main experience: create, import, check, ask, review and export from
-  the browser.
-- **CLI** — `audit`, `impact`, `ask`, `draft` / `expand`, `export`, `eval-acceptance` and more;
-  JSON output, non-zero exit on unresolved errors — drops straight into CI.
-- **REST API** — resource-oriented endpoints per project, with server-sent events for
-  long-running jobs.
-- **MCP server** — exposes the diagnosis / retrieval / proposal toolset to AI assistants and
-  agent frameworks.
-
-## How it works
-
-```
-  existing material · new ideas · engine-side edits
-              ↓
-  content hub — structured, versioned, searchable
-              ↓
-  quality layer — consistency audit · impact analysis · timeline & quest-logic checks
-              ↓
-  assistance layer — cited world Q&A · grounded drafts · repair proposals
-              ↓
-  review — approve, edit or reject; every change traceable and reversible
-              ↓
-  delivery — world data bundle · localization files · engine round-trip
-```
-
-## What is actually verified
-
-This project distinguishes **"implemented"** from **"verified"**, and says which is which.
-
-| Area | Status |
+| 路径 | 用途 |
 |---|---|
-| Deterministic checks | 34 rules, 7 of them with automatic fixers. Full offline test suite (~2380 tests). |
-| Agent diagnosis loop | Verified against a real model: 5 steps, US$0.004, completed — it called the audit itself and translated the machine output into planner-readable findings. |
-| Repair search | Verified: one seeded error → cleared in one iteration, US$0.00 (fully deterministic path, no model call). |
-| **Unreal Engine data layer** | **Verified on real UE 5.7.2** — tables filled and read back with zero drift, pinned by a regression test that runs the headless editor. Condition expressions are compiled to structured clauses at export time, so the engine side needs no expression parser and no C++. |
-| **The value of the deterministic layer** | **Measured, not asserted.** A single-variable controlled experiment (72 real runs, 12 seeded worlds, k=3): with the checker in the agent's toolset it finds **100%** of real defects and fabricates **0**; with the checker removed it finds **11.6%** and makes **279** unsupported claims — and reports false alarms on a clean world **3 times out of 3**. Confidence intervals do not overlap. |
-| Unity package | Code complete (importer, runtime runner, cross-language differential fixtures) but **never compiled or executed** — treated as unverified. |
+| `/creator` | 创作要求、资料、正文、试玩、局部修改与方法选择 |
+| `/evolution` | 工作图、执行依据、技能版本及运行诊断 |
+| `/worlds` | 创建、导入、导出与切换工作区 |
+| `/settings` | 模型连接与本地界面设置 |
 
-**Known limits, stated on purpose:** no large-scale benchmark exists, so no throughput numbers are
-claimed; multi-agent orchestration has architecture tests but **no end-to-end evaluation**; the
-agent is reachable from the CLI only (no REST/UI entry yet); context compression and replanning
-exist but were not triggered in the recorded live run.
+新工作区不附带演示内容。生成需要配置真实模型服务；未配置时给出明确错误，不用测试替身填充作品。
 
-Design notes, verification records and the industry-alignment audit live under [`docs/`](docs/).
+## 本地启动
 
-## Tech stack
+需要 Python 3.11+、Node.js 22.12+。在仓库根目录执行：
 
-Python 3.11+ · FastAPI · Pydantic v2 · NetworkX · SQLite (WAL) — Vue 3 · Vite · TypeScript,
-with hand-rolled deterministic SVG for all visual views. Works with any OpenAI-compatible LLM
-provider.
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install -e ".[serve,live]"
+npm ci --prefix apps/web
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+```
 
-## License
+编辑 `.env` 配置现有服务商、模型和 API Key，再启动：
 
-[MIT](LICENSE)
+```powershell
+scripts/start.ps1 -Build -RequireModelConnection
+```
+
+默认地址为 `http://127.0.0.1:8765/creator`。可通过 `-Port 8766 -Workspace local` 指定端口和工作区。
+
+`-RequireModelConnection` 只做不携带凭证的连接预检，不发送生成请求，也不证明余额或 API 鉴权有效。不要覆盖已有 `.env`。
+
+也可直接运行：
+
+```sh
+python scripts/serve.py --help
+python scripts/serve.py
+```
+
+直接运行前先完成前端构建：`npm --prefix apps/web run build`。初始化及数据目录以启动器的参数说明为准。`--check` 只初始化工作区并检查配置路径，不启动服务。
+
+## 结构
+
+```text
+apps/web/              Vue 界面与前端回归
+src/owcopilot/
+  workflow/            工作图、执行、方法版本和协作合同
+  logic/               状态表达式、编译与试玩
+  content/             内容模型、导入与版本
+  llm/                 模型协议、调用策略与观测
+  service/             HTTP 接口及装配
+  app/                 工作区与业务命令
+scripts/               正式启动、连接及资源工具
+tests/                独立合成夹具与回归检查
+var/
+  worlds/              本地工作区内容
+  runtime/             执行状态和日志
+  cache/               检查工具缓存（不提交）
+```
+
+其余 Python 模块为上述主线复用的存储、审计、资料和模型基础能力，不作为另一套演示产品入口。
+
+`.venv/`、`apps/web/node_modules/` 和 `.git/` 分别是本地 Python 环境、前端依赖及版本历史，不属于产品源码。构建目录、运行数据和工具缓存已从编辑器默认目录视图中排除；删除这些本地依赖后，需要重新安装才能开发。
+
+## 开发检查
+
+```powershell
+.venv\Scripts\python -m pip install -e ".[dev,serve,live]"
+.venv\Scripts\python -m pytest -q tests/domain/test_workflow_graph_v2.py tests/platform/test_creator_production_v2.py tests/platform/test_edit_continuity.py tests/platform/test_workflow_stage_changes_v2.py tests/platform/test_task_method_permissions.py
+npm --prefix apps/web test
+npm --prefix apps/web run build
+```
+
+测试使用显式受控输入和临时存储，不自动发起付费模型调用。保留正式回归测试，不将演示故事和冻结展示报告作为产品依赖。
+
+## 数据与执行边界
+
+- 工作区内容、数据库和任务状态保存在 `var/` 或明确配置的位置；凭证仅保存在本地配置，不进入产物或日志。
+- 查看记录与重新执行是不同操作；结果未知时先核对，不自动重派。
+- 当前作者页每 2.5 秒、诊断页每 6 秒轮询新版事件。已有其他事件流接口不代表新版模型输出已支持流式传输；取消可阻止后继执行和迟到结果发布，不保证立即终止远端模型。
+- 候选试用不代表作者采用；技术检查不代表文学意图保持。
+- 新版续玩只支持已定义的兼容范围；不支持的结构明确拒绝，原版本不被覆盖。
+- 程序工具仅在限定输入输出和隔离执行合同内启用；使用该能力需要本机可用的容器运行环境。
+- 工程协议检查与效果比较分开：测试通过不能证明创作质量、效率或作者体验改善；主线缺失的价格信息保持未知，不按零成本计算。真实配对运行和真人体验收益仍需单独验证。
+- 测试缓存及受控 Provider 记录不计入真实模型样本，开发者操作不计入作者评价；测量只纳入明确标识来源的注册工作区运行。
+
+开发方式见 [AGENTS.md](AGENTS.md)。本项目采用 [MIT License](LICENSE)。
+
+## 接续工作
+
+以下为待实施事项，不计入已完成功能：
+
+1. 为新版 Harness 提供同源 SSE，按持久事件序号续读，保证观察和重连不触发执行。
+2. 接通服务商真实增量输出，区分生成中草稿与正式产物；保持原有预算、权限和取消边界，禁止将完整返回拆字冒充流式输出。
+3. 作者页与诊断页共用观察通道，支持工具过程卡、跨任务解绑、去重与有限缓冲，并独立验证浏览器交互。
+4. 扩充同输入运行比较的计量合同，冻结全部角色配置，统计调用、token、端到端耗时和复用节点；先做同任务演化与相似新任务复用的配对观察，保留失败、未知和未改善结果。

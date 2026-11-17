@@ -1,12 +1,12 @@
 # 设计就绪度分析：确定性的『这内容能发了吗』评分。
 """Design-readiness analysis: deterministic "is this content ready to ship?" scoring.
 
-Distinct from the audit (correctness). See ``project_docs/开发全过程.md``.
+Distinct from the audit: readiness measures completeness, while audit rules measure correctness.
 """
 
 from __future__ import annotations
 
-from .models import CheckResult, ItemReadiness, KindSummary, ReadinessReport
+from .models import CheckResult, DanglingInspirationRef, ItemReadiness, KindSummary, ReadinessReport
 from .service import (
     STANDARD_VERSION,
     assess_character,
@@ -19,6 +19,7 @@ from .service import (
 __all__ = [
     "STANDARD_VERSION",
     "CheckResult",
+    "DanglingInspirationRef",
     "ItemReadiness",
     "KindSummary",
     "ReadinessReport",

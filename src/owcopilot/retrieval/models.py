@@ -19,6 +19,10 @@ class ContextPack(BaseModel):
     query: str
     budget_tokens: int
     hits: list[RetrievalHit] = Field(default_factory=list)
+    # Additive status fields: old serialized packs still validate, while callers can distinguish
+    # a fully configured semantic pipeline from a hashing/lexical fallback.
+    degraded: bool = False
+    degradation_reasons: list[str] = Field(default_factory=list)
 
     @property
     def refs(self) -> list[str]:

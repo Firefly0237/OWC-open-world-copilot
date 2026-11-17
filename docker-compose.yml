@@ -1,10 +1,3 @@
-# Local / single-host run of the deployable surface.
-#   docker compose up --build        # offline ($0, no keys) — smoke-test the pipeline
-#   OWCOPILOT_LLM_MODE=real docker compose up --build   # real DeepSeek (needs .env with keys)
-#
-# Secrets: keys are read from the environment / .env at RUNTIME (env_file below). .env is
-# .dockerignore'd so it never enters the image — it is only mounted into the running container's
-# env by compose. Rotate the key if it has ever been shared (audit A3).
 services:
   api:
     build:
@@ -12,32 +5,21 @@ services:
       dockerfile: Dockerfile
     image: owcopilot-api:latest
     ports:
-      - "8000:8000"
+      - "127.0.0.1:${OWCOPILOT_PORT:-8000}:8000"
     environment:
-      # Safe defaults; override to go live. Compose substitutes these from your shell/.env.
-      # Every knob here has a real reader in src/ (dead legacy knobs were removed, not kept).
-      OWCOPILOT_LLM_MODE: "${OWCOPILOT_LLM_MODE:-offline}"
-      OWCOPILOT_CACHE_MODE: "${OWCOPILOT_CACHE_MODE:-exact+semantic}"
-      OWCOPILOT_CHEAP_MODEL: "${OWCOPILOT_CHEAP_MODEL:-deepseek-v4-flash}"
-      OWCOPILOT_RATE_LIMIT_PER_MIN: "${OWCOPILOT_RATE_LIMIT_PER_MIN:-60}"
-      OWCOPILOT_RATE_LIMIT_BACKEND: "${OWCOPILOT_RATE_LIMIT_BACKEND:-memory}"
-      OWCOPILOT_SEMANTIC_THRESHOLD: "${OWCOPILOT_SEMANTIC_THRESHOLD:-0.9}"
-      OWCOPILOT_REDIS_URL: "${OWCOPILOT_REDIS_URL:-redis://redis:6379/0}"
-      OWCOPILOT_PROVIDER_TIMEOUT_SEC: "${OWCOPILOT_PROVIDER_TIMEOUT_SEC:-30}"
-      # Set OWCOPILOT_API_KEY to require X-API-Key on every request (do this for any real-mode deploy).
+      OWCOPILOT_LLM_MODE: real
+      OWCOPILOT_PROFILE: local
+      OWCOPILOT_PROJECTS_JSON: "{}"
+      OWCOPILOT_WORLDS_HOME: /app/var/worlds
+      OWCOPILOT_RUNTIME_DIR: /app/var/runtime
+      OWCOPILOT_CACHE_MODE: exact
       OWCOPILOT_API_KEY: "${OWCOPILOT_API_KEY:-}"
-      # OPENAI_BASE_URL / OPENAI_API_KEY come from env_file (.env) below, only needed in real mode.
     env_file:
       - path: .env
         required: false
+    volumes:
+      - owcopilot-data:/app/var
     restart: unless-stopped
 
-  # ---------------------------------------------------------------------------------------------
-  # Optional: a shared cache for multi-instance deploys.
-  # Uncomment this block and switch OWCOPILOT_CACHE_MODE to `redis` or `redis+semantic` when you want
-  # multiple API replicas to share the L1 cache through Redis.
-  #
-  # redis:
-  #   image: redis:7-alpine
-  #   ports: ["6379:6379"]
-  #   restart: unless-stopped
+volumes:
+  owcopilot-data:

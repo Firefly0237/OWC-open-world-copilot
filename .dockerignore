@@ -1,31 +1,45 @@
-# Keep the build context small AND keep secrets out of the image.
-# .env holds real provider keys — it must NEVER enter a layer; inject keys at runtime.
+# Credentials and user data never enter the build context.
 .env
 .env.*
-!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.npmrc
+.pypirc
+var/
+content/
+*.sqlite*
+*.db*
 
-# Local virtualenv / caches / build artifacts
+# Machine-local environments, caches and generated files.
 .venv/
 **/__pycache__/
 *.pyc
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 *.egg-info/
 build/
 dist/
-# The frontend is built fresh inside the image's node stage; never ship host artifacts.
-frontend/node_modules/
-frontend/dist/
+.tmp/
+reports/
+.cache/
+.huggingface/
+model-cache/
+models/
+apps/web/node_modules/
+apps/web/dist/
 
-# Editors / VCS / local scratch
+# Repository tools and documentation do not belong in the runtime image.
+.git/
+.github/
+.claude/
+**/.owcopilot/
 .idea/
 .vscode/
-.git/
-.gitignore
 .Rhistory
-
-# Docs and tests aren't needed in the runtime image (tests run in CI, not in the container).
 tests/
 docs/
-project_docs/
 *.md
+!README.md

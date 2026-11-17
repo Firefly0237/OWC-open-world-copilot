@@ -1,28 +1,17 @@
-# Reflexion 的 Self-Reflection 组件（M_sr，Shinn 2023）：把一次失败试验的 evaluator 反馈蒸馏成
+# 跨轮反馈记忆 的 Self-Reflection 组件（M_sr，）：把一次失败试验的 evaluator 反馈蒸馏成
 # 一条口头反思，供 multi_agent/session.py 的单次 evaluator 驱动重试前馈给 Actor。要点：
 # ① 反思蒸馏空输出即报 ReflexionError、绝不静默降级；② 离线 $0 走确定性模板替身
 # （OWCOPILOT_ALLOW_OFFLINE_LLM 门禁），不泄漏进产品路径。
-"""Reflexion Self-Reflection component (M_sr) — Shinn et al., 2023, NeurIPS (arXiv:2303.11366).
+"""Distill failed-attempt feedback into one concise correction for a later attempt.
 
-Reflexion's contract is the triangle Actor (M_a) → Evaluator (M_e) → Self-Reflection (M_sr). This
-module owns ONLY the Self-Reflection piece: :func:`distill_reflection` turns a failed trial's
-evaluator feedback into ONE concise verbal reflection (what went wrong + how the next attempt should
-do better). Reinforcement is via language, not weights.
+The caller owns evaluation and the bounded retry. This module makes one model call to turn the
+goal and evaluator feedback into a non-empty verbal note. It does not update model weights,
+approve the next result, or start a retry itself.
 
-The bounded, evaluator-driven trial control flow that CONSUMES the reflection lives where the real
-orchestration is — the single-shot retry in
-:meth:`owcopilot.multi_agent.session.MultiAgentSession._reflexion_retry`: the Evaluator is the
-:class:`~owcopilot.multi_agent.verifier.VerifierAgent` verdict already computed in the main loop,
-and the Actor is the same ``WorkerAgent`` re-run with the reflection injected as episodic memory
-via ``ReActAgent.run(reflections=...)``. Keeping the distillation reusable while letting the
-orchestrator own the loop matches the paper's reference implementation (noahshinn/reflexion), where
-the trial driver is task-shaped rather than a standalone generic API.
-
-The offline deterministic template ``_offline_reflection`` is the project-sanctioned $0 stand-in for
-the Self-Reflection LLM (gated by ``OWCOPILOT_ALLOW_OFFLINE_LLM``, exactly like
-``OfflineReactChatModel`` substitutes the actor LLM) — it never leaks into a real deployment, which
-always takes the LLM path. A blank model reply raises :class:`ReflexionError` rather than degrading
-silently into plain retry.
+The session consumes the note through
+``owcopilot.multi_agent.session.MultiAgentSession._reflexion_retry`` and
+``ReActAgent.run(reflections=...)``. A blank reply raises ``ReflexionError``.
+The deterministic offline helper is available only under ``OWCOPILOT_ALLOW_OFFLINE_LLM``.
 """
 
 from __future__ import annotations
@@ -31,8 +20,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from ..errors import OWCopilotError
-from ..llm.gateway import offline_llm_allowed
+from ..llm.gateway import offline_llm_allowed, provider_transport_attempt_cap
 from ..llm.telemetry_callback import TelemetryCallbackHandler
+from .middleware import SettledCostBudgetExceeded, TotalModelBudgetExceeded
 from .react import _AGENT_TIER, ReActAgent, _model_id_of
 
 
@@ -46,7 +36,7 @@ class ReflexionError(OWCopilotError, RuntimeError):
 
 
 _REFLECTION_SYSTEM_PROMPT = (
-    "You are the self-reflection component of a Reflexion agent (Shinn et al., 2023). A prior "
+    "Review a failed attempt and prepare guidance for the next attempt. A prior "
     "attempt at the goal failed its evaluation. Given the goal and the evaluator's feedback, write "
     "ONE concise sentence: what went wrong and how the next attempt should do better. Output only "
     "that reflection — no preamble, no restating the goal."
@@ -54,8 +44,8 @@ _REFLECTION_SYSTEM_PROMPT = (
 
 
 def distill_reflection(*, agent: ReActAgent, goal: str, trial_index: int, feedback: str) -> str:
-    """Convert a failed trial's ``feedback`` into one short verbal reflection (the paper's
-    Self-Reflection model). One LLM call per failed trial, through the agent's own chat model
+    """Convert a failed trial's ``feedback`` into one short correction note.
+    One LLM call per failed trial, through the agent's own chat model
     (billed to the agent's collector under its task label, when one is wired).
 
     Offline ($0) path: when ``OWCOPILOT_ALLOW_OFFLINE_LLM`` is set (tests / CI / eval), use the
@@ -77,9 +67,16 @@ def distill_reflection(*, agent: ReActAgent, goal: str, trial_index: int, feedba
                     tier=_AGENT_TIER,
                     model=_model_id_of(agent.model),
                     default_task=agent.task,
+                    transport_attempt_cap=provider_transport_attempt_cap(agent.model),
                 )
             ]
         }
+    try:
+        agent.consume_model_call("reflection")
+    except SettledCostBudgetExceeded as exc:
+        raise ReflexionError(f"self-reflection cost budget exhausted: {exc}") from exc
+    except TotalModelBudgetExceeded as exc:
+        raise ReflexionError(f"self-reflection model-call budget exhausted: {exc}") from exc
     reply = agent.model.invoke(
         [
             SystemMessage(content=_REFLECTION_SYSTEM_PROMPT),

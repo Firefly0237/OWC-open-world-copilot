@@ -39,6 +39,7 @@ from .rules import (
     TextTooLongForUIRule,
     TimelineViolationRule,
     UnreviewedAIContentRule,
+    WorldFlagConsistencyRule,
 )
 
 
@@ -77,6 +78,7 @@ def build_default_rule_registry() -> RuleRegistry:
             QuestLogicRule(),
             QuestGlobalReachabilityRule(),
             FlagTemporalInvariantRule(),
+            WorldFlagConsistencyRule(),
             PromptInjectionRule(),
             UnreviewedAIContentRule(),
         ]

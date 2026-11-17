@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "models": {
+    "embedding": {
+      "repo_id": "BAAI/bge-m3",
+      "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+      "purpose": "multilingual dense retrieval and the matching retrieval-budget tokenizer"
+    },
+    "reranker": {
+      "repo_id": "BAAI/bge-reranker-v2-m3",
+      "revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+      "purpose": "multilingual cross-encoder reranking for the real-model retrieval benchmark"
+    }
+  }
+}

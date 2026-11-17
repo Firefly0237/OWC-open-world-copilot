@@ -10,12 +10,21 @@ The REST contract — field names, validators, defaults — is unchanged from wh
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..content.models import ContentBundle
 from ..exporters import EngineTarget
+from ..inspiration.models import Provenance
+from ..platform.models import TenantId
+from ..spec_authoring import SpecDraft, TranslationOutcome
+
+ReferenceUse = Literal["inspiration", "drafting"]
+
+
+def _default_reference_uses() -> list[ReferenceUse]:
+    return ["inspiration"]
 
 
 # --------------------------------------------------------------------------- request / response
@@ -40,6 +49,9 @@ class ProjectAuditResponse(BaseModel):
 class ProjectIssuesResponse(BaseModel):
     project: str
     issues: list[dict[str, Any]]
+    total: int = 0
+    next_cursor: str | None = None
+    snapshot_etag: str = ""
     cost_budget: dict[str, Any]
 
 
@@ -53,6 +65,8 @@ class ProjectContextPackResponse(BaseModel):
     project: str
     refs: list[str]
     hits: list[dict[str, Any]]
+    degraded: bool = False
+    degradation_reasons: list[str] = Field(default_factory=list)
     cost_budget: dict[str, Any]
 
 
@@ -62,6 +76,7 @@ class ProjectAskRequest(ProjectContentRequest):
     max_cost_usd: float | None = Field(default=None, ge=0)
     llm_mode: str = Field(default="offline", pattern="^(offline|real)$")
     llm_model: str = Field(default="deepseek-v4-flash", max_length=120)
+    agentic: bool = False
     # Opt-in RAGAS-style entailment gate (annotate, not block). off (default): unchanged. offline:
     # deterministic $0 lexical judge. llm: the answering model judges each claim (needs llm_mode
     # real). The result rides on answer.faithfulness; it never suppresses or rewrites the answer.
@@ -72,6 +87,8 @@ class ProjectAskResponse(BaseModel):
     request_id: str
     project: str
     answer: dict[str, Any]
+    degraded: bool = False
+    degradation_reasons: list[str] = Field(default_factory=list)
     telemetry: dict[str, Any]
     cost_budget: dict[str, Any]
 
@@ -152,19 +169,26 @@ class ProjectExtractionRunRequest(_LLMModeRequest):
     source_kind: str = Field(default="文稿", max_length=40)
     glean_rounds: int = Field(default=1, ge=0, le=5)
     verify_faithfulness: bool = False
+    # Rights declaration for the manuscript. This endpoint produces canon drafts, so
+    # third_party_reference is refused (422) and pointed at the inspiration library.
+    provenance: Provenance = Provenance.OWN_IP
 
 
 class ProjectExtractionRunResponse(BaseModel):
     request_id: str
     project: str
     draft: dict[str, Any]
+    intake_token: str
     stats: dict[str, int]
     telemetry: dict[str, Any]
     cost_budget: dict[str, Any]
 
 
 class ProjectExtractionSubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     draft: dict[str, Any]
+    intake_token: str = Field(min_length=1, max_length=256)
     answers: dict[str, str] = Field(default_factory=dict)
     include_beats_as_quests: bool = False
 
@@ -184,6 +208,8 @@ class ProjectDialogueTreeRequest(_LLMModeRequest):
     max_nodes: int = Field(default=12, ge=4, le=24)
     max_chars: int = Field(default=120, ge=20, le=400)
     refine_rounds: int = Field(default=1, ge=0, le=4)
+    # N4.3: 额外从灵感库取参考（默认关；只召回 allowed_uses 含 drafting 的素材）。
+    use_references: bool = False
 
 
 class ProjectDialogueTreeResponse(BaseModel):
@@ -194,6 +220,9 @@ class ProjectDialogueTreeResponse(BaseModel):
     structure_problems: list[str]
     refine_trail: list[dict[str, Any]] = Field(default_factory=list)
     auto_review_incomplete: bool = False
+    # 灵感库那一侧的溯源；``use_references=False`` 或库里没有可用素材时恒为空列表。
+    inspiration_refs: list[str] = Field(default_factory=list)
+    reference_report: list[dict[str, Any]] = Field(default_factory=list)
     review_item_id: str | None
     telemetry: dict[str, Any]
     cost_budget: dict[str, Any]
@@ -205,6 +234,8 @@ class ProjectFlavorRequest(_LLMModeRequest):
     theme: str = Field(default="", max_length=200)
     max_chars: int = Field(default=120, ge=20, le=400)
     refine_rounds: int = Field(default=0, ge=0, le=4)
+    # N4.3: 额外从灵感库取参考（默认关；只召回 allowed_uses 含 drafting 的素材）。
+    use_references: bool = False
 
 
 class ProjectFlavorResponse(BaseModel):
@@ -213,6 +244,9 @@ class ProjectFlavorResponse(BaseModel):
     batch_id: str
     accepted: list[dict[str, Any]]
     rejected: list[dict[str, Any]]
+    # 灵感库那一侧的溯源；``use_references=False`` 或库里没有可用素材时恒为空列表。
+    inspiration_refs: list[str] = Field(default_factory=list)
+    reference_report: list[dict[str, Any]] = Field(default_factory=list)
     review_item_id: str | None
     telemetry: dict[str, Any]
     cost_budget: dict[str, Any]
@@ -222,6 +256,7 @@ class ProjectDraftRequest(_LLMModeRequest):
     brief: str = Field(min_length=1, max_length=4000)
     budget_tokens: int = Field(default=800, ge=1, le=8000)
     refine_rounds: int = Field(default=2, ge=0, le=4)
+    use_references: bool = False
 
 
 class ProjectDraftResponse(BaseModel):
@@ -231,6 +266,8 @@ class ProjectDraftResponse(BaseModel):
     issues: list[dict[str, Any]]
     refine_trail: list[dict[str, Any]] = Field(default_factory=list)
     auto_review_incomplete: bool = False
+    inspiration_refs: list[str] = Field(default_factory=list)
+    reference_report: list[dict[str, Any]] = Field(default_factory=list)
     review_item_id: str
     telemetry: dict[str, Any]
     cost_budget: dict[str, Any]
@@ -243,6 +280,8 @@ class ProjectBarksRequest(_LLMModeRequest):
     max_chars: int = Field(default=40, ge=8, le=500)
     allowed_entity_ids: list[str] = Field(default_factory=list)
     refine_rounds: int = Field(default=0, ge=0, le=4)
+    # N4.3: 额外从灵感库取参考（默认关；只召回 allowed_uses 含 drafting 的素材）。
+    use_references: bool = False
 
 
 class ProjectBarksResponse(BaseModel):
@@ -250,6 +289,9 @@ class ProjectBarksResponse(BaseModel):
     project: str
     accepted: list[dict[str, Any]]
     rejected: list[dict[str, Any]]
+    # 灵感库那一侧的溯源；``use_references=False`` 或库里没有可用素材时恒为空列表。
+    inspiration_refs: list[str] = Field(default_factory=list)
+    reference_report: list[dict[str, Any]] = Field(default_factory=list)
     review_item_ids: list[str]
     telemetry: dict[str, Any]
     cost_budget: dict[str, Any]
@@ -257,6 +299,9 @@ class ProjectBarksResponse(BaseModel):
 
 class ProjectExportRequest(BaseModel):
     target_engine: str = Field(default=EngineTarget.GENERIC.value)
+    # Creator-facing planning deliverables generated beside the engine projection.
+    planning_workbook: bool = Field(default=False)
+    planning_notes: bool = Field(default=False)
     # UNITY target only: also emit the opt-in Unity Localization String Table Collection CSV under
     # unity/localization/. Additive; default False keeps the export byte-for-byte as before.
     unity_localization: bool = Field(default=False)
@@ -274,6 +319,23 @@ class ProjectExportResponse(BaseModel):
     cost_budget: dict[str, Any]
 
 
+class ProseCheckRequest(BaseModel):
+    """A pasted chapter to check against the archive. Deterministic, no LLM (``check_prose`` is a
+    pure $0 rule pass), so this carries no ``llm_mode``/``use_llm`` knob unlike the sibling
+    generation requests."""
+
+    text: str = Field(min_length=1, max_length=200_000)
+
+
+class ProseCheckResponse(BaseModel):
+    request_id: str
+    project: str
+    resolved_mentions: list[dict[str, Any]]
+    issues: list[dict[str, Any]]
+    stats: dict[str, int]
+    cost_budget: dict[str, Any]
+
+
 # ---- round-13 platform endpoints: workspaces / review decisions / sweep / manage ----
 class WorkspaceInfo(BaseModel):
     name: str
@@ -282,6 +344,9 @@ class WorkspaceInfo(BaseModel):
 
 class WorkspaceListResponse(BaseModel):
     workspaces: list[WorkspaceInfo]
+    total: int | None = None
+    next_cursor: str | None = None
+    snapshot_etag: str | None = None
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -355,11 +420,60 @@ class QuestLogicDraftRequest(_LLMModeRequest):
 
 class QuestLogicPatchRequest(BaseModel):
     logic: dict[str, Any] | None = None  # the QuestLogic payload; null clears the logic layer
+    if_match: str | None = None  # same optimistic-concurrency guard as the normal quest editor
 
 
 class QuestSimulateRequest(BaseModel):
-    choices: list[str] | None = None  # branch ids to take at branching stages
-    initial_state: dict[str, Any] | None = None  # seed variable / quest-state values
+    model_config = ConfigDict(extra="forbid")
+
+    choices: list[str] | None = Field(default=None, max_length=200)
+    initial_state: dict[str, bool | int | str] | None = Field(default=None, max_length=500)
+    dialogue_tree_id: str | None = Field(default=None, min_length=1, max_length=200)
+    dialogue_choices: list[str] | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def dialogue_choices_require_tree(self) -> QuestSimulateRequest:
+        if self.dialogue_choices and not self.dialogue_tree_id:
+            raise ValueError("dialogue_choices 需要同时提供 dialogue_tree_id")
+        return self
+
+
+class QuestSimulateStepResponse(BaseModel):
+    stage_id: str
+    precondition_ok: bool
+    effects: list[str] = Field(default_factory=list)
+    branch_taken: str = ""
+
+
+class QuestSimulateRunResponse(BaseModel):
+    status: str
+    path: list[str] = Field(default_factory=list)
+    steps: list[QuestSimulateStepResponse] = Field(default_factory=list)
+    final_state: dict[str, bool | int | str] = Field(default_factory=dict)
+    message: str = ""
+
+
+class QuestDialogueWalkStepResponse(BaseModel):
+    node_id: str
+    chosen: str = ""
+    effects: list[str] = Field(default_factory=list)
+
+
+class QuestDialogueWalkResponse(BaseModel):
+    tree_id: str
+    status: str
+    path: list[str] = Field(default_factory=list)
+    steps: list[QuestDialogueWalkStepResponse] = Field(default_factory=list)
+    final_state: dict[str, bool | int | str] = Field(default_factory=dict)
+    message: str = ""
+
+
+class QuestSimulateResponse(BaseModel):
+    project: str
+    quest_id: str
+    run: QuestSimulateRunResponse
+    dialogue_walk: QuestDialogueWalkResponse | None = None
+    cost_budget: dict[str, Any]
 
 
 class RenameRequest(BaseModel):
@@ -398,6 +512,7 @@ class AssetAttachRequest(BaseModel):
 
 class EngineImportRequest(BaseModel):
     quests: list[dict[str, Any]] = Field(min_length=1)
+    baseline_quests: list[dict[str, Any]] = Field(min_length=1)
 
 
 class RecognizeRequest(BaseModel):
@@ -428,22 +543,22 @@ class MappingTemplateRequest(BaseModel):
 
 
 class TenantCreateRequest(BaseModel):
-    tenant_id: str = Field(min_length=1)
+    tenant_id: TenantId
     name: str = Field(min_length=1)
     owner_email: str = Field(min_length=3)
 
 
 class MembershipRequest(BaseModel):
-    tenant_id: str = Field(min_length=1)
+    tenant_id: TenantId
     user_id: str = Field(min_length=1)
     email: str = Field(min_length=3)
-    role: str = "editor"
+    role: Literal["owner", "editor", "reviewer", "viewer"] = "editor"
 
 
 class DevTokenRequest(BaseModel):
     user_id: str = Field(min_length=1)
-    tenant_id: str = Field(min_length=1)
-    role: str = "editor"
+    tenant_id: TenantId
+    role: Literal["owner", "editor", "reviewer", "viewer"] = "editor"
     ttl_seconds: int = Field(default=3600, ge=60, le=86400)
 
 
@@ -465,6 +580,7 @@ class NodePositionRequest(BaseModel):
     ref: str = Field(min_length=1)
     x: float
     y: float
+    z: float | None = None
 
 
 class WorkspaceImportRequest(BaseModel):
@@ -476,6 +592,8 @@ class ReviewItemsResponse(BaseModel):
     project: str
     count: int
     items: list[dict[str, Any]]
+    next_cursor: str | None = None
+    snapshot_etag: str = ""
     cost_budget: dict[str, Any]
 
 
@@ -541,6 +659,10 @@ class ReviewReviseResponse(BaseModel):
     cost_budget: dict[str, Any]
 
 
+class LessonRevokeRequest(BaseModel):
+    reason: str = Field(default="", max_length=500)
+
+
 class ProjectSweepRequest(BaseModel):
     theme: str = Field(min_length=1, max_length=200)
     extra_terms: list[str] = Field(default_factory=list)
@@ -548,6 +670,7 @@ class ProjectSweepRequest(BaseModel):
     llm_mode: str = "offline"
     llm_model: str = "deepseek-v4-flash"
     max_judge: int = Field(default=400, ge=1, le=2000)
+    semantic_threshold: float = Field(default=0.5, ge=0.0, le=1.0, allow_inf_nan=False)
 
 
 class SweepDismissRequest(BaseModel):
@@ -581,6 +704,10 @@ class ProjectSweepResponse(BaseModel):
     scanned_total: int
     scanned_by_kind: dict[str, int]
     llm_used: bool
+    # Additive defaults keep callers that construct this response directly compatible while the
+    # REST surface now exposes the semantic coverage already returned by the underlying action.
+    semantic_used: bool = False
+    semantic_flagged: int = 0
     judged_count: int
     judge_skipped: int
     hits: list[dict[str, Any]]
@@ -593,12 +720,78 @@ class ProjectSweepResponse(BaseModel):
 
 
 class ReferenceAddRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str = Field(min_length=1, max_length=200)
     # A whole reference book is fine: the inspiration store chunks + BM25-indexes it, and genesis
     # retrieves only the budget-bounded relevant chunks — so length never overruns a model call.
     text: str = Field(min_length=1, max_length=2_000_000)
     source_type: str = Field(default="uploaded_file", max_length=40)
     original_filename: str | None = Field(default=None, max_length=200)
+    # The library takes all three provenances (it is physically separate from canon); the default
+    # is the most conservative one.
+    provenance: Provenance = Provenance.THIRD_PARTY_REFERENCE
+    # Inspiration is the safe backwards-compatible default. Drafting must be an explicit uploader
+    # grant because task/character/dialogue chains can place the retrieved text in a model prompt.
+    allowed_uses: list[ReferenceUse] = Field(
+        default_factory=_default_reference_uses, min_length=1, max_length=2
+    )
+
+
+class ReferenceUploadRequest(BaseModel):
+    """Binary upload branch (N2.3 / B6): the browser can only hand us bytes for a .docx/.pdf/.epub,
+    never extracted plain text, so this is a separate shape from ``ReferenceAddRequest`` rather than
+    an optional field bolted onto it — the plain-text door's contract stays exactly what it was."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=200)
+    filename: str = Field(min_length=1, max_length=200)
+    # JSON/base64 has no multipart Content-Type. Clients may still declare one; the formal intake
+    # boundary then verifies it against the extension. Omitted keeps older clients compatible.
+    mime_type: str | None = Field(default=None, min_length=1, max_length=200)
+    content_base64: str = Field(min_length=1)
+    provenance: Provenance = Provenance.THIRD_PARTY_REFERENCE
+    allowed_uses: list[ReferenceUse] = Field(
+        default_factory=_default_reference_uses, min_length=1, max_length=2
+    )
+
+
+class ReferenceUploadArtifactResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: str
+    artifact_version_id: str
+    content_hash: str
+    byte_size: int
+    mime_type: str
+    raw_preserved: bool
+    locators_preserved: bool
+
+
+class ReferenceUploadResponse(BaseModel):
+    """Honest upload result: callers can distinguish exact locators from flattened compatibility."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: dict[str, Any]
+    chunks: list[dict[str, Any]]
+    indexed_count: int
+    injection_flagged_chunks: list[str]
+    ingestion_mode: Literal["structured_locator", "legacy_text", "flattened_binary"]
+    artifact: ReferenceUploadArtifactResponse | None = None
+    degraded: bool
+    degradation_reasons: list[str] = Field(default_factory=list)
+    cost_budget: dict[str, Any]
+
+
+class ReferenceApproveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    allowed_uses: list[ReferenceUse] = Field(
+        default_factory=_default_reference_uses, min_length=1, max_length=2
+    )
+    note: str = Field(default="", max_length=500)
 
 
 class ReferenceSearchRequest(BaseModel):
@@ -620,6 +813,8 @@ _JOB_KINDS = (
     "theme_sweep",
     "character_profile",
     "build_overview",
+    "agent_diagnose",
+    "multi_agent",
 )
 _JOB_PARAM_KEYS: dict[str, set[str]] = {
     "world_seed": {
@@ -637,6 +832,7 @@ _JOB_PARAM_KEYS: dict[str, set[str]] = {
         "source_kind",
         "glean_rounds",
         "verify_faithfulness",
+        "provenance",
         "llm_mode",
         "llm_model",
     },
@@ -651,12 +847,46 @@ _JOB_PARAM_KEYS: dict[str, set[str]] = {
     },
     "character_profile": {"brief", "llm_mode", "llm_model", "budget_tokens", "refine_rounds"},
     "build_overview": {"llm_mode", "llm_model"},
+    # E1: the ReAct diagnosis run. Keys mirror ``run_agent_diagnose_action``'s keyword parameters
+    # (the job runner splats them straight in). ``thread_id``/``resume``/``decision`` are how a run
+    # PAUSED at the human-approval gate is continued — the same interrupt/resume mechanics the CLI
+    # uses, carried over the job surface rather than a second suspend protocol. Deliberately NOT
+    # exposed: ``chat_model`` (an in-process injection point) and ``sqlite_path`` /
+    # ``checkpoint_path`` (filesystem paths never travel in a v2 request body).
+    "agent_diagnose": {
+        "goal",
+        "max_steps",
+        "max_model_calls",
+        "max_cost_usd",
+        "max_tool_calls",
+        "skills",
+        "recall",
+        "hitl",
+        "early_stopping",
+        "thread_id",
+        "resume",
+        "decision",
+        "decision_message",
+        "llm_mode",
+        "llm_model",
+        "tool_transport",
+    },
+    "multi_agent": {
+        "goal",
+        "max_tool_calls",
+        "max_total_tool_calls",
+        "max_model_calls",
+        "max_cost_usd",
+        "llm_mode",
+        "llm_model",
+    },
 }
 
 
 class ConnectionStatusResponse(BaseModel):
     configured: bool
     base_url: str = ""
+    provider: Literal["deepseek", "openai_compatible", "anthropic"] = "deepseek"
     # whether real per-tier prices are set (OWCOPILOT_PRICE_*); when false the reported cost is a
     # ballpark estimate from illustrative prices, which the UI labels accordingly.
     prices_configured: bool = False
@@ -665,20 +895,80 @@ class ConnectionStatusResponse(BaseModel):
 class ConnectionUpdateRequest(BaseModel):
     base_url: str = ""
     api_key: str = ""
+    provider: Literal["deepseek", "openai_compatible", "anthropic"] | None = None
 
 
 class ConnectionProbeRequest(BaseModel):
     base_url: str = ""
     api_key: str = ""
     model: str = Field(min_length=1, max_length=120)
+    provider: Literal["deepseek", "openai_compatible", "anthropic"] | None = None
 
 
 _JOB_KIND_PATTERN = "^(" + "|".join(_JOB_KINDS) + ")$"
 
 
+class MultiAgentJobParams(BaseModel):
+    """Typed REST contract for the cost-amplifying multi-agent job kind."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    goal: str = Field(min_length=1, max_length=1200)
+    max_tool_calls: int | None = Field(default=None, ge=1, le=100)
+    max_total_tool_calls: int | None = Field(default=None, ge=1, le=4096)
+    max_model_calls: int | None = Field(default=None, ge=1, le=512)
+    max_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    llm_mode: str = Field(default="offline", pattern="^(offline|real)$")
+    llm_model: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("goal")
+    @classmethod
+    def goal_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("multi_agent params.goal 不能为空")
+        return normalized
+
+
+class AgentDiagnoseJobParams(BaseModel):
+    """Typed REST boundary for Agent controls while preserving worker-side misuse guidance."""
+
+    # Preserve unknown parameter keys for callers of this legacy request schema.
+    model_config = ConfigDict(extra="allow")
+
+    goal: str = Field(default="", max_length=1200)
+    max_steps: int | None = Field(default=None, ge=1, le=100)
+    max_model_calls: int | None = Field(default=None, ge=1, le=100)
+    max_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    max_tool_calls: int | None = Field(default=None, ge=1, le=100)
+    skills: list[str] | None = Field(default=None, max_length=100)
+    recall: bool | None = None
+    hitl: bool | None = None
+    early_stopping: str | None = Field(default=None, pattern="^(force|generate)$")
+    thread_id: str | None = Field(default=None, max_length=200)
+    resume: bool | None = None
+    decision: str | None = Field(default=None, pattern="^(approve|reject)$")
+    decision_message: str | None = Field(default=None, max_length=2000)
+    llm_mode: str | None = Field(default=None, pattern="^(offline|real)$")
+    llm_model: str | None = Field(default=None, min_length=1, max_length=120)
+    tool_transport: str | None = Field(default=None, pattern="^(native|mcp)$")
+
+
 class JobCreateRequest(BaseModel):
     kind: str = Field(pattern=_JOB_KIND_PATTERN)
     params: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_job_params(self) -> JobCreateRequest:
+        """Type-check costly Agent controls before an asynchronous job is accepted."""
+        if self.kind == "multi_agent":
+            multi_params = MultiAgentJobParams.model_validate(self.params)
+            self.params = multi_params.model_dump(exclude_none=True, exclude_unset=True)
+            return self
+        if self.kind == "agent_diagnose":
+            agent_params = AgentDiagnoseJobParams.model_validate(self.params)
+            self.params = agent_params.model_dump(exclude_none=True, exclude_unset=True)
+        return self
 
 
 class JobCreatedResponse(BaseModel):
@@ -715,4 +1005,245 @@ class ObjectDeleteResponse(BaseModel):
     deleted_ref: str
     removed_relations: int
     post_audit_open_errors: int
+    cost_budget: dict[str, Any]
+
+
+# --------------------------------------------------------------------------- engineering lab
+class EngineeringCatalogResponse(BaseModel):
+    project: str
+    quest_ids: list[str]
+    dialogue_tree_ids: list[str]
+    style_rubrics: list[dict[str, Any]]
+    kind: Literal["quest", "dialogue_tree", "style_rubric"] | None = None
+    total: int | None = None
+    next_cursor: str | None = None
+    snapshot_etag: str = ""
+    cost_budget: dict[str, Any]
+
+
+class QuestExploreRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_states: int = Field(default=100_000, ge=1, le=1_000_000)
+    max_depth: int = Field(default=10_000, ge=1, le=100_000)
+
+
+class QuestExploreResponse(BaseModel):
+    request_id: str
+    project: str
+    quest_id: str
+    report: dict[str, Any]
+    execution_mode: Literal["deterministic_bounded_search"]
+    cost_budget: dict[str, Any]
+
+
+class TemporalSpecTranslateRequest(BaseModel):
+    """Step 1: produce an auditable candidate; never enqueue or mutate canon."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    intent: str = Field(min_length=1, max_length=1200)
+    use_llm: bool = False
+    llm_mode: Literal["offline", "real"] = "offline"
+    llm_model: str = Field(default="deepseek-v4-flash", min_length=1, max_length=120)
+    max_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def real_model_requires_explicit_opt_in(self) -> TemporalSpecTranslateRequest:
+        if self.use_llm and self.llm_mode != "real":
+            raise ValueError("use_llm=true requires llm_mode=real")
+        return self
+
+
+class TemporalSpecTranslateResponse(BaseModel):
+    request_id: str
+    project: str
+    quest_id: str
+    outcome: TranslationOutcome
+    translator_mode: Literal["deterministic", "real_model", "real_model_fallback"]
+    used_llm: bool
+    degraded: bool
+    degradation_reasons: list[str] = Field(default_factory=list)
+    telemetry: dict[str, Any]
+    writes_canon: Literal[False]
+    cost_budget: dict[str, Any]
+
+
+class TemporalSpecSubmitRequest(BaseModel):
+    """Step 2: replay a structural draft server-side, then queue it for explicit review."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    intent: str = Field(min_length=1, max_length=1200)
+    draft: SpecDraft
+
+
+class TemporalSpecSubmitResponse(BaseModel):
+    request_id: str
+    project: str
+    quest_id: str
+    review_item_id: str
+    review_item: dict[str, Any]
+    outcome: TranslationOutcome
+    writes_canon: Literal[False]
+    cost_budget: dict[str, Any]
+
+
+class FlagXrefResponse(BaseModel):
+    project: str
+    flags: list[dict[str, Any]]
+    reads_complete: bool
+    unparsable: list[dict[str, Any]]
+    summary: dict[str, Any]
+    cost_budget: dict[str, Any]
+
+
+class DialogueWalkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["walk", "explore"] = "walk"
+    choices: list[str] = Field(default_factory=list, max_length=200)
+    initial_state: dict[str, bool | int | str] = Field(default_factory=dict)
+    max_endings: int = Field(default=1_000, ge=1, le=10_000)
+
+
+class DialogueWalkResponse(BaseModel):
+    request_id: str
+    project: str
+    tree_id: str
+    mode: Literal["walk", "explore"]
+    result: dict[str, Any]
+    cost_budget: dict[str, Any]
+
+
+class RepairPlanRequest(BaseModel):
+    """Bounded MCTS search with optional real-model candidate widening.
+
+    ``llm_candidates`` is a no-op in offline mode, matching the CLI: deterministic fixers remain
+    the safe/default move source.  ``max_cost_usd`` is reported as a post-run settlement threshold;
+    the hard dispatch bound for this workflow is ``max_llm_calls``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_iterations: int = Field(default=200, ge=0, le=2_000)
+    max_depth: int | None = Field(default=None, ge=1, le=100)
+    seed: int = Field(default=0, ge=-(2**31), le=2**31 - 1)
+    llm_candidates: bool = False
+    max_llm_calls: int = Field(default=32, ge=1, le=128)
+    llm_mode: Literal["offline", "real"] = "offline"
+    llm_model: str = Field(default="deepseek-v4-flash", min_length=1, max_length=120)
+    max_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+
+class RepairPlanResponse(BaseModel):
+    request_id: str
+    project: str
+    plan: dict[str, Any]
+    candidate_source: Literal["deterministic_fixers", "deterministic_plus_model"]
+    used_llm: bool
+    llm_mode: Literal["offline", "real"]
+    telemetry: dict[str, Any]
+    writes_canon: Literal[False]
+    cost_budget: dict[str, Any]
+
+
+class QualityHarnessRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    propose_fixes: bool = True
+    max_issues: int = Field(default=5, ge=0, le=50)
+    max_candidates_per_issue: int = Field(default=1, ge=0, le=5)
+
+
+class QualityHarnessResponse(BaseModel):
+    request_id: str
+    project: str
+    content_hash: str
+    phase: str
+    stop_reason: str
+    export_ready: bool
+    audit_totals: dict[str, int]
+    top_issues: list[dict[str, Any]]
+    export_blockers: list[dict[str, str]]
+    readiness: dict[str, Any]
+    patch_proposals: list[dict[str, Any]]
+    next_tool_calls: list[dict[str, Any]]
+    tool_trace: list[str]
+    writes_canon: Literal[False]
+    cost_budget: dict[str, Any]
+
+
+class StyleSweepRequest(BaseModel):
+    """StyleRubric cascade with an optional, explicitly bounded L3 judge."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    semantic_threshold: float = Field(default=0.5, ge=0, le=1, allow_inf_nan=False)
+    use_llm: bool = False
+    max_judge: int = Field(default=400, ge=1, le=2_000)
+    llm_mode: Literal["offline", "real"] = "offline"
+    llm_model: str = Field(default="deepseek-v4-flash", min_length=1, max_length=120)
+    max_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+
+class StyleSweepResponse(BaseModel):
+    request_id: str
+    project: str
+    rubric_id: str
+    rubric_label: str
+    rubric_version: str
+    rubric_fingerprint: str
+    abstract_tag: str
+    scanned_total: int
+    scanned_by_kind: dict[str, int]
+    scanned_fields: int
+    semantic_used: bool
+    semantic_threshold: float
+    llm_used: bool
+    judge_mode: Literal["disabled", "offline_double", "real_model"]
+    judge_limit: int
+    judged_count: int
+    judge_skipped: int
+    dismissed_count: int
+    l1_total: int
+    l2_total: int
+    l1_l2_overlap: int
+    hits: list[dict[str, Any]]
+    review_suggested: list[dict[str, Any]]
+    elements: list[dict[str, Any]]
+    markdown: str
+    telemetry: dict[str, Any]
+    cost_budget: dict[str, Any]
+
+
+class AgentRunSummary(BaseModel):
+    id: str
+    goal: str
+    stop_reason: str
+    step_count: int
+    cost_usd: float
+    latency_ms: float
+    agent_name: str
+    created_at: str
+
+
+class AgentRunsResponse(BaseModel):
+    project: str
+    runs: list[AgentRunSummary]
+    total: int
+    next_cursor: str | None = None
+    previous_cursor: str | None = None
+    page_cursor: str | None = None
+    snapshot_etag: str
+    cost_budget: dict[str, Any]
+
+
+class AgentRunDetail(AgentRunSummary):
+    transcript: dict[str, Any]
+
+
+class AgentRunDetailResponse(BaseModel):
+    project: str
+    run: AgentRunDetail
     cost_budget: dict[str, Any]

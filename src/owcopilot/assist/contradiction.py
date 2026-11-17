@@ -1,7 +1,7 @@
 # canon 语义矛盾检测：批量找相互冲突的设定。
 """WS-M · Batch 2 — semantic contradiction detection over canon.
 
-The deterministic audit (WS-A + the 26 rules) catches *structural* problems — dangling refs, bad
+The deterministic audit (WS-A + the 35 rules) catches *structural* problems — dangling refs, bad
 timeline order, logic deadlocks. It cannot see *semantic* contradictions: two pieces of canon that
 assert conflicting facts ("A and B are allies" somewhere vs "A and B are sworn enemies" elsewhere),
 which is exactly the "管理已有设定不自相矛盾" job the user cares most about.

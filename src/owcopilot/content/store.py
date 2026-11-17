@@ -14,6 +14,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
+from ..storage.atomic_file import atomic_write_text, parse_json_text, read_json_file
 from ..trust.security import resolve_under_root
 from .models import (
     POI,
@@ -170,7 +171,7 @@ class ContentStore:
         meta = self.root / "versions" / version / "version.json"
         if not meta.exists():
             return {}
-        data = json.loads(meta.read_text(encoding="utf-8"))
+        data = read_json_file(meta)
         return data if isinstance(data, dict) else {}
 
     def _version_base(self, version: str) -> str | None:
@@ -193,7 +194,7 @@ class ContentStore:
             raise ValueError(f"version {version!r} does not exist")
         meta = self._version_meta(version)
         meta["frozen"] = True
-        meta_path.write_text(_json(meta), encoding="utf-8")
+        atomic_write_text(meta_path, _json(meta))
         self._parse_cache.clear()
 
     def common_base_version(self, a: str, b: str) -> str:
@@ -221,15 +222,13 @@ class ContentStore:
         path = self._head_path()
         if not path.exists():
             return None
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_json_file(path)
         return data if isinstance(data, dict) else None
 
     def _write_head(self, *, merge_point: str, working: str, seq: int) -> None:
         path = self._head_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            _json({"merge_point": merge_point, "working": working, "seq": seq}), encoding="utf-8"
-        )
+        atomic_write_text(path, _json({"merge_point": merge_point, "working": working, "seq": seq}))
         self._parse_cache.clear()
 
     def ensure_migrated(self) -> str:
@@ -298,7 +297,7 @@ class ContentStore:
         path = self.root / "versions" / version / "tombstones.json"
         if not path.exists():
             return set()
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_json_file(path)
         return {str(x) for x in data} if isinstance(data, list) else set()
 
     def _apply_overlay(
@@ -386,7 +385,7 @@ class ContentStore:
         meta: dict[str, Any] = {"version": version, "base_version": base_version}
         if frozen:
             meta["frozen"] = True
-        (vdir / "version.json").write_text(_json(meta), encoding="utf-8")
+        atomic_write_text(vdir / "version.json", _json(meta))
         self._parse_cache.clear()
 
     def save_scoped(self, bundle: ContentBundle, *, version: str = _BASELINE_VERSION) -> None:
@@ -413,8 +412,9 @@ class ContentStore:
         diff, tombstones = self._diff_bundle(bundle, base)
         self._parse_cache.clear()
         self._write_bundle_to(self.root / "versions" / version, diff)
-        (self.root / "versions" / version / "tombstones.json").write_text(
-            _json(sorted(tombstones)), encoding="utf-8"
+        atomic_write_text(
+            self.root / "versions" / version / "tombstones.json",
+            _json(sorted(tombstones)),
         )
 
     def _diff_bundle(
@@ -514,7 +514,11 @@ class ContentStore:
             return []
         loaded: list[ModelT] = []
         for file_path in sorted(path.glob("*.json")):
-            loaded.append(self._read_parsed(file_path, model.model_validate_json))
+
+            def parse_model(text: str, *, source: Path = file_path) -> ModelT:
+                return model.model_validate(parse_json_text(text, path=source))
+
+            loaded.append(self._read_parsed(file_path, parse_model))
         return loaded
 
     def _load_relations(self, root: Path) -> list[Relation]:
@@ -523,7 +527,15 @@ class ContentStore:
             return []
 
         def parse(text: str) -> list[Relation]:
-            return [Relation.model_validate_json(raw) for raw in text.splitlines() if raw.strip()]
+            parsed: list[Relation] = []
+            for line_number, raw in enumerate(text.splitlines(), start=1):
+                if raw.strip():
+                    parsed.append(
+                        Relation.model_validate(
+                            parse_json_text(raw, path=path, line_offset=line_number - 1)
+                        )
+                    )
+            return parsed
 
         # Copy: the cache holds the parsed list itself, and this one is assigned to
         # ``bundle.relations`` verbatim — handing out the cached object would let an in-place
@@ -538,9 +550,11 @@ class ContentStore:
 
         def parse(text: str) -> dict[str, QuestEventReference]:
             refs: dict[str, QuestEventReference] = {}
-            for raw in text.splitlines():
+            for line_number, raw in enumerate(text.splitlines(), start=1):
                 if raw.strip():
-                    ref = QuestEventReference.model_validate_json(raw)
+                    ref = QuestEventReference.model_validate(
+                        parse_json_text(raw, path=path, line_offset=line_number - 1)
+                    )
                     refs[ref.id] = ref
             return refs
 
@@ -555,7 +569,7 @@ class ContentStore:
         if path.exists():
 
             def parse_guides(text: str) -> list[StyleGuide]:
-                data = json.loads(text)
+                data = parse_json_text(text, path=path)
                 if isinstance(data, dict):
                     return [StyleGuide.model_validate(raw) for raw in data.values()]
                 return []
@@ -575,7 +589,7 @@ class ContentStore:
             return []
 
         def parse_rubrics(text: str) -> list[StyleRubric]:
-            data = json.loads(text)
+            data = parse_json_text(text, path=path)
             if isinstance(data, dict):
                 return [StyleRubric.model_validate(raw) for raw in data.values()]
             return []
@@ -588,7 +602,7 @@ class ContentStore:
             return []
 
         def parse_terms(text: str) -> list[Term]:
-            data = json.loads(text)
+            data = parse_json_text(text, path=path)
             if isinstance(data, list):
                 return [Term.model_validate(item) for item in data]
             if isinstance(data, dict):
@@ -617,9 +631,10 @@ class ContentStore:
             )
         path.mkdir(parents=True, exist_ok=True)
         expected = {f"{object_id}.json" for object_id in objects}
-        for existing in path.glob("*.json"):
-            if existing.name not in expected:
-                existing.unlink()
+        stale = [existing for existing in path.glob("*.json") if existing.name not in expected]
+        # Publish every expected object before removing stale names.  If any atomic write fails,
+        # stale files are deliberately left in place: a retry may observe old + new, but a rename
+        # can never leave both the old and new object absent.
         for object_id, model in sorted(objects.items()):
             target = path / f"{object_id}.json"
             # Second layer: assert the FINAL path stays inside the content root using the same
@@ -629,6 +644,8 @@ class ContentStore:
             # rejected traversal/separator ids; this is defense-in-depth over the real filename.
             resolve_under_root(self.root, target)
             self._write_json(target, model)
+        for existing in stale:
+            existing.unlink()
 
     def _write_relations(self, root: Path, relations: list[Relation]) -> None:
         """Persist relations in canonical ``(source, kind, target)`` order.
@@ -652,19 +669,19 @@ class ContentStore:
             relations, key=lambda r: relation_sort_key(r.model_dump(mode="json", exclude_none=True))
         )
         lines = [_json_line(relation) for relation in ordered]
-        path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        atomic_write_text(path, "\n".join(lines) + ("\n" if lines else ""))
 
     def _write_quest_event_refs(self, root: Path, refs: dict[str, QuestEventReference]) -> None:
         path = root / "quests" / "event_refs.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         lines = [_json_line(ref) for ref in refs.values()]
-        path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        atomic_write_text(path, "\n".join(lines) + ("\n" if lines else ""))
 
     def _write_terms(self, root: Path, terms: dict[str, Term]) -> None:
         path = root / "world" / "terms.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = [term.model_dump(mode="json", exclude_none=True) for term in terms.values()]
-        path.write_text(_json(payload), encoding="utf-8")
+        atomic_write_text(path, _json(payload))
 
     def _write_style_guides(self, root: Path, style_guides: dict[str, StyleGuide]) -> None:
         """Persist EVERY style guide with all its fields (id, body, rules, …) — the old code only
@@ -681,7 +698,7 @@ class ContentStore:
             style_id: guide.model_dump(mode="json", exclude_none=True)
             for style_id, guide in sorted(style_guides.items())
         }
-        path.write_text(_json(payload), encoding="utf-8")
+        atomic_write_text(path, _json(payload))
         legacy.unlink(missing_ok=True)
 
     def _write_style_rubrics(self, root: Path, style_rubrics: dict[str, StyleRubric]) -> None:
@@ -698,11 +715,11 @@ class ContentStore:
             rubric_id: rubric.model_dump(mode="json", exclude_none=True)
             for rubric_id, rubric in sorted(style_rubrics.items())
         }
-        path.write_text(_json(payload), encoding="utf-8")
+        atomic_write_text(path, _json(payload))
 
     def _write_json(self, path: Path, model: BaseModel) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_json(model.model_dump(mode="json", exclude_none=True)), encoding="utf-8")
+        atomic_write_text(path, _json(model.model_dump(mode="json", exclude_none=True)))
 
 
 def _relation_tombstone(relation: Relation) -> str:

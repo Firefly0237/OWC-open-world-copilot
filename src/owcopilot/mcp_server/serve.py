@@ -14,7 +14,7 @@ manager runs once at server startup, sets ``_shared_project`` for the served pro
 closes it at shutdown. FastMCP enters the lifespan in the same task that later dispatches every
 request, and ``anyio``'s ``start_soon`` copies that task's context into each request task, so the
 ContextVar reliably propagates to every tool handler (verified end-to-end by
-``tests/test_mcp_sdk_smoke.py``).
+``tests/mcp/test_mcp_sdk_smoke.py``).
 
 Concurrency safety (the ``并发性能事故`` half of C-5)
 ----------------------------------------------------

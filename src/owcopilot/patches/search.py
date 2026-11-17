@@ -16,7 +16,8 @@ makes LLM-MCTS too expensive to run.
 Discipline matches the rest of the project: every move is a *shadow-validated* deterministic patch
 candidate (the same ones :mod:`owcopilot.patches.suggest` proposes), every move is constrained to
 never increase the open-error count, and the planner only returns a *plan* — applying it stays on
-the human write path. The search is seeded, so it is fully reproducible and testable.
+the human write path. Search randomness is seeded; replay also depends on the candidate provider
+and its inputs.
 """
 
 from __future__ import annotations
@@ -98,12 +99,12 @@ def plan_repairs(
 ) -> RepairPlan:
     """Search for the patch sequence that resolves the most open audit errors.
 
-    Returns the best plan found. ``max_depth`` defaults to scale with the open-error count (you can
-    never resolve N errors in fewer than N moves, so a fixed cap would make the search underperform
-    greedy on a large world). ``candidate_provider`` defaults to the deterministic fixers (so the
+    Returns the best plan found. ``max_depth`` defaults to scale with the open-error count;
+    one move may resolve multiple errors. ``candidate_provider`` defaults to deterministic fixers
+    (so the
     whole search is $0 and reproducible); pass a model-backed provider to widen the move set.
 
-    Anytime early-stop (Koh et al. 2024, Alg. 1 l.14-15): once a fully-resolving plan (best
+    Optional early-stop: once a fully-resolving plan (best
     open_errors==0) is found the search stops, since further search can only shorten the sequence,
     not lower the error count; the budget is still an explicit knob (max_iterations). Pass
     ``stop_on_clean=False`` to exhaust the budget and let the search keep hunting for a shorter
@@ -160,7 +161,7 @@ class _RepairSearch:
                 reward = self._simulate(child)
                 self._backpropagate(child, reward)
                 iterations += 1
-                # Anytime stop (Koh et al. 2024, Alg. 1 l.14-15): a fully-resolving plan exists;
+                # A fully-resolving plan exists;
                 # more search can only shorten it, not resolve more errors — stop by default.
                 if self.stop_on_clean and self._best[0] == 0:
                     break

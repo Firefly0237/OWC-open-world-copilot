@@ -99,10 +99,13 @@ def _load_encoder() -> object:
 def count_tokens(text: str) -> int:
     """Count BPE tokens in *text* using tiktoken cl100k_base.
 
-    Returns an **exact** count for cl100k-based (OpenAI-family) models, or a **bounded
+    Returns an **exact** count for ordinary cl100k-based (OpenAI-family) inputs, or a **bounded
     approximation** for non-OpenAI models such as DeepSeek (which use their own BPE vocabulary; a
     real local DeepSeek tokenizer exists but is deliberately not integrated — see the module
-    docstring). When tiktoken itself is unavailable it falls back to
+    docstring). A multi-megabyte run of one repeated Unicode scalar uses a conservative upper bound
+    (the independently encoded scalar count multiplied by its repetitions): tiktoken's BPE merge
+    search is pathologically quadratic on that input, while cross-scalar merges could only make
+    the true count smaller. When tiktoken itself is unavailable it falls back to
     ``max(1, len(text) // 4)`` (never returns 0 for non-empty text).
 
     This count is for **context-budget / truncation decisions only — never for billing**. Cost
@@ -125,7 +128,9 @@ def count_tokens(text: str) -> int:
         import tiktoken as _tiktoken  # noqa: PLC0415
 
         assert isinstance(enc, _tiktoken.Encoding)
-        token_ids: list[int] = enc.encode(text)
+        if len(text) >= 100_000 and text.count(text[0]) == len(text):
+            return len(enc.encode_ordinary(text[0])) * len(text)
+        token_ids: list[int] = enc.encode_ordinary(text)
         return len(token_ids)
     except Exception as exc:
         _log.warning("tiktoken.encode() failed (%r); using fallback for this call.", exc)
@@ -185,11 +190,13 @@ def split_by_token_budget(text: str, max_tokens: int, *, overlap_tokens: int = 0
     """Split *text* into consecutive pieces of at most *max_tokens* tokens each.
 
     The multi-chunk sibling of :func:`truncate_to_token_budget`'s single-head recipe: encode
-    *text* ONCE, slice the token id stream into ``max_tokens``-sized, ``overlap_tokens``-wide-
-    overlapping windows, and decode each window back to text. Encoding once and slicing is
-    deliberate — calling ``truncate_to_token_budget`` in a loop over the shrinking remainder would
-    re-encode the same (increasingly large) text on every iteration, which is quadratic for a long
-    single block with no natural break (e.g. one huge paragraph); this is linear in ``len(text)``.
+    *text* once, slice the token id stream into ``max_tokens``-sized, ``overlap_tokens``-wide-
+    overlapping windows, and decode each window back to text. One pathological tokenizer case is
+    handled conservatively: a very large block made from one repeated Unicode scalar encodes that
+    scalar once and repeats its token unit. Some BPEs could merge across those unit boundaries, so
+    this may over-count and create more pieces, but it can never exceed the requested budget and
+    avoids the tokenizer's quadratic repeated-symbol merge search. Both paths are linear in
+    ``len(text)``.
 
     *overlap_tokens* (clamped below *max_tokens*, so the window always advances) repeats that many
     trailing tokens of one piece at the head of the next, so a forced cut mid-thought still gives
@@ -226,7 +233,14 @@ def split_by_token_budget(text: str, max_tokens: int, *, overlap_tokens: int = 0
         import tiktoken as _tiktoken  # noqa: PLC0415 — intentional lazy import
 
         assert isinstance(enc, _tiktoken.Encoding)
-        ids: list[int] = enc.encode(text)
+        if len(text) >= 100_000 and text.count(text[0]) == len(text):
+            # ``tiktoken``'s BPE merge loop is pathologically quadratic for multi-megabyte runs of
+            # one symbol (for example ``"甲" * 2_000_000``). Reusing the independently encoded
+            # scalar is deliberately conservative: cross-unit merges could only reduce the true
+            # count, so every emitted window remains within ``max_tokens``.
+            ids = enc.encode_ordinary(text[0]) * len(text)
+        else:
+            ids = enc.encode_ordinary(text)
         return [enc.decode(ids[i : i + max_tokens]) for i in range(0, len(ids), step)]
     except Exception as exc:
         _log.warning(

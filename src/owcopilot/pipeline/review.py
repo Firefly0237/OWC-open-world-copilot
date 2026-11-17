@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from ..assist.review_queue import ReviewItem, ReviewItemType, ReviewQueue
 from ..audit.baseline import issue_fingerprint
 from ..audit.context import AuditContext
+from ..collab import etag_for
+from ..content.hash import content_hash
 from ..content.models import (
     ContentBundle,
     DialogueTree,
@@ -23,6 +25,8 @@ from ..content.models import (
     Relation,
     ReviewStatus,
 )
+from ..storage.world_lock import world_write_lock
+from ..trust.security import resolve_under_root
 from .audit import run_full_audit
 from .project import ProjectContext
 
@@ -35,7 +39,64 @@ class ReviewDecision:
     post_audit_open_errors: int = 0
 
 
+def _check_creative_scope(project: ProjectContext, item: ReviewItem) -> None:
+    """Revalidate the exact studio revision under the same lock as the canon write."""
+    from ..workflow.store import WorkflowStore
+
+    scope = item.payload.get("creative_scope")
+    if not isinstance(scope, dict) or item.item_type is not ReviewItemType.SYNC_DRAFT:
+        raise ValueError("创作草稿来源范围无效")
+    root = project.content_store.root.resolve()
+    if (
+        scope.get("world_id") != project.world_id
+        or scope.get("version") != project.version
+        or scope.get("content_root_hash") != content_hash(str(root))
+    ):
+        raise ValueError("创作草稿不属于当前项目或版本，拒绝跨范围批准")
+    path = resolve_under_root(root, root / ".owcopilot/creative_workflows.sqlite3")
+    store = WorkflowStore(path)
+    try:
+        task = store.get_task(str(scope.get("task_id", "")))
+    except KeyError as exc:
+        raise ValueError("创作草稿的来源任务已不存在") from exc
+    if (
+        scope.get("project") != task.project
+        or scope.get("revision") != task.revision
+        or scope.get("world_id") != task.request.world_id
+        or scope.get("version") != task.base_version
+        or scope.get("base_hash") != task.base_hash
+    ):
+        raise ValueError("创作草稿的任务版本已改变，请提交当前版本")
+    if content_hash(project.bundle) != task.base_hash:
+        raise ValueError("正典基线已改变，创作草稿不能覆盖当前内容")
+    incoming = ContentBundle.model_validate(item.payload.get("bundle") or {})
+    if content_hash(incoming) != scope.get("candidate_hash"):
+        raise ValueError("送审候选已改变，请重新从当前任务送审")
+
+
 def decide_review_item(
+    project: ProjectContext,
+    item_id: str,
+    *,
+    decision: str,
+    operator: str,
+) -> ReviewDecision:
+    """Serialize the complete review decision against this world's canon."""
+    with world_write_lock(project.content_store.root):
+        if decision == "accepted":
+            # A direct CLI/service caller may have opened the ProjectContext before waiting for
+            # another writer. Refresh under the lock so duplicate checks and the pre-write audit
+            # see the revision that will actually be modified.
+            project.reload()
+        return _decide_review_item_unlocked(
+            project,
+            item_id,
+            decision=decision,
+            operator=operator,
+        )
+
+
+def _decide_review_item_unlocked(
     project: ProjectContext,
     item_id: str,
     *,
@@ -71,6 +132,8 @@ def decide_review_item(
             "patch candidates are applied with the apply workflow "
             "(owcopilot apply --patch-id ...), not the review queue"
         )
+    if "creative_scope" in item.payload:
+        _check_creative_scope(project, item)
     written_ref: str | None = None
     if item.item_type is ReviewItemType.QUEST_DRAFT:
         quest = Quest.model_validate(item.payload)
@@ -112,6 +175,99 @@ def decide_review_item(
         project.content_store.save_scoped(bundle, version=project.version)
         project.reload()
         written_ref = f"quest:{quest_id}"
+    elif item.item_type is ReviewItemType.TEMPORAL_SPEC_DRAFT:
+        # Spec authoring is a two-phase HITL write: translation/submission only queues a candidate;
+        # this branch is the sole point that may append it to canon. Re-read and validate against
+        # the current quest under the world lock so a stale/tampered queue row fails closed.
+        from ..logic.temporal import SpecStatus, TemporalSpec, check_temporal_spec
+
+        quest_id = str(item.payload.get("quest_id") or "")
+        if not quest_id or item.object_ref != f"quest:{quest_id}":
+            raise ValueError("时序规约草稿缺少有效任务绑定，不能写入正典；请驳回此项。")
+        bundle = project.content_store.load_scoped(
+            world_id=project.world_id, version=project.version
+        )
+        target_quest = bundle.quests.get(quest_id)
+        if target_quest is None:
+            raise ValueError(f"任务「{quest_id}」已不存在，无法应用时序规约；请驳回此项。")
+        raw_spec = item.payload.get("spec")
+        if not isinstance(raw_spec, dict):
+            raise ValueError("时序规约草稿 payload.spec 不是对象，不能写入正典。")
+        unknown_spec_fields = set(raw_spec) - set(TemporalSpec.model_fields)
+        if unknown_spec_fields:
+            raise ValueError(
+                "时序规约草稿包含未声明字段，拒绝写入：" + "、".join(sorted(unknown_spec_fields))
+            )
+        spec = TemporalSpec.model_validate(raw_spec)
+        if not spec.id.strip() or spec.id == "spec" or spec.provenance != "planner":
+            raise ValueError("时序规约草稿缺少稳定 id 或策划来源标记，不能写入正典。")
+        from ..spec_authoring import (
+            OutcomeStatus,
+            ScriptedSpecTranslator,
+            SpecDraft,
+            translate_intent,
+        )
+
+        queued_intent = str(item.payload.get("intent") or "").strip()
+        queued_draft = SpecDraft.model_validate(item.payload.get("draft") or {})
+        replayed = translate_intent(
+            queued_intent,
+            target_quest,
+            bundle,
+            ScriptedSpecTranslator(queued_draft),
+        )
+        if replayed.status is not OutcomeStatus.NEEDS_CONFIRMATION or replayed.spec is None:
+            raise ValueError(
+                "时序规约草稿已无法针对当前任务重新接地，不能写入正典；请重新翻译并送审。"
+            )
+        if replayed.spec.model_dump(mode="json") != spec.model_dump(mode="json"):
+            raise ValueError("时序规约草稿与服务器重建结果不一致（可能已过期或被修改），拒绝写入。")
+        if item.payload.get("back_translation") != replayed.back_translation:
+            raise ValueError("时序规约回译与服务器重建结果不一致，拒绝写入。")
+        verdict = check_temporal_spec(target_quest, spec)
+        if verdict.status is SpecStatus.ERROR:
+            raise ValueError(
+                "时序规约已无法在当前任务上解析或求值，不能写入正典；请重新翻译并送审。"
+            )
+
+        candidate_quest = target_quest.model_copy(deep=True)
+        metadata = dict(candidate_quest.metadata)
+        if "temporal_specs" in metadata and not isinstance(metadata["temporal_specs"], list):
+            raise ValueError(
+                "任务 metadata.temporal_specs 不是列表；为避免覆盖未知数据，已拒绝写入。"
+            )
+        existing_specs = list(metadata.get("temporal_specs") or [])
+        existing_ids = {
+            str(raw.get("id"))
+            for raw in existing_specs
+            if isinstance(raw, dict) and raw.get("id") is not None
+        }
+        if spec.id in existing_ids:
+            raise ValueError(f"任务「{quest_id}」已存在时序规约「{spec.id}」，拒绝重复追加。")
+        existing_specs.append(spec.model_dump(mode="json"))
+        metadata["temporal_specs"] = existing_specs
+        bundle.quests[quest_id] = candidate_quest.model_copy(update={"metadata": metadata})
+        _assert_no_new_accept_errors(project, bundle)
+        project.content_store.save_scoped(bundle, version=project.version)
+        project.reload()
+        written_ref = f"quest:{quest_id}"
+    elif item.item_type is ReviewItemType.SYNC_DRAFT:
+        incoming = ContentBundle.model_validate(item.payload.get("bundle") or {})
+        baseline = ContentBundle.model_validate(item.payload.get("baseline_bundle") or {})
+        bundle = project.content_store.load_scoped(
+            world_id=project.world_id, version=project.version
+        )
+        approved = _approve_bundle(incoming)
+        conflicts = _apply_guarded_sync(bundle, approved, baseline)
+        if conflicts:
+            raise ValueError(
+                "同步草稿入队后正典又发生了变化，已拒绝覆盖；请重新回拉并处理冲突："
+                + ", ".join(conflicts[:8])
+            )
+        _assert_no_new_accept_errors(project, bundle)
+        project.content_store.save_scoped(bundle, version=project.version)
+        project.reload()
+        written_ref = item.object_ref
     elif item.item_type in {ReviewItemType.WORLD_SEED, ReviewItemType.IMPORT_DRAFT}:
         seed_bundle = ContentBundle.model_validate(item.payload.get("bundle") or {})
         conflicts = _world_seed_conflicts(project.bundle, seed_bundle)
@@ -222,7 +378,65 @@ def _world_seed_conflicts(existing: ContentBundle, incoming: ContentBundle) -> l
     )
     conflicts.extend(_conflict_refs("term", existing.terms, incoming.terms))
     conflicts.extend(_conflict_refs("style_guide", existing.style_guides, incoming.style_guides))
+    conflicts.extend(_conflict_refs("style_rubric", existing.style_rubrics, incoming.style_rubrics))
     return conflicts
+
+
+_SYNC_MAPPING_FIELDS = (
+    "entities",
+    "quest_event_refs",
+    "quests",
+    "regions",
+    "pois",
+    "dialogues",
+    "dialogue_trees",
+    "localized_texts",
+    "terms",
+    "style_guides",
+    "style_rubrics",
+)
+
+
+def _sync_row_conflict(current: object | None, baseline: object | None) -> bool:
+    if baseline is None:
+        return current is not None
+    return current is None or etag_for(current) != etag_for(baseline)
+
+
+def _apply_guarded_sync(
+    target: ContentBundle, incoming: ContentBundle, baseline: ContentBundle
+) -> list[str]:
+    """Apply a queued merge only where canon still equals its enqueue-time baseline."""
+    conflicts: list[str] = []
+    for field_name in _SYNC_MAPPING_FIELDS:
+        target_rows = getattr(target, field_name)
+        incoming_rows = getattr(incoming, field_name)
+        baseline_rows = getattr(baseline, field_name)
+        for object_id, incoming_row in incoming_rows.items():
+            if _sync_row_conflict(
+                target_rows.get(object_id),
+                baseline_rows.get(object_id),
+            ):
+                conflicts.append(f"{field_name}:{object_id}")
+                continue
+            target_rows[object_id] = incoming_row
+
+    def relation_key(relation: Relation) -> tuple[str, str, str]:
+        return relation.source, relation.target, relation.kind
+
+    target_relations = {relation_key(relation): relation for relation in target.relations}
+    baseline_relations = {relation_key(relation): relation for relation in baseline.relations}
+    for incoming_relation in incoming.relations:
+        key = relation_key(incoming_relation)
+        if _sync_row_conflict(
+            target_relations.get(key),
+            baseline_relations.get(key),
+        ):
+            conflicts.append(f"relation:{key[0]}:{key[1]}:{key[2]}")
+            continue
+        target_relations[key] = incoming_relation
+    target.relations = list(target_relations.values())
+    return sorted(conflicts)
 
 
 def _assert_no_new_accept_errors(project: ProjectContext, candidate: ContentBundle) -> None:
@@ -266,6 +480,7 @@ def _approve_bundle(bundle: ContentBundle) -> ContentBundle:
         approved.localized_texts.values(),
         approved.terms.values(),
         approved.style_guides.values(),
+        approved.style_rubrics.values(),
     ]:
         for item in collection:
             if getattr(item, "origin", Origin.HUMAN) is not Origin.HUMAN:
@@ -285,6 +500,7 @@ def _merge_bundle(target: ContentBundle, incoming: ContentBundle) -> None:
     target.localized_texts.update(incoming.localized_texts)
     target.terms.update(incoming.terms)
     target.style_guides.update(incoming.style_guides)
+    target.style_rubrics.update(incoming.style_rubrics)
 
 
 # --- IN-4: Read-only aggregated context for a review item -----------------------------------

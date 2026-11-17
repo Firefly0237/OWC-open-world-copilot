@@ -63,6 +63,7 @@ from ..content.models import (
 from ..llm.cache import Embedder
 from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json_object
+from ..storage.atomic_file import atomic_write_text, read_json_file
 
 _SNIPPET_CHARS = 90
 _JUDGE_BATCH_SIZE = 10
@@ -574,13 +575,15 @@ class SweepExclusionStore:
     def _read(self) -> dict[str, dict[str, Any]]:
         if not self.path.exists():
             return {}
-        raw = json.loads(self.path.read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) else {}
+        raw = read_json_file(self.path)
+        if not isinstance(raw, dict):
+            raise ValueError(f"排除记录必须是 JSON object：{self.path.resolve()}")
+        return raw
 
     def _write(self, records: dict[str, dict[str, Any]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(records, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
+        atomic_write_text(
+            self.path, json.dumps(records, ensure_ascii=False, indent=2, sort_keys=True)
         )
 
     def load(self) -> list[SweepExclusion]:
@@ -752,9 +755,9 @@ def _rubric_finding_id(ref: str, element_id: str, location_key: str) -> str:
     dismiss independently. This is the fix for the compliance ``case_id = sha256(object_ref|layer)``
     collision the design flags (§1.7) — a rubric finding keys on (object, field/sentence, element),
     never on the layer name."""
-    return "sr_" + hashlib.sha256(f"{ref}\x1f{element_id}\x1f{location_key}".encode()).hexdigest()[
-        :12
-    ]
+    return (
+        "sr_" + hashlib.sha256(f"{ref}\x1f{element_id}\x1f{location_key}".encode()).hexdigest()[:12]
+    )
 
 
 @dataclass

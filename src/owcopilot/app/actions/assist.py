@@ -33,11 +33,30 @@ from ...extraction import (
     apply_gap_answers,
     quests_from_beats,
 )
+from ...inspiration.models import Provenance, ensure_canon_intake_allowed
+from ...inspiration.report import ReferenceReportItem
 from ...llm.gateway import lesson_injection_enabled
+from ...storage.world_lock import serialized_world_write
 from ...telemetry import llm_step, summarize_workflow
 from .._common import deterministic_cost_budget as _deterministic_cost_budget
 from .._common import open_project as _project
 from ._shared import _bundle_counts, _gateway
+
+
+def _reference_lineage_payload(
+    *, use_references: bool, refs: list[str], report: list[ReferenceReportItem]
+) -> dict[str, Any]:
+    """素材溯源的返回体片段——素材开关关着时是空 dict，返回结构与接线之前逐键一致。
+
+    开着但一条素材都没召回时照样返回两个空列表：那说明"开关生效了，但库里没有允许用于草稿的素材"，
+    与"根本没开"是两回事，不能压成同一种沉默。
+    """
+    if not use_references:
+        return {}
+    return {
+        "inspiration_refs": refs,
+        "reference_report": [row.model_dump(mode="json") for row in report],
+    }
 
 
 def run_draft_action(
@@ -49,7 +68,10 @@ def run_draft_action(
     llm_mode: str = "offline",
     llm_model: str = "deepseek-v4-flash",
     refine_rounds: int = 2,
+    max_cost_usd: float | None = None,
     inject_lessons: bool | None = None,  # Item 6: None = read OWCOPILOT_INJECT_LESSONS env
+    # N4.2: 让这条草稿额外从灵感库取参考（默认关；库里没有允许用于草稿的素材时照常生成）。
+    use_references: bool = False,
 ) -> dict[str, Any]:
     # Item 6: resolve lesson injection flag — explicit arg wins, else consult env var.
     _inject = lesson_injection_enabled() if inject_lessons is None else inject_lessons
@@ -77,7 +99,8 @@ def run_draft_action(
             critic=critic,
             max_refine_rounds=refine_rounds,
             lessons=lessons,  # IN-3 BE-1: cross-session lesson archive
-        ).draft_quest(brief, budget_tokens=budget_tokens)
+            reference_context_builder=project.reference_context_builder,
+        ).draft_quest(brief, budget_tokens=budget_tokens, use_references=use_references)
         _trail_dump = [r.model_dump(mode="json") for r in result.refine_trail]
         critic_verdict, critic_score = critic_from_trail(_trail_dump)
         critic_primary_dim = primary_dim_from_trail(_trail_dump)
@@ -88,21 +111,21 @@ def run_draft_action(
             critic_score=critic_score,
             critic_primary_dim=critic_primary_dim,
         )
-        # Item 8: persist telemetry (non-fatal — observability must not break the primary flow).
-        try:
-            project.sqlite_store.record_telemetry(telemetry.records)
-        except Exception:  # noqa: BLE001
-            pass
         telemetry_summary = telemetry.summary()
         return {
             "quest": result.quest.model_dump(mode="json", exclude_none=True),
             "issues": [issue.model_dump(mode="json") for issue in result.issues],
             "refine_trail": [r.model_dump(mode="json") for r in result.refine_trail],
             "auto_review_incomplete": result.auto_review_incomplete,
+            **_reference_lineage_payload(
+                use_references=use_references,
+                refs=result.inspiration_refs,
+                report=result.reference_report,
+            ),
             "review_item_id": item.id,
             "telemetry": telemetry_summary,
             "cost_budget": summarize_workflow(
-                [llm_step("quest_draft", telemetry_summary)]
+                [llm_step("quest_draft", telemetry_summary)], budget_usd=max_cost_usd
             ).budget.model_dump(mode="json"),
         }
 
@@ -119,6 +142,8 @@ def run_barks_action(
     llm_mode: str = "offline",
     llm_model: str = "deepseek-v4-flash",
     inject_lessons: bool | None = None,  # Item 6: None = read OWCOPILOT_INJECT_LESSONS env
+    # N4.3: 让这批 bark 额外从灵感库取参考（默认关；库里没有允许用于草稿的素材时照常生成）。
+    use_references: bool = False,
 ) -> dict[str, Any]:
     with _project(content_root, sqlite_path) as project:
         unknown = [sid for sid in speaker_ids if sid not in project.bundle.entities]
@@ -141,18 +166,15 @@ def run_barks_action(
             critic=BarkCritic(gateway=gateway) if refine_rounds > 0 else None,
             max_refine_rounds=refine_rounds,
             lessons=lessons,
+            reference_context_builder=project.reference_context_builder,
         ).generate(
             speaker_ids=speaker_ids,
             topic=topic,
             variants_per_speaker=variants_per_speaker,
             max_chars=max_chars,
             allowed_entity_ids=set(speaker_ids),
+            use_references=use_references,
         )
-        # Item 8: persist telemetry (non-fatal).
-        try:
-            project.sqlite_store.record_telemetry(telemetry.records)
-        except Exception:  # noqa: BLE001
-            pass
         telemetry_summary = telemetry.summary()
         return {
             "accepted": [
@@ -167,6 +189,11 @@ def run_barks_action(
                 }
                 for rejected in result.rejected
             ],
+            **_reference_lineage_payload(
+                use_references=use_references,
+                refs=result.inspiration_refs,
+                report=result.reference_report,
+            ),
             "review_item_ids": [item.id for item in result.review_items],
             "telemetry": telemetry_summary,
             "cost_budget": summarize_workflow(
@@ -184,6 +211,7 @@ def run_extraction_action(
     sqlite_path: str | None = None,
     glean_rounds: int = 1,
     verify_faithfulness: bool = False,
+    provenance: str | Provenance = Provenance.OWN_IP,
     llm_mode: str = "offline",
     llm_model: str = "deepseek-v4-flash",
     progress: Callable[[str, dict[str, Any]], None] | None = None,
@@ -194,7 +222,13 @@ def run_extraction_action(
     service's responsibility, not a knob the caller (or the creator) has to set. ``glean_rounds``
     adds GraphRAG-style recovery passes per chunk (default one) to catch overlooked entities.
     ``verify_faithfulness`` adds the LLM entailment tier (real mode only — it needs a real judge,
-    not the offline fake)."""
+    not the offline fake).
+
+    ``provenance`` is the caller's declaration about the manuscript's rights status. This door
+    produces canon drafts, so third-party material is refused here and pointed at the inspiration
+    library instead; the default records the implicit claim every existing caller was already
+    making by using this door at all ("this is our own material")."""
+    declared = ensure_canon_intake_allowed(provenance)
     with _project(content_root, sqlite_path) as project:
         gateway, telemetry = _gateway(
             task="extract_lore",
@@ -215,6 +249,9 @@ def run_extraction_action(
         return {
             "draft": draft.model_dump(mode="json", exclude_none=True),
             "stats": draft.stats,
+            # Echo the accepted declaration so the caller (and anything auditing the run later)
+            # can see which rights claim this draft was produced under.
+            "provenance": declared.value,
             "telemetry": telemetry_summary,
             "cost_budget": summarize_workflow(
                 [llm_step("extract_lore", telemetry_summary)]
@@ -303,6 +340,8 @@ def run_dialogue_tree_action(
     llm_model: str = "deepseek-v4-flash",
     refine_rounds: int = 1,
     inject_lessons: bool | None = None,  # None = read OWCOPILOT_INJECT_LESSONS env
+    # N4.3: 让这棵对白树额外从灵感库取参考（默认关；库里没有允许用于草稿的素材时照常生成）。
+    use_references: bool = False,
 ) -> dict[str, Any]:
     with _project(content_root, sqlite_path) as project:
         gateway, telemetry = _gateway(
@@ -323,12 +362,14 @@ def run_dialogue_tree_action(
             critic=critic,
             max_refine_rounds=refine_rounds,
             lessons=lessons,
+            reference_context_builder=project.reference_context_builder,
         ).generate(
             participant_ids=participant_ids,
             brief=brief,
             quest_id=quest_id,
             max_nodes=max_nodes,
             max_chars=max_chars,
+            use_references=use_references,
         )
         telemetry_summary = telemetry.summary()
         return {
@@ -337,6 +378,11 @@ def run_dialogue_tree_action(
             "structure_problems": result.structure_problems,
             "refine_trail": [r.model_dump(mode="json") for r in result.refine_trail],
             "auto_review_incomplete": result.auto_review_incomplete,
+            **_reference_lineage_payload(
+                use_references=use_references,
+                refs=result.inspiration_refs,
+                report=result.reference_report,
+            ),
             "review_item_id": result.review_item.id if result.review_item else None,
             "telemetry": telemetry_summary,
             "cost_budget": summarize_workflow(
@@ -357,6 +403,8 @@ def run_flavor_action(
     llm_mode: str = "offline",
     llm_model: str = "deepseek-v4-flash",
     inject_lessons: bool | None = None,  # None = read OWCOPILOT_INJECT_LESSONS env
+    # N4.3: 让这批风味文本额外从灵感库取参考（默认关；库里没有允许用于草稿的素材时照常生成）。
+    use_references: bool = False,
 ) -> dict[str, Any]:
     with _project(content_root, sqlite_path) as project:
         gateway, telemetry = _gateway(
@@ -376,7 +424,14 @@ def run_flavor_action(
             critic=FlavorCritic(gateway=gateway) if refine_rounds > 0 else None,
             max_refine_rounds=refine_rounds,
             lessons=lessons,
-        ).generate(category=category, names=names, theme=theme, max_chars=max_chars)
+            reference_context_builder=project.reference_context_builder,
+        ).generate(
+            category=category,
+            names=names,
+            theme=theme,
+            max_chars=max_chars,
+            use_references=use_references,
+        )
         telemetry_summary = telemetry.summary()
         return {
             "batch_id": result.batch_id,
@@ -390,6 +445,11 @@ def run_flavor_action(
                 }
                 for rejected in result.rejected
             ],
+            **_reference_lineage_payload(
+                use_references=use_references,
+                refs=result.inspiration_refs,
+                report=result.reference_report,
+            ),
             "review_item_id": result.review_item.id if result.review_item else None,
             "telemetry": telemetry_summary,
             "cost_budget": summarize_workflow(
@@ -441,6 +501,8 @@ def run_character_action(
             critic=CharacterCritic(gateway=gateway) if refine_rounds > 0 else None,
             max_refine_rounds=refine_rounds,
             lessons=lessons,
+            # N4.2: 开关在 brief 上（``use_references``，默认关），检索器在这里装配。
+            reference_context_builder=project.reference_context_builder,
         )
         emit("generating")
         draft = service.generate(parsed, budget_tokens=budget_tokens)
@@ -454,16 +516,13 @@ def run_character_action(
                 "relations": [r.model_dump(mode="json") for r in draft.relations],
                 "summary": draft.entity.description,
                 "suggested_relations": draft.suggested_relations,
+                "inspiration_refs": draft.inspiration_refs,
+                "reference_report": [row.model_dump(mode="json") for row in draft.reference_report],
             },
             critic_verdict=critic_verdict,
             critic_score=critic_score,
             critic_primary_dim=critic_primary_dim,
         )
-        # Item 8: persist telemetry (non-fatal).
-        try:
-            project.sqlite_store.record_telemetry(telemetry.records)
-        except Exception:  # noqa: BLE001
-            pass
         telemetry_summary = telemetry.summary()
         return {
             "entity": draft.entity.model_dump(mode="json", exclude_none=True),
@@ -472,6 +531,11 @@ def run_character_action(
             "suggested_relations": draft.suggested_relations,
             "refine_trail": [r.model_dump(mode="json") for r in draft.refine_trail],
             "auto_review_incomplete": draft.auto_review_incomplete,
+            **_reference_lineage_payload(
+                use_references=parsed.use_references,
+                refs=draft.inspiration_refs,
+                report=draft.reference_report,
+            ),
             "review_item_id": item.id,
             "telemetry": telemetry_summary,
             "cost_budget": summarize_workflow(
@@ -562,6 +626,7 @@ def run_theme_sweep_action(
         }
 
 
+@serialized_world_write
 def dismiss_sweep_finding_action(
     content_root: str | Path,
     *,

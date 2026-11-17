@@ -136,7 +136,7 @@ PROMPT_SPECS: tuple[PromptSpec, ...] = (
     ),
     _spec(
         "agent.reflexion.self_reflection",
-        "Self-Reflection component of the Reflexion loop (Shinn 2023): turn a failed trial's "
+        "Turn a failed attempt's "
         "evaluator feedback into one concise verbal reflection fed forward to the next attempt.",
         "agent_react",
         "static",
@@ -340,7 +340,7 @@ PROMPT_SPECS: tuple[PromptSpec, ...] = (
     ),
     _spec(
         "retrieval.agentic.sufficiency",
-        "Agentic-RAG level-2 sufficiency judge (CRAG retrieval-evaluator / Self-RAG ISSUP): does "
+        "Optional retrieval-sufficiency judge: does "
         "the evidence CONTAIN the asked-for fact (support), not merely mention the same entities "
         "(existence)? On false, name the still-missing fact to steer the corrective round.",
         "agentic_rag_sufficiency",
@@ -396,6 +396,52 @@ PROMPT_SPECS: tuple[PromptSpec, ...] = (
         "static",
         'JSON {"score": number, "reason": str}',
         "owcopilot.worldgen.tot:_PREMISE_EVAL_SYSTEM",
+    ),
+    # -- narrative studio --------------------------------------------------------------------
+    _spec(
+        "studio.interpret",
+        "Extract author goals and explicit assumptions from open input.",
+        "studio_interpret",
+        "static",
+        "Interpretation JSON",
+        "owcopilot.workflow.planning:INTERPRET_SYSTEM",
+        schema="owcopilot.workflow.models:Interpretation",
+    ),
+    _spec(
+        "studio.workflow",
+        "Build a typed bounded workflow using registered operations.",
+        "studio_workflow_plan",
+        "static",
+        "WorkflowSpec JSON",
+        "owcopilot.workflow.planning:WORKFLOW_SYSTEM",
+        schema="owcopilot.workflow.models:WorkflowSpec",
+    ),
+    _spec(
+        "studio.method_learning",
+        "Induce reusable procedural guidance from an eligible observable execution trace.",
+        "studio_learn_method",
+        "static",
+        "WorkflowSpec JSON with applicability, fresh input slots and per-step guidance",
+        "owcopilot.workflow.learning:LEARNING_SYSTEM",
+        schema="owcopilot.workflow.models:WorkflowSpec",
+    ),
+    _spec(
+        "studio.events",
+        "Expand an idea into grounded events and player choices.",
+        "studio_plan_events",
+        "static",
+        "EventPlan JSON",
+        "owcopilot.workflow.operators:EVENT_PLAN_SYSTEM",
+        schema="owcopilot.workflow.models:EventPlan",
+    ),
+    _spec(
+        "studio.dialogue_binding",
+        "Bind existing dialogue choices to declared state variables.",
+        "studio_bind_dialogue",
+        "static",
+        "DialogueBindings JSON",
+        "owcopilot.workflow.operators:BIND_DIALOGUE_SYSTEM",
+        schema="owcopilot.workflow.operators:DialogueBindings",
     ),
     # -- multi-agent --------------------------------------------------------------------------
     _spec(

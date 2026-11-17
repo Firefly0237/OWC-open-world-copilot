@@ -1,35 +1,21 @@
 # 检索分层策略：一处显式决定『语料多大才值得上哪套检索机器』（小语料别启重型 ANN/重排）。
-"""Retrieval tiering policy — one explicit place that decides which retrieval machinery is worth
-running for a given corpus size, instead of that decision being scattered across the vector-backend
-selector, the QA context builder (GraphRAG), and the reranker.
+"""Explicit corpus-size thresholds for optional retrieval machinery.
 
-Why a policy: heavy retrieval machinery is not free, and on a small corpus it is not worth its cost.
-The project's own product notes flag GraphRAG community summarisation as over-engineered at small
-scale, and an on-disk ANN index / cross-encoder rerank only pay off once the corpus is large. So the
-policy tiers by size and turns each tier on only past a defensible threshold. The default cold-start
-/ demo / test corpus lands in the cheapest tier, so nothing heavy runs on the ``$0`` path.
-
-``corpus_size`` is an approximate scale signal (the caller passes the natural count for its layer —
-the QA builder passes the content-graph node count). The storage layer still applies its own
-``USEARCH_MIN_N`` gate on its exact persisted-vector count; ``vector_tier`` here mirrors that
-threshold as the single human-readable statement of the tiering.
+Callers use an approximate corpus count, such as content-graph nodes, to decide whether
+to enable community reports, hierarchical partitions, neural reranking and vector
+quantisation. These are configuration defaults rather than measured optimal cutoffs.
+The vector storage layer independently checks its exact count before selecting ANN.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-#: GraphRAG community/macro reports only help once there are enough entities to form clusters that a
-#: flat retrieval would miss. Below this the acceptance-scale world (~375 graph nodes) does not
-#: benefit, so the QA builder omits the community retriever entirely.
+#: Enable community-report retrieval at this approximate corpus size.
 GRAPHRAG_MIN_SIZE = 800
 
-#: Hierarchical (multi-level) community detection — graspologic's recursive ``hierarchical_leiden``
-#: (Edge et al. 2024) — only earns its extra index-time cost on a very large corpus, the
-#: "几十万条 long-form narrative" case. Well above ``GRAPHRAG_MIN_SIZE``: a mid-size world keeps
-#: the flat single-level partition (byte-identical to today). This gate only decides whether to
-#: *attempt* the hierarchy; whether level ≥ 1 layers actually appear is decided independently by
-#: ``max_cluster_size`` (a single level-0 community must exceed it before it is subdivided).
+#: Attempt hierarchical partitions above this size; actual subdivision also depends
+#: on whether a community exceeds ``max_cluster_size`` and can be split.
 HIERARCHY_MIN_SIZE = 5_000
 
 #: A cross-encoder rerank pays for its latency only once the candidate pool is deep. This gate IS
@@ -39,11 +25,8 @@ HIERARCHY_MIN_SIZE = 5_000
 #: the lexical field-weighted re-scorer (logged fallback, never a crash).
 RERANK_MIN_SIZE = 2_000
 
-#: int8 vector quantisation (~4× less memory, recall ~0.999) earns its slight recall cost only once
-#: the corpus is large enough that the fp32 blob set actually strains memory — the "本地受限硬件 +
-#: 几十万条" case. Below it, the auto tier stays on lossless fp32 so a small / eval corpus keeps
-#: exact recall (the acceptance gate never sees quantisation). Well under ``USEARCH_MIN_N`` so a
-#: mid-size corpus gets the memory win before it needs the sub-linear ANN index.
+#: Permit lower-precision vectors above this size. Recall and storage changes depend
+#: on the corpus and backend; this threshold does not establish a quality guarantee.
 VECTOR_INT8_MIN_SIZE = 2_000
 
 

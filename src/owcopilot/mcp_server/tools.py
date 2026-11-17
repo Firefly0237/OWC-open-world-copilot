@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from ..config import DEFAULT_CHEAP_MODEL, DEFAULT_LLM_MODE
 from ..content.hash import content_hash
@@ -21,6 +21,7 @@ from ..llm.gateway import LLMGateway, require_offline_llm_allowed
 from ..llm.resilience import build_real_provider
 from ..llm.router import StaticRouter
 from ..llm.telemetry import TelemetryCollector
+from ..logic.xref import build_flag_xref
 from ..pipeline.audit import run_full_audit
 from ..pipeline.export_gate import assert_export_ready
 from ..pipeline.harness import run_quality_harness
@@ -34,13 +35,26 @@ from ..trust.security import PathSecurityError, resolve_under_root
 from ..util import load_dotenv
 
 
+class AuditProjectPayload(TypedDict):
+    """Stable MCP output contract for ``audit_project`` structured results."""
+
+    content_hash: str
+    audit_run: dict[str, Any]
+    issues: list[dict[str, Any]]
+    open_errors: int
+    cost_budget: dict[str, Any]
+    total: int
+    truncation_notice: str | None
+
+
 @dataclass(frozen=True)
 class ToolSafety:
     """MCP-annotation facts for one tool, kept SDK-free (plain booleans; transport.py maps these to
-    ``mcp.types.ToolAnnotations``). ``read_only`` follows the LITERAL MCP definition — a tool that
+    ``mcp.types.ToolAnnotations``). ``read_only`` follows the literal MCP definition — a tool that
     persists runtime-DB rows or writes files is NOT read-only, regardless of the agent-side
-    "never writes canon" intent axis. ``destructive`` is True only for irreversible deletes/
-    overwrites of non-re-derivable data (none of ours qualify); ``idempotent`` only where proven;
+    "never writes canon" intent axis. MCP defines ``destructive=False`` as *only additive*, so a
+    tool that replaces rows, changes status, or overwrites exports is marked destructive even when
+    the data can be regenerated. ``idempotent`` is true only where repeated effects are proven;
     ``open_world`` True when the tool can reach an external system (the real-model LLM path)."""
 
     read_only: bool
@@ -50,17 +64,20 @@ class ToolSafety:
 
 
 #: Safety facts per registered MCP tool (keyed by handler name). Read tools are read-only; the four
-#: that persist rows / write files are not. None is destructive (all effects are re-derivable from
-#: canon); none of the writers claim idempotency (fresh run ids / timestamps make repeats differ).
+#: that persist rows / write files are not. Every current writer can replace/update state rather
+#: than being strictly additive, and none is idempotent (fresh run ids / timestamps make repeats
+#: differ), so clients must not silently replay an outcome-unknown call.
 TOOL_SAFETY: dict[str, ToolSafety] = {
     "list_issues": ToolSafety(read_only=True),
     "build_context_pack": ToolSafety(read_only=True),
+    "search_references": ToolSafety(read_only=True),
+    "flag_xref": ToolSafety(read_only=True),
     "impact_of": ToolSafety(read_only=True),
     "ask_lore": ToolSafety(read_only=True, open_world=True),  # real mode hits the external LLM API
-    "audit_project": ToolSafety(read_only=False),  # persists an audit run + issue rows by default
-    "propose_fix": ToolSafety(read_only=False),  # persists proposal rows
-    "quality_harness": ToolSafety(read_only=False),  # persists audit + proposals
-    "export_project": ToolSafety(read_only=False),  # writes engine files
+    "audit_project": ToolSafety(read_only=False, destructive=True),
+    "propose_fix": ToolSafety(read_only=False, destructive=True),
+    "quality_harness": ToolSafety(read_only=False, destructive=True),
+    "export_project": ToolSafety(read_only=False, destructive=True),
 }
 
 # Session-level shared ProjectContext injection.
@@ -90,26 +107,26 @@ def audit_project(
     sqlite_path: str | None = None,
     persist: bool = True,
     limit: int | None = None,
-) -> dict[str, Any]:
+) -> AuditProjectPayload:
     """Run the default deterministic audit rules for a project.
 
-    ``limit=None`` (default) returns every issue — unchanged keys. A non-None ``limit`` bounds the
-    returned ``issues`` list for the token-limited MCP surface: ``open_errors`` still reports the
-    real (un-paged) total and a ``truncation_notice`` points the caller at ``list_issues`` for the
-    rest — a bounded page is never a silent drop."""
+    ``limit=None`` (default) returns every issue. ``total`` is always the pre-page count and
+    ``truncation_notice`` is null unless a non-None ``limit`` omits results, so the structured MCP
+    output has one stable schema and a bounded page is never a silent drop."""
     with _project(content_root, sqlite_path) as project:
         result = run_full_audit(project, persist=persist)
         issues = list(result.issues)
-        payload: dict[str, Any] = {
+        payload: AuditProjectPayload = {
             "content_hash": content_hash(project.bundle),
             "audit_run": result.run.model_dump(mode="json"),
             "issues": [issue.model_dump(mode="json") for issue in issues],
             "open_errors": len(result.open_errors),
             "cost_budget": _deterministic_cost_budget("audit_project"),
+            "total": len(issues),
+            "truncation_notice": None,
         }
         if limit is not None and len(issues) > limit:
             payload["issues"] = payload["issues"][:limit]
-            payload["total"] = len(issues)
             payload["truncation_notice"] = (
                 f"showing {limit} of {len(issues)} issues; use list_issues with "
                 f"limit/offset to page the rest"
@@ -183,6 +200,29 @@ def build_context_pack(
             "refs": pack.refs,
             "hits": [hit.model_dump(mode="json") for hit in pack.hits],
             "cost_budget": _deterministic_cost_budget("build_context_pack"),
+        }
+
+
+def search_references(
+    *,
+    content_root: str,
+    query: str,
+    sqlite_path: str | None = None,
+    budget_tokens: int = 1000,
+) -> dict[str, Any]:
+    """Retrieval lookup over the inspiration reference library (grounding material for drafting —
+    never canon; the agent-facing counterpart of ``build_context_pack``, over the reference store
+    instead of the content graph). No new retrieval logic here: the body calls the same
+    ``ReferenceContextBuilder.build`` the CLI ``reference search`` command and the REST
+    ``:search`` endpoint call.
+    """
+    with _project(content_root, sqlite_path) as project:
+        pack = project.reference_context_builder.build(query, budget_tokens=budget_tokens)
+        return {
+            "query": query,
+            "refs": pack.refs,
+            "hits": [hit.model_dump(mode="json") for hit in pack.hits],
+            "cost_budget": _deterministic_cost_budget("search_references"),
         }
 
 
@@ -273,6 +313,26 @@ def impact_of(
             "total": len(result.items),
             "cost_budget": _deterministic_cost_budget("impact_of"),
         }
+
+
+def flag_xref(
+    *,
+    content_root: str,
+    sqlite_path: str | None = None,
+    flag: str | None = None,
+) -> dict[str, Any]:
+    """Cross-reference world state flags: who declares, writes and reads each one (no LLM).
+
+    This is the "who touched this flag?" lookup a narrative editor ships as a where-used report.
+    ``flag`` narrows the answer to one variable; omitted, every flag is returned. ``verdicts`` per
+    flag names the decidable problems (conflicting declarations / a gate nothing can open / a write
+    nothing reads); ``reads_complete=false`` means some guard failed to parse, so "nobody reads it"
+    is withheld world-wide rather than guessed.
+    """
+    with _project(content_root, sqlite_path) as project:
+        payload = build_flag_xref(project.bundle).report(flag)
+        payload["cost_budget"] = _deterministic_cost_budget("flag_xref")
+        return payload
 
 
 def propose_fix(

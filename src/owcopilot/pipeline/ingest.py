@@ -7,10 +7,38 @@ from pathlib import Path
 
 from ..content.ingest import IngestResult, ingest_paths, ingest_update, parse_paths
 from ..content.mapping import FieldMapping, apply_field_mapping
+from ..storage.world_lock import world_write_lock
 from .project import ProjectContext
 
 
 def run_ingest(
+    project: ProjectContext,
+    paths: list[str | Path],
+    *,
+    dry_run: bool = True,
+    field_mapping: FieldMapping | None = None,
+    write_non_conflicting: bool = False,
+) -> IngestResult:
+    """Run previews lock-free; serialize only an ingest that may commit canon changes."""
+    if dry_run:
+        return _run_ingest_unlocked(
+            project,
+            paths,
+            dry_run=True,
+            field_mapping=field_mapping,
+            write_non_conflicting=write_non_conflicting,
+        )
+    with world_write_lock(project.content_store.root):
+        return _run_ingest_unlocked(
+            project,
+            paths,
+            dry_run=dry_run,
+            field_mapping=field_mapping,
+            write_non_conflicting=write_non_conflicting,
+        )
+
+
+def _run_ingest_unlocked(
     project: ProjectContext,
     paths: list[str | Path],
     *,

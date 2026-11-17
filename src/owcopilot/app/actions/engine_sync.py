@@ -15,10 +15,69 @@ from pydantic import ValidationError
 
 from ...assist.review_queue import ReviewQueue
 from ...audit.context import AuditContext
+from ...content.models import ContentBundle
 from ...pipeline.ingest import run_ingest
+from ...storage.world_lock import serialized_world_write
 from .._common import deterministic_cost_budget as _deterministic_cost_budget
 from .._common import open_project as _project
 from ._shared import _gateway, _merge_preview
+
+_BUNDLE_MAPPING_FIELDS = (
+    "entities",
+    "quest_event_refs",
+    "quests",
+    "regions",
+    "pois",
+    "dialogues",
+    "dialogue_trees",
+    "localized_texts",
+    "terms",
+    "style_guides",
+    "style_rubrics",
+)
+
+
+def _merge_baseline(existing: ContentBundle, incoming: ContentBundle) -> ContentBundle:
+    """Capture exactly the canon rows a queued sync intends to replace."""
+    baseline = ContentBundle()
+    for field_name in _BUNDLE_MAPPING_FIELDS:
+        existing_rows = getattr(existing, field_name)
+        incoming_rows = getattr(incoming, field_name)
+        setattr(
+            baseline,
+            field_name,
+            {
+                object_id: existing_rows[object_id].model_copy(deep=True)
+                for object_id in incoming_rows
+                if object_id in existing_rows
+            },
+        )
+    incoming_relation_keys = {
+        (relation.source, relation.target, relation.kind) for relation in incoming.relations
+    }
+    baseline.relations = [
+        relation.model_copy(deep=True)
+        for relation in existing.relations
+        if (relation.source, relation.target, relation.kind) in incoming_relation_keys
+    ]
+    return baseline
+
+
+def _queue_sync_bundle(project: Any, *, draft_id: str, staged: ContentBundle) -> str | None:
+    has_rows = bool(staged.relations) or any(
+        bool(getattr(staged, field_name)) for field_name in _BUNDLE_MAPPING_FIELDS
+    )
+    if not has_rows:
+        return None
+    baseline = _merge_baseline(project.bundle, staged)
+    item = ReviewQueue(project.sqlite_store).add_sync_draft(
+        {
+            "id": draft_id,
+            "bundle": staged.model_dump(mode="json"),
+            "baseline_bundle": baseline.model_dump(mode="json"),
+        }
+    )
+    return item.id
 
 
 def run_ingest_action(
@@ -53,24 +112,29 @@ def import_from_engine_action(
     content_root: str | Path,
     *,
     quests: list[dict[str, Any]],
+    baseline_quests: list[dict[str, Any]] | None = None,
     sqlite_path: str | None = None,
 ) -> dict[str, Any]:
-    """WS-K · pull engine-side quest rows back: diff vs canon, queue new/changed for review."""
-    from ..engine_sync import plan_engine_import, staged_bundle
+    """WS-K · three-way engine back-sync, with every safe change gated by human review."""
+    from ..engine_sync import plan_engine_sync_back, staged_bundle
 
     with _project(content_root, sqlite_path) as project:
-        plan = plan_engine_import(quests, project.bundle)
-        review_item_id = None
+        plan = plan_engine_sync_back(quests, project.bundle, baseline=baseline_quests)
         staged = staged_bundle(plan)
-        if staged.quests:
-            item = ReviewQueue(project.sqlite_store).add_world_seed(
-                {"id": "engine_import", "bundle": staged.model_dump(mode="json")}
-            )
-            review_item_id = item.id
+        review_item_id = _queue_sync_bundle(project, draft_id="engine_import", staged=staged)
         return {
-            "new": plan["new"],
-            "changed": plan["changed"],
-            "unchanged": plan["unchanged"],
+            key: plan[key]
+            for key in (
+                "new",
+                "changed",
+                "unchanged",
+                "conflicts",
+                "library_ahead",
+                "engine_missing",
+                "baseline_provided",
+                "warnings",
+            )
+        } | {
             "review_item_id": review_item_id,
             "cost_budget": _deterministic_cost_budget("engine_import"),
         }
@@ -171,12 +235,7 @@ def _recognize_finish(project: Any, plan: Any, *, apply: bool) -> dict[str, Any]
         return result
 
     staged = plan_to_bundle(plan, only_ids=set(plan.new) | set(plan.changed))
-    review_item_id = None
-    if staged.entities or staged.relations:
-        item = ReviewQueue(project.sqlite_store).add_world_seed(
-            {"id": "recognition_import", "bundle": staged.model_dump(mode="json")}
-        )
-        review_item_id = item.id
+    review_item_id = _queue_sync_bundle(project, draft_id="recognition_import", staged=staged)
     preview = project.audit_runner.run(
         AuditContext.from_bundle(_merge_preview(project.bundle, staged))
     )
@@ -270,12 +329,7 @@ def sync_back_action(
         if not apply:
             return result
         staged = staged_bundle(plan)
-        review_item_id = None
-        if staged.quests:
-            item = ReviewQueue(project.sqlite_store).add_world_seed(
-                {"id": "engine_sync_back", "bundle": staged.model_dump(mode="json")}
-            )
-            review_item_id = item.id
+        review_item_id = _queue_sync_bundle(project, draft_id="engine_sync_back", staged=staged)
         preview = project.audit_runner.run(
             AuditContext.from_bundle(_merge_preview(project.bundle, staged))
         )
@@ -296,16 +350,35 @@ def recognize_import_action(
     input_path: str,
     field_mapping: dict[str, Any] | None = None,
     apply: bool = False,
+    enable_llm: bool = False,
+    llm_mode: str = "real",
+    llm_model: str = "deepseek-v4-flash",
     operator: str = "import",
     sqlite_path: str | None = None,
 ) -> dict[str, Any]:
     """WS-R · read a foreign project FILE on disk and recognize it into an editable ImportPlan
-    (see ``_recognize_finish``). Recognition never auto-lands; new/changed go to human review."""
+    (see ``_recognize_finish``). Recognition never auto-lands; new/changed go to human review.
+    ``enable_llm`` turns on the §8-guarded LLM relation pass (default off) — the same knob
+    ``recognize_content_action`` (the REST/frontend path) already exposes; unset, this function's
+    behaviour is byte-for-byte what it was before this parameter existed."""
     import json
 
     from ...content.encoding import decode_bytes
+    from ...recognize import OfflineRelationProvider, build_llm_relation_proposer
 
     with _project(content_root, sqlite_path) as project:
+        # Built inside the project block so the gateway cache is scoped to this project (the
+        # namespace contextvar is only set within `_project`) — mirrors recognize_content_action.
+        llm_proposer = None
+        if enable_llm:
+            gateway, _ = _gateway(
+                task="recognize_relations",
+                llm_mode=llm_mode,
+                llm_model=llm_model,
+                offline_provider=OfflineRelationProvider(),
+            )
+            llm_proposer = build_llm_relation_proposer(gateway)
+
         source_name = Path(input_path).name
         rows = _read_table_rows(input_path) if source_format == "table" else None
         # Use decode_bytes (not read_text(encoding="utf-8")) so GB18030 / UTF-16-BOM files
@@ -328,6 +401,7 @@ def recognize_import_action(
             text=text,
             data=data,
             field_mapping=field_mapping,
+            llm_proposer=llm_proposer,
         )
         return _recognize_finish(project, plan, apply=apply)
 
@@ -444,24 +518,25 @@ def _mapping_store_path(content_root: str | Path) -> Path:
 
 
 def _read_mappings(content_root: str | Path) -> dict[str, Any]:
-    import json
+    from ...storage.atomic_file import read_json_file
 
     path = _mapping_store_path(content_root)
     if not path.exists():
         return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
-        return {}
-    return data if isinstance(data, dict) else {}
+    data = read_json_file(path)
+    if not isinstance(data, dict):
+        raise ValueError(f"识别映射必须是 JSON object：{path.resolve()}")
+    return data
 
 
 def _write_mappings(content_root: str | Path, data: dict[str, Any]) -> None:
     import json
 
+    from ...storage.atomic_file import atomic_write_text
+
     path = _mapping_store_path(content_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def list_mapping_templates_action(
@@ -471,6 +546,7 @@ def list_mapping_templates_action(
     return {"templates": _read_mappings(content_root)}
 
 
+@serialized_world_write
 def save_mapping_template_action(
     content_root: str | Path, *, name: str, mapping: dict[str, Any], sqlite_path: str | None = None
 ) -> dict[str, Any]:
@@ -485,6 +561,7 @@ def save_mapping_template_action(
     return {"templates": data, "saved": name}
 
 
+@serialized_world_write
 def delete_mapping_template_action(
     content_root: str | Path, *, name: str, sqlite_path: str | None = None
 ) -> dict[str, Any]:

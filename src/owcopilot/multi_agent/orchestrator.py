@@ -1,16 +1,16 @@
 # Orchestrator：把高层目标拆成子任务、路由给 worker、汇总结果。只编排，不自己干活。
 """OrchestratorAgent — decomposes a high-level goal into subtasks, routes to workers, synthesizes.
 
-Architecture compliance (SUPERVISOR_rubric P3-1, P3-2, P3-6, P3-7):
-  P3-1: OrchestratorAgent is a distinct class from WorkerAgent and VerifierAgent; it has its
+Execution structure:
+  invariant: OrchestratorAgent is a distinct class from WorkerAgent and VerifierAgent; it has its
         own ``agent_id``, its own ``ReActAgent`` instance, and its own transcript.
-  P3-2: OrchestratorAgent performs genuine task decomposition — it calls ``_decompose_goal``
+  invariant: OrchestratorAgent performs genuine task decomposition — it calls ``_decompose_goal``
         which uses the LLM (or the deterministic offline fallback) to break a goal into
         subtask records.  It is NOT an if-else decision tree or a static tool list.
-  P3-6: agent_id="orchestrator" appears in every blackboard message it posts.
-  P3-7: Orchestrator posts messages to blackboard; workers read and respond via blackboard.
+  invariant: agent_id="orchestrator" appears in every blackboard message it posts.
+  invariant: Orchestrator posts messages to blackboard; workers read and respond via blackboard.
         The call chain is NOT a nested Python function call stack — the blackboard is the
-        hand-off point (satisfying P3-3 by transitivity through session.py).
+        hand-off point (satisfying invariant by transitivity through session.py).
 
 LLM decomposition (offline-safe):
   ``_decompose_goal`` sends a JSON-structured prompt to the chat model.  In offline/mock mode
@@ -18,7 +18,7 @@ LLM decomposition (offline-safe):
   and falls back to two built-in subtasks (diagnosis + repair_proposal) if parsing fails.  This
   ensures offline tests run at $0 while the production path uses real LLM reasoning.
 
-Decomposition strategy (no ReAct theatre):
+Decomposition strategy (no reasoning-and-tool loop theatre):
   ``_decompose_goal`` is a TWO-pass direct chat-model strategy — both passes are direct
   ``model.invoke([SystemMessage, HumanMessage])`` calls, not a ReActAgent loop.  Pass-1 asks
   for a JSON array of subtasks; if that does not parse, pass-2 retries with a stricter "JSON
@@ -43,6 +43,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from ..agent.middleware import SettledCostBudget, TotalModelCallBudget
 from ..agent.react import _AGENT_TIER, _model_id_of
 from ..llm.jsonio import extract_json
 from ..llm.telemetry import TelemetryCollector
@@ -62,7 +63,8 @@ class SubTask:
     description: str  # the subtask instruction for the worker
     allowed_skills: list[str]
     worker_id: str  # the target agent_id (e.g. "diag_01", "repair_01")
-    # Anthropic effort scaling: the per-worker ReAct step (== tool-call) budget the
+    # bounded execution effort scaling: the per-worker reasoning-and-tool loop step (== tool-call)
+    # budget the
     # orchestrator allocated for this subtask's complexity. ``None`` means the decomposition
     # decided no budget → defer to ``TaskAssignPayload``'s own default (current behaviour).
     max_steps: int | None = None
@@ -106,12 +108,16 @@ class OrchestratorAgent:
         # an agent.invoke context, so the TelemetryCallbackHandler is attached explicitly on the
         # invoke config (§1.3) — None ⇒ no accounting (its cost simply is not recorded).
         telemetry: TelemetryCollector | None = None,
+        shared_model_budget: TotalModelCallBudget | None = None,
+        shared_cost_budget: SettledCostBudget | None = None,
     ) -> None:
         self.agent_id = agent_id
         self._model = model
         self._registry = registry
         self._registered_workers = dict(registered_workers or {})
         self._telemetry = telemetry
+        self._shared_model_budget = shared_model_budget
+        self._shared_cost_budget = shared_cost_budget
 
     # ------------------------------------------------------------------
     # Public API
@@ -145,7 +151,8 @@ class OrchestratorAgent:
         posted: list[AgentMessage] = []
 
         for subtask in subtasks:
-            # Anthropic effort scaling: the orchestrator allocates the per-worker step budget
+            # bounded execution effort scaling: the orchestrator allocates the per-worker step
+            # budget
             # from the decomposition. When the decomposition decided no budget
             # (subtask.max_steps is None), construct exactly as before so the payload defers to
             # TaskAssignPayload's own default (byte-identical to the pre-effort-scaling path —
@@ -295,6 +302,14 @@ class OrchestratorAgent:
         invoke config. Returns the reply text for ``_parse_subtasks`` — no ``response_format`` is
         set (the decomposition asks for a JSON *array*, which ``json_object`` mode would reject).
         """
+        # Reserve before dispatch so concurrent/strict-retry decomposition cannot overspend the
+        # session contract. Cost is necessarily a settled-cost gate: an in-flight provider call
+        # can cross the threshold, but no subsequent call is dispatched once it has done so.
+        if self._shared_cost_budget is not None:
+            self._shared_cost_budget.check_before_dispatch("orchestrator_decompose")
+        if self._shared_model_budget is not None:
+            self._shared_model_budget.spend("orchestrator_decompose")
+
         config: RunnableConfig | None = None
         if self._telemetry is not None:
             config = {
@@ -316,7 +331,7 @@ class OrchestratorAgent:
         """Break a high-level goal into worker subtasks.
 
         Two-pass direct chat-model strategy (both passes are direct ``model.invoke`` calls — no
-        ReAct loop):
+        reasoning-and-tool loop loop):
         1. Ask for a JSON array of subtasks.
         2. If that does not parse, re-ask with a stricter "JSON ONLY, no prose, no fences"
            system prompt.  The common real-LLM failure is valid JSON wrapped in prose; a
@@ -346,7 +361,8 @@ class OrchestratorAgent:
             "max_steps (integer, the step/tool-call budget for that worker). "
             + worker_constraint
             + "Always include at least one diagnosis subtask and one repair_proposal subtask. "
-            # Anthropic effort scaling: complexity → budget guidance lives in the prompt so the
+            # bounded execution effort scaling: complexity → budget guidance lives in the prompt
+            # so the
             # model does not over-allocate simple subtasks (its common failure mode).
             "Set max_steps to scale effort to the subtask's complexity, not a fixed default: "
             "a narrow single-tool check needs a small budget (about 3); a broad multi-tool "
@@ -444,15 +460,19 @@ class OrchestratorAgent:
 # ---------------------------------------------------------------------------
 
 
-# Anthropic effort-scaling clamp bounds for a per-subtask step (== tool-call) budget.
+# bounded execution effort-scaling clamp bounds for a per-subtask step (== tool-call) budget.
 # The prompt tells the model "keep max_steps between 2 and 12"; these are the code-side
-# guardrail so an over-scaling model (Anthropic's early versions spawned 50 subagents for a
-# trivial query) cannot blow up cost. The prompt bounds MUST equal these two constants — the
+# guardrail so an unconstrained planner cannot create excessive workers for a
+# trivial query and exhaust the budget. The prompt bounds MUST equal these two constants — the
 # scaling-rules test asserts both numbers appear in the decompose prompt so they cannot drift.
 #   _MIN = 2: ReActAgent requires max_steps >= 1; 2 = at least one tool call + a final answer.
 #   _MAX = 12: conservative ceiling above the prompt's "complex ~8", well under runaway cost.
 _MIN_SUBTASK_STEPS = 2
 _MAX_SUBTASK_STEPS = 12
+# A decomposition is untrusted model output. Bound fan-out independently from per-task step/tool
+# limits so a verbose model cannot multiply cost by emitting dozens of otherwise-valid workers.
+MAX_DECOMPOSED_SUBTASKS = 6
+MAX_DECOMPOSED_SUBTASKS_PER_ROLE = 3
 
 
 _FALLBACK_SUBTASKS = [
@@ -523,7 +543,8 @@ def _coerce_allowed_skills(value: Any, *, worker_role: str) -> list[str]:
 def _coerce_subtask_steps(value: Any) -> int | None:
     """Normalise an LLM-supplied ``max_steps`` budget into a clamped int (or ``None``).
 
-    Isolates the "defend against the model's weird budget value" concept behind the Anthropic
+    Isolates the "defend against the model's weird budget value" concept behind the bounded
+    execution
     effort-scaling prompt, mirroring ``_coerce_allowed_skills``:
       - ``None`` (missing field) → ``None``: no budget decided, fall back to the payload default
         (regression-safe — this is the pre-effort-scaling behaviour).
@@ -617,6 +638,29 @@ def _parse_subtasks(raw: str, goal: str) -> tuple[list[SubTask], bool]:
 
         if not subtasks:
             return _FALLBACK_SUBTASKS, True
+
+        if len(subtasks) > MAX_DECOMPOSED_SUBTASKS:
+            logger.warning(
+                "orchestrator: decomposition emitted %d subtasks; enforcing total cap %d.",
+                len(subtasks),
+                MAX_DECOMPOSED_SUBTASKS,
+            )
+        capped: list[SubTask] = []
+        role_counts: dict[str, int] = {}
+        for subtask in subtasks:
+            if len(capped) >= MAX_DECOMPOSED_SUBTASKS:
+                break
+            role_count = role_counts.get(subtask.worker_role, 0)
+            if role_count >= MAX_DECOMPOSED_SUBTASKS_PER_ROLE:
+                logger.warning(
+                    "orchestrator: dropping excess %s subtask; per-role cap is %d.",
+                    subtask.worker_role,
+                    MAX_DECOMPOSED_SUBTASKS_PER_ROLE,
+                )
+                continue
+            capped.append(subtask)
+            role_counts[subtask.worker_role] = role_count + 1
+        subtasks = capped
 
         # ③ The decomposition contract requires BOTH a diagnosis and a repair_proposal subtask
         # (the system prompt demands it).  An LLM that returns, say, only a diagnosis would leave

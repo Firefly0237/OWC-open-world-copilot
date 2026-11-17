@@ -76,6 +76,7 @@ _JSON_SCHEMA_TYPES: dict[str, str] = {
 
 #: Sentinel returned by ``_coerce_type`` when a value cannot be validated/coerced to a type.
 _INVALID = object()
+_NO_DEFAULT = object()
 
 #: Strings a boolean parameter accepts (case-insensitive), for models that reply with text.
 _TRUE_STRINGS = frozenset({"true", "1", "yes"})
@@ -171,6 +172,25 @@ class SkillParameter:
     #: Optional closed set of allowed values. Enforced in ``Skill.run`` and rendered into the
     #: native tool schema so the model is told the choices up front.
     enum: tuple[str, ...] | None = None
+    #: Optional execution default. The same value is applied by ``normalise_args`` and advertised
+    #: in the tool schema, so omission has one canonical meaning at planning and execution time.
+    default: Any = field(default=_NO_DEFAULT, repr=False)
+
+
+@dataclass(frozen=True)
+class PollingPolicy:
+    """Explicit contract for a tool whose unchanged pending result is legitimate progress."""
+
+    status_field: str = "status"
+    pending_values: tuple[str, ...] = ("pending", "queued", "running")
+    max_polls: int = 3
+    deadline_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        if self.max_polls < 1:
+            raise ValueError("max_polls must be >= 1")
+        if self.deadline_seconds <= 0:
+            raise ValueError("deadline_seconds must be > 0")
 
 
 @dataclass(frozen=True)
@@ -183,6 +203,46 @@ class Skill:
     side_effect: SideEffect
     handler: Callable[..., dict[str, Any]]
     parameters: tuple[SkillParameter, ...] = ()
+    polling: PollingPolicy | None = None
+    # Stable, skill-specific view used only for semantic no-progress detection. The full result is
+    # still preserved as observation/artifact for auditability.
+    semantic_projection: Callable[[dict[str, Any]], Any] | None = None
+    semantic_projection_name: str = "full_result_v1"
+    # Current external/project state. A changed marker invalidates a checkpoint-hydrated repeat so
+    # resume never blocks before observing a world that changed while the process was away.
+    state_marker: Callable[[], Any] | None = None
+    state_marker_policy: str = "none"
+
+    def normalise_args(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Return the exact kwargs execution will receive: filtered, defaulted and coerced."""
+        missing = [
+            p.name
+            for p in self.parameters
+            if p.required and p.name not in args and p.default is _NO_DEFAULT
+        ]
+        if missing:
+            raise SkillArgumentError(
+                f"skill '{self.name}' is missing required argument(s): {', '.join(missing)}"
+            )
+        call_kwargs: dict[str, Any] = {}
+        for param in self.parameters:
+            if param.name in args:
+                call_kwargs[param.name] = _coerce_arg(self.name, param, args[param.name])
+            elif param.default is not _NO_DEFAULT:
+                # Defaults are authored as part of the skill contract and may legitimately be
+                # None even when an explicitly supplied value must match a scalar schema.
+                call_kwargs[param.name] = param.default
+        # Iterating declared parameters (rather than model args) deliberately drops hallucinated
+        # fields such as ``nonce`` before both execution and no-progress fingerprinting.
+        return call_kwargs
+
+    def project_observation(self, result: dict[str, Any]) -> Any:
+        """Stable semantic view of *result*; defaults to the complete structured result."""
+        return self.semantic_projection(result) if self.semantic_projection is not None else result
+
+    def current_state_marker(self) -> Any:
+        """Current external-state revision, or ``None`` when the skill declares no such state."""
+        return self.state_marker() if self.state_marker is not None else None
 
     def run(self, args: dict[str, Any]) -> dict[str, Any]:
         """Validate ``args`` against the declared parameters, then call the handler.
@@ -199,23 +259,7 @@ class Skill:
                 f"skill '{self.name}' has side_effect=WRITES_CANON and cannot be "
                 "auto-invoked by the agent. Canon writes require human review."
             )
-        missing = [p.name for p in self.parameters if p.required and p.name not in args]
-        if missing:
-            raise SkillArgumentError(
-                f"skill '{self.name}' is missing required argument(s): {', '.join(missing)}"
-            )
-        # Only declared parameters are forwarded, and each is validated/coerced against its type
-        # (and enum) so a mistyped tool-arg fails loudly here — fed back to the model to retry —
-        # rather than reaching the handler as the wrong shape. Same surface for both the text and
-        # the native function-calling paths, since both dispatch through here.
-        by_name = {p.name: p for p in self.parameters}
-        call_kwargs: dict[str, Any] = {}
-        for key, value in args.items():
-            param = by_name.get(key)
-            if param is None:
-                continue  # a hallucinated extra / re-supplied session arg — drop it
-            call_kwargs[key] = _coerce_arg(self.name, param, value)
-        return self.handler(**call_kwargs)
+        return self.handler(**self.normalise_args(args))
 
     def signature(self) -> str:
         """Render the call signature for the tool manifest, e.g. ``propose_fix(issue_id*: string,
@@ -223,9 +267,12 @@ class Skill:
         appends its allowed values so the text path advertises the same choices as the schema."""
         parts: list[str] = []
         for p in self.parameters:
-            token = f"{p.name}{'*' if p.required else ''}: {p.type}"
+            required = p.required and p.default is _NO_DEFAULT
+            token = f"{p.name}{'*' if required else ''}: {p.type}"
             if p.enum is not None:
                 token += f" (one of: {', '.join(p.enum)})"
+            if p.default is not _NO_DEFAULT:
+                token += f" = {p.default!r}"
             parts.append(token)
         return f"{self.name}({', '.join(parts)})"
 
@@ -252,7 +299,9 @@ class Skill:
                 properties[p.name]["description"] = p.description
             if p.enum is not None:
                 properties[p.name]["enum"] = list(p.enum)
-            if p.required:
+            if p.default is not _NO_DEFAULT:
+                properties[p.name]["default"] = p.default
+            if p.required and p.default is _NO_DEFAULT:
                 required.append(p.name)
         parameters: dict[str, Any] = {"type": "object", "properties": properties}
         if required:
@@ -335,6 +384,7 @@ from .scope import (  # noqa: E402  execution-time scoping, imported after the a
 
 __all__ = [
     "CostTier",
+    "PollingPolicy",
     "ScopedSkillRegistry",
     "SideEffect",
     "Skill",

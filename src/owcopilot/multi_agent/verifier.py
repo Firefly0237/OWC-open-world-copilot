@@ -1,7 +1,7 @@
 # Verifier：对 worker 产出做独立 ground-truth 复核——自己重跑确定性审计裁决，不信 worker 自评。
 """VerifierAgent — independent ground-truth verification of worker outputs.
 
-Architecture compliance (SUPERVISOR_rubric P3-5):
+Execution structure:
     "At least one independent Verifier Agent or Verifier step that performs ground-truth
      validation of Worker output (can reuse existing deterministic audit), and the
      Verifier's gateway must NOT share the same model instance as the verified Worker."
@@ -17,7 +17,7 @@ Key design decisions:
    ``BaseChatModel`` is stateless per call, and in $0 offline tests no real model call
    happens anyway).  What matters is that the Verifier's reasoning is seeded from its OWN
    independent audit call, not from the worker's transcript.  Using a cross-model evaluator
-   would also satisfy P3-5, but deterministic tools are stronger — the SUPERVISOR_rubric
+   would also satisfy invariant, but deterministic tools are stronger — the execution contract
    confirms this is acceptable.
 
 Two-path verification (the deterministic path is the authority):
@@ -37,6 +37,12 @@ from typing import Any, Literal
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from ..agent.middleware import (
+    SettledCostBudget,
+    TotalModelCallBudget,
+    TotalToolBudgetExceeded,
+    TotalToolCallBudget,
+)
 from ..agent.react import AgentResult, ReActAgent
 from ..llm.telemetry import TelemetryCollector
 from ..skills import SkillError, SkillRegistry
@@ -61,10 +67,15 @@ class VerifierAgent:
         agent_id: str = "verifier_01",
         model: BaseChatModel,
         registry: SkillRegistry,
-        # ≥4 so the offline ReAct script (audit→context→harness→Final Answer) can finish;
+        # ≥4 so the offline reasoning-and-tool loop script (audit→context→harness→Final Answer)
+        # can finish;
         # the deterministic path below is the real authority regardless of this budget.
         max_steps: int = 5,
+        max_tool_calls: int | None = None,
         telemetry: TelemetryCollector | None = None,
+        shared_model_budget: TotalModelCallBudget | None = None,
+        shared_cost_budget: SettledCostBudget | None = None,
+        shared_tool_budget: TotalToolCallBudget | None = None,
     ) -> None:
         self.agent_id = agent_id
         self._model = model
@@ -73,7 +84,11 @@ class VerifierAgent:
         # hidden from the exposed tool schema).  See skill_scope.scoped_registry.
         self._registry = scoped_registry(registry, _VERIFIER_SKILLS)
         self._max_steps = max_steps
+        self._max_tool_calls = max_tool_calls
         self._telemetry = telemetry
+        self._shared_model_budget = shared_model_budget
+        self._shared_cost_budget = shared_cost_budget
+        self._shared_tool_budget = shared_tool_budget
         # Fresh independent ReActAgent — its transcript is not shared with any worker.
         self.agent: ReActAgent = self._make_agent()
 
@@ -82,9 +97,13 @@ class VerifierAgent:
             model=self._model,
             registry=self._registry,
             max_steps=self._max_steps,
+            max_tool_calls=self._max_tool_calls,
             task=f"verifier_{self.agent_id}",
             telemetry=self._telemetry,
             allowed_skills=set(_VERIFIER_SKILLS),  # minimal deterministic tools
+            shared_model_budget=self._shared_model_budget,
+            shared_cost_budget=self._shared_cost_budget,
+            shared_tool_budget=self._shared_tool_budget,
         )
 
     def verify(
@@ -222,6 +241,11 @@ class VerifierAgent:
         """
         if "audit_project" not in self._registry:
             return None, "no-audit-tool"
+        if self._shared_tool_budget is not None:
+            try:
+                self._shared_tool_budget.spend("audit_project")
+            except TotalToolBudgetExceeded:
+                return None, "session-tool-budget-exhausted"
         try:
             result: dict[str, Any] = self._registry.run("audit_project", {})
         except SkillError:
@@ -305,7 +329,8 @@ def _compute_verdict(
           approximate, so a ±1 rounding tolerance applies.
 
     ``source`` records HOW the verifier's count was obtained ("deterministic-audit" = ground
-    truth, "agent-answer" = parsed from the verifier's own ReAct loop) so the rationale is
+    truth, "agent-answer" = parsed from the verifier's own reasoning-and-tool loop loop) so the
+    rationale is
     auditable.
     """
     if worker_claimed_errors is None:

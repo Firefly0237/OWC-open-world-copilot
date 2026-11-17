@@ -14,6 +14,8 @@ from .service import (
     add_comment,
     assign,
     check_etag,
+    expire_locks,
+    lock_is_expired,
     release_lock,
     unassign,
 )
@@ -31,6 +33,8 @@ __all__ = [
     "assign",
     "check_etag",
     "etag_for",
+    "expire_locks",
+    "lock_is_expired",
     "release_lock",
     "unassign",
 ]

@@ -8,9 +8,9 @@ returns a plain ``ChatModelProvider`` unless ``OWCOPILOT_FALLBACK_MODEL`` /
 ``OWCOPILOT_CIRCUIT_BREAKER`` are set, so default real-mode behaviour is byte-for-byte unchanged.
 
 Why: the gateway already retries, classifies and fails *closed* (it never silently downgrades), but
-a single provider has no answer to a sustained outage. Failover tries a second provider on an
-availability error (never on ``auth`` — that would mask a misconfiguration). The breaker stops
-hammering a hard-down provider, failing fast for a cooldown to protect latency and budget.
+a single provider has no answer to a sustained outage. Failover tries a second provider only when
+that policy is safe (never auth/permission/bad request/output truncation). The breaker counts only
+global-health failures; tenant/request-scoped 429/409 do not poison it by default.
 
 Capability transparency: a concrete provider's surface is bigger than the required ``complete()`` —
 ``model`` (cache key / ``gen_ai.request.model``) and ``supports_tools`` + ``complete_with_tools``
@@ -21,8 +21,8 @@ silently falls back to the text ReAct loop even though the wrapped provider nati
 tools — the exact "enabling resilience degrades to text ReAct" regression this module now guards
 against. Both wrappers forward EVERY member in :data:`PROVIDER_CAPABILITY_MEMBERS` explicitly (no
 ``__getattr__`` proxy / no ``wrapt`` — this project only uses that dependency-free, auditable
-style); a completeness test in ``tests/test_resilience.py`` iterates the same tuple so a future
-member added there and forgotten here fails loudly instead of silently degrading again.
+style); a completeness test in ``tests/agent/test_resilience.py`` iterates the same tuple so a
+future member added there and forgotten here fails loudly instead of silently degrading again.
 """
 
 from __future__ import annotations
@@ -31,9 +31,9 @@ import logging
 import os
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
-from .chat_model import ChatModelProvider
+from .chat_model import DEFAULT_TRANSPORT_MAX_RETRIES, ChatModelProvider
 from .circuit import (
     CIRCUIT_FAILURE_THRESHOLD_ENV,
     CIRCUIT_RESET_SEC_ENV,
@@ -41,11 +41,17 @@ from .circuit import (
     _CircuitState,
     circuit_enabled_from_env,
 )
+from .execution_policy import LLMExecutionPolicy
 from .gateway import (
     LLMProvider,
     ToolCallResponse,
     _classify_provider_error,
+    prepare_provider_invocation,
     provider_supports_tools,
+    provider_suppresses_gateway_replay,
+    provider_transport_attempt_cap,
+    should_count_breaker_failure,
+    should_failover,
 )
 
 __all__ = [
@@ -62,21 +68,36 @@ logger = logging.getLogger(__name__)
 #: ``complete()`` so plain text-only providers keep structurally satisfying it). These are the
 #: OPTIONAL members callers duck-type-probe elsewhere in the codebase (``llm/gateway.py``'s
 #: ``getattr(provider, "model", ...)`` and ``provider_supports_tools``) — the single source of
-#: truth both the wrappers below and ``tests/test_resilience.py``'s completeness test read from.
+#: truth both the wrappers below and ``tests/agent/test_resilience.py``'s completeness test read
+#: from.
 PROVIDER_CAPABILITY_MEMBERS: tuple[str, ...] = (
     "complete",
     "model",
     "supports_tools",
     "complete_with_tools",
+    "owns_retry_policy",
+    "suppress_gateway_replay",
+    "handles_transport_retries",
+    "max_transport_attempts",
+    "manages_invocation_budget",
 )
 
 
 class FailoverProvider:
     """Try ``primary``; on an availability error, fall back to ``secondary``.
 
-    Errors in ``passthrough`` (default: ``auth``) are re-raised, never failed over: they would fail
-    on both providers and must surface as a misconfiguration. ``failovers`` counts hand-offs.
+    Only availability categories are eligible for a hand-off. Auth, permission, bad request,
+    output truncation and unknown application errors always surface immediately. ``passthrough``
+    remains as a backward-compatible extra deny-list (default: ``auth``); ``failovers`` counts
+    actual hand-offs.
     """
+
+    # A failover wrapper owns the complete primary -> secondary policy even if BOTH inners are
+    # legacy single-shot providers. Gateway must never replay the whole chain.
+    owns_retry_policy = True
+    suppress_gateway_replay = True
+    handles_transport_retries = True  # compatibility marker; orchestration is broader than retry
+    manages_invocation_budget = True
 
     def __init__(
         self,
@@ -104,13 +125,23 @@ class FailoverProvider:
         """
         return getattr(self.primary, "model", "") or ""
 
-    def complete(self, *, system: str, user: str, model: str) -> tuple:
+    @property
+    def max_transport_attempts(self) -> int:
+        """Maximum primary + secondary HTTP attempts inside one failover invocation."""
+        return provider_transport_attempt_cap(self.primary) + provider_transport_attempt_cap(
+            self.secondary
+        )
+
+    def complete(self, *, system: str, user: str, model: str) -> tuple[Any, ...]:
         try:
+            prepare_provider_invocation(self.primary)
             return self.primary.complete(system=system, user=user, model=model)
         except Exception as exc:
-            if _classify_provider_error(exc) in self.passthrough:
-                raise  # e.g. auth — surface it, don't mask behind the secondary
+            category = _classify_provider_error(exc)
+            if not should_failover(exc) or category in self.passthrough:
+                raise
             self.failovers += 1
+            prepare_provider_invocation(self.secondary)
             return self.secondary.complete(system=system, user=user, model=model)
 
     @property
@@ -149,33 +180,44 @@ class FailoverProvider:
         # guards above/below prove the member exists and is callable before each use.
         primary: Any = self.primary
         try:
-            return primary.complete_with_tools(messages=messages, tools=tools, model=model)
+            prepare_provider_invocation(primary)
+            return cast(
+                ToolCallResponse,
+                primary.complete_with_tools(messages=messages, tools=tools, model=model),
+            )
         except Exception as exc:
-            if _classify_provider_error(exc) in self.passthrough:
-                raise  # e.g. auth — surface it, don't mask behind the secondary
+            category = _classify_provider_error(exc)
+            if not should_failover(exc) or category in self.passthrough:
+                raise
             if not provider_supports_tools(self.secondary):
                 logger.warning(
                     "FailoverProvider.complete_with_tools: primary failed with a %s error (%s) "
                     "and the failover secondary does not support native tool-calling — refusing "
                     "to fabricate a tool response; native-tools capability degrades for this call.",
-                    _classify_provider_error(exc),
+                    category,
                     exc,
                 )
                 raise
             self.failovers += 1
             secondary: Any = self.secondary
-            return secondary.complete_with_tools(messages=messages, tools=tools, model=model)
+            prepare_provider_invocation(secondary)
+            return cast(
+                ToolCallResponse,
+                secondary.complete_with_tools(messages=messages, tools=tools, model=model),
+            )
 
 
 class CircuitBreakerProvider:
     """Wrap a provider with a fixed-threshold circuit breaker.
 
-    CLOSED: calls pass through; ``failure_threshold`` consecutive failures open the circuit. OPEN:
-    calls fail fast with :class:`CircuitOpenError` for ``reset_timeout_seconds``; the first call
-    after the cooldown is a half-open trial — success closes it, failure re-opens it. In-memory /
-    single-process (like the rate limiter); a multi-instance deploy would share the state. ``trips``
-    counts how many times the circuit has opened.
+    CLOSED: calls pass through; ``failure_threshold`` consecutive provider-health failures open the
+    circuit. OPEN: calls fail fast with :class:`CircuitOpenError` for ``reset_timeout_seconds``;
+    the first call after the cooldown is a half-open trial — success closes it, failure re-opens it.
+    In-memory / single-process (like the rate limiter); a multi-instance deploy would share the
+    state. ``trips`` counts how many times the circuit has opened.
     """
+
+    manages_invocation_budget = True
 
     def __init__(
         self,
@@ -215,12 +257,33 @@ class CircuitBreakerProvider:
         return provider_supports_tools(self.inner)
 
     @property
+    def handles_transport_retries(self) -> bool:
+        """Compatibility alias for the wrapped provider's gateway-replay suppression."""
+        return self.suppress_gateway_replay
+
+    @property
+    def owns_retry_policy(self) -> bool:
+        """Forward whether the inner provider/composite owns retry orchestration."""
+        return provider_suppresses_gateway_replay(self.inner)
+
+    @property
+    def suppress_gateway_replay(self) -> bool:
+        """Forward the inner policy; a circuit alone does not consume a legacy retry budget."""
+        return provider_suppresses_gateway_replay(self.inner)
+
+    @property
+    def max_transport_attempts(self) -> int:
+        """Forward the wrapped provider's per-invocation transport-attempt ceiling."""
+        return provider_transport_attempt_cap(self.inner)
+
+    @property
     def is_open(self) -> bool:
         return self._state.is_open
 
-    def complete(self, *, system: str, user: str, model: str) -> tuple:
-        return self._call_through(
-            lambda: self.inner.complete(system=system, user=user, model=model)
+    def complete(self, *, system: str, user: str, model: str) -> tuple[Any, ...]:
+        return cast(
+            tuple[Any, ...],
+            self._call_through(lambda: self.inner.complete(system=system, user=user, model=model)),
         )
 
     def complete_with_tools(
@@ -235,8 +298,11 @@ class CircuitBreakerProvider:
         the real provider's ``complete_with_tools`` itself relies on (no redundant self-check)."""
         # Optional protocol member — see the matching comment on FailoverProvider's version.
         inner: Any = self.inner
-        return self._call_through(
-            lambda: inner.complete_with_tools(messages=messages, tools=tools, model=model)
+        return cast(
+            ToolCallResponse,
+            self._call_through(
+                lambda: inner.complete_with_tools(messages=messages, tools=tools, model=model)
+            ),
         )
 
     def _call_through(self, fn: Callable[[], Any]) -> Any:
@@ -244,7 +310,14 @@ class CircuitBreakerProvider:
         :class:`~owcopilot.llm.circuit._CircuitState`, so the two call shapes share exactly one
         circuit (they exercise the same underlying provider connection) instead of drifting into
         two independently-tracked ones."""
-        return self._state.run(fn)
+
+        def invoke_inner() -> Any:
+            # Reserve only after the circuit admits the call: an OPEN fast-fail consumes no
+            # transport budget, while an actual half-open probe reserves exactly like CLOSED.
+            prepare_provider_invocation(self.inner)
+            return fn()
+
+        return self._state.run(invoke_inner, should_count_failure=should_count_breaker_failure)
 
 
 def build_real_provider(
@@ -252,7 +325,9 @@ def build_real_provider(
     *,
     json_mode: bool = True,
     timeout: float | None = None,
+    max_retries: int = DEFAULT_TRANSPORT_MAX_RETRIES,
     max_output_tokens: int | None = None,
+    execution_policy: LLMExecutionPolicy | None = None,
 ) -> LLMProvider:
     """Build the real provider — the LangChain-backed :class:`ChatModelProvider` — optionally
     wrapped with failover + a circuit breaker per env. This is the ONE birth point of every
@@ -268,23 +343,38 @@ def build_real_provider(
       ``OWCOPILOT_CIRCUIT_RESET_SEC``         open-state cooldown seconds (default 30).
     """
     provider: LLMProvider = ChatModelProvider(
-        model=model, json_mode=json_mode, timeout=timeout, max_output_tokens=max_output_tokens
+        model=model,
+        json_mode=json_mode,
+        timeout=timeout,
+        max_retries=max_retries,
+        max_output_tokens=max_output_tokens,
+        execution_policy=execution_policy,
     )
-    fallback_model = os.getenv("OWCOPILOT_FALLBACK_MODEL", "").strip()
-    if fallback_model:
-        secondary = ChatModelProvider(
-            model=fallback_model,
-            base_url_env="OWCOPILOT_FALLBACK_BASE_URL",
-            api_key_env="OWCOPILOT_FALLBACK_API_KEY",
-            json_mode=json_mode,
-            timeout=timeout,
-            max_output_tokens=max_output_tokens,
-        )
-        provider = FailoverProvider(provider, secondary)
-    if circuit_enabled_from_env():
+    circuit_enabled = circuit_enabled_from_env()
+    if circuit_enabled:
         provider = CircuitBreakerProvider(
             provider,
             failure_threshold=int(os.getenv(CIRCUIT_FAILURE_THRESHOLD_ENV, "5")),
             reset_timeout_seconds=float(os.getenv(CIRCUIT_RESET_SEC_ENV, "30")),
         )
+
+    fallback_model = os.getenv("OWCOPILOT_FALLBACK_MODEL", "").strip()
+    if fallback_model and (execution_policy is None or execution_policy.allow_failover):
+        secondary: LLMProvider = ChatModelProvider(
+            model=fallback_model,
+            base_url_env="OWCOPILOT_FALLBACK_BASE_URL",
+            api_key_env="OWCOPILOT_FALLBACK_API_KEY",
+            json_mode=json_mode,
+            timeout=timeout,
+            max_retries=max_retries,
+            max_output_tokens=max_output_tokens,
+            execution_policy=execution_policy,
+        )
+        if circuit_enabled:
+            secondary = CircuitBreakerProvider(
+                secondary,
+                failure_threshold=int(os.getenv(CIRCUIT_FAILURE_THRESHOLD_ENV, "5")),
+                reset_timeout_seconds=float(os.getenv(CIRCUIT_RESET_SEC_ENV, "30")),
+            )
+        provider = FailoverProvider(provider, secondary)
     return provider

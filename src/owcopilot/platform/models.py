@@ -9,8 +9,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import Enum
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
+
+from ..trust.identifiers import validate_tenant_id
+
+TenantId = Annotated[str, AfterValidator(validate_tenant_id)]
 
 
 class Role(str, Enum):
@@ -25,7 +30,7 @@ class Role(str, Enum):
 
 
 class Tenant(BaseModel):
-    id: str
+    id: TenantId
     name: str
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -37,7 +42,7 @@ class User(BaseModel):
 
 
 class Membership(BaseModel):
-    tenant_id: str
+    tenant_id: TenantId
     user_id: str
     role: Role
 
@@ -46,7 +51,7 @@ class Principal(BaseModel):
     """The resolved caller of one request: who, in which tenant, with what role."""
 
     user_id: str
-    tenant_id: str
+    tenant_id: TenantId
     role: Role
     is_loopback: bool = False  # the local/dev X-API-Key owner (single-tenant local mode)
 
@@ -61,7 +66,7 @@ LOCAL_PRINCIPAL = Principal(
 
 class AuditEntry(BaseModel):
     at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
-    tenant_id: str
+    tenant_id: TenantId
     user_id: str
     action: str  # e.g. "world.create", "review.decide", "world.delete"
     target: str = ""

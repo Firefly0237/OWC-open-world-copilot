@@ -19,9 +19,18 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 from ..content.models import ContentBundle, Entity, EntityType, Origin, Relation, ReviewStatus
+from ..inspiration.grounding import (
+    build_reference_report,
+    inspiration_prompt_section,
+    inspiration_refs_metadata,
+    retrieve_drafting_references,
+)
+from ..inspiration.report import ReferenceReportItem
+from ..inspiration.retrieval import ReferenceContextBuilder
 from ..llm.gateway import LLMGateway
 from ..llm.jsonio import extract_json_object
 from ..retrieval.context_pack import ContextPackBuilder
+from ..retrieval.models import ContextPack
 from ..util import slugify
 from .critic import CHARACTER_CRITIQUE_MARKER, CharacterCritic
 from .industry import CHARACTER_RUBRIC_SOURCES, industry_source_block
@@ -87,6 +96,9 @@ class CharacterBrief(BaseModel):
     voice_hints: list[str] = Field(default_factory=list)
     relationship_hints: list[str] = Field(default_factory=list)
     notes: str = ""
+    # 是否让这次人设从灵感库取参考（N4.2）。默认关：写人设的常态是只依据已审过的正典；开了之后素材
+    # 走 prompt 里独立的一段，产物记 inspiration_refs 并附泄漏重算结论。
+    use_references: bool = False
 
     @field_validator("personality_hints", "voice_hints", "relationship_hints", mode="before")
     @classmethod
@@ -105,6 +117,9 @@ class CharacterDraft(BaseModel):
     relations: list[Relation] = Field(default_factory=list)
     profile: dict[str, str] = Field(default_factory=dict)
     suggested_relations: list[str] = Field(default_factory=list)
+    # 灵感库那一侧的溯源（素材开关关掉时恒为空）：用到的素材 + 每条素材的确定性泄漏重算结论。
+    inspiration_refs: list[str] = Field(default_factory=list)
+    reference_report: list[ReferenceReportItem] = Field(default_factory=list)
     refine_trail: list[RefineStep] = Field(default_factory=list)
     auto_review_incomplete: bool = False
 
@@ -155,10 +170,14 @@ class CharacterProfileService:
         critic: CharacterCritic | None = None,
         max_refine_rounds: int = 0,
         lessons: list[dict] | None = None,  # cross-session lesson archive (get_lessons_for_type)
+        # 灵感库检索器（N4.2）。同 worldgen 的分工：检索器是装配期基础设施，"这次吃不吃素材"由
+        # ``CharacterBrief.use_references`` 决定（默认关）。None = 调用方还没接素材。
+        reference_context_builder: ReferenceContextBuilder | None = None,
     ) -> None:
         self.gateway = gateway
         self.bundle = bundle
         self.context_builder = context_builder
+        self.reference_context_builder = reference_context_builder
         # Opt-in critique→refine loop: without a critic the service is the original single shot.
         self.critic = critic
         self.max_refine_rounds = max_refine_rounds if critic is not None else 0
@@ -180,10 +199,16 @@ class CharacterProfileService:
             if part.strip()
         )
         pack = self.context_builder.build(query, budget_tokens=budget_tokens, limit=8)
+        inspiration_pack = retrieve_drafting_references(
+            self.reference_context_builder,
+            query,
+            enabled=brief.use_references,
+            budget_tokens=budget_tokens,
+        )
         context_lines = [f"- [{hit.ref}] {hit.title}: {hit.body}".strip() for hit in pack.hits]
-        draft = self._draft(brief, context_lines)
+        draft = self._draft(brief, context_lines, inspiration_pack)
         if self.critic is None:
-            return draft
+            return self._with_reference_lineage(draft, brief, inspiration_pack)
 
         def assess(d: CharacterDraft) -> tuple[list[str], Any]:
             assert self.critic is not None
@@ -206,7 +231,9 @@ class CharacterProfileService:
             initial=draft,
             max_rounds=self.max_refine_rounds,
             assess=assess,
-            regenerate=lambda d, fixes: self._draft(brief, context_lines, prior=d, feedback=fixes),
+            regenerate=lambda d, fixes: self._draft(
+                brief, context_lines, inspiration_pack, prior=d, feedback=fixes
+            ),
         )
         final = outcome.artifact
         if outcome.trail:
@@ -215,12 +242,35 @@ class CharacterProfileService:
             final.entity.metadata["auto_review_incomplete"] = True
         final.refine_trail = outcome.trail
         final.auto_review_incomplete = outcome.auto_review_incomplete
-        return final
+        return self._with_reference_lineage(final, brief, inspiration_pack)
+
+    def _with_reference_lineage(
+        self, draft: CharacterDraft, brief: CharacterBrief, inspiration_pack: ContextPack
+    ) -> CharacterDraft:
+        """Attach the 溯源 side of the draft: which material was used, and was any of it copied.
+
+        素材开关关掉时 pack 是空的，两个字段都是空 list，产物与接线之前一致。"""
+        draft.inspiration_refs = inspiration_pack.refs
+        draft.reference_report = build_reference_report(
+            inspiration_pack,
+            # 只查这一份人设：既有正典是豁免面（沿用世界里已有的名字是接地，不是照搬）。
+            draft=ContentBundle(entities={draft.entity.id: draft.entity}),
+            canon=self.bundle,
+            human_input=_brief_user_message(brief),
+            used_for="人设草稿的灵感参考",
+            # 人设的主体文字（背景故事/性格/说话方式…）住在 metadata["profile"] 里，不显式交进来
+            # 就只有一句 summary 会被查——那样"查过了"这句话就不成立了。
+            extra_prose=list(draft.profile.values()),
+        )
+        return draft
 
     def revise(
         self, prior: CharacterDraft, feedback: str, *, budget_tokens: int = 1200
     ) -> CharacterDraft:
-        """Regenerate the sheet to address reviewer feedback; the stored brief grounds retrieval."""
+        """Regenerate the sheet to address reviewer feedback; the stored brief grounds retrieval.
+
+        素材不参与修订（与任务草稿的 ``revise`` 同一取舍）：修订是照人的意见改这一版，再塞一遍参考
+        素材只会冲淡评审意见；原稿的 ``inspiration_refs`` 还在 metadata 里，溯源不丢。"""
         brief_data = dict(prior.entity.metadata.get("character_brief") or {})
         brief_data.setdefault("name", prior.entity.name)
         brief_data.setdefault("concept", prior.entity.description or prior.entity.name)
@@ -238,7 +288,13 @@ class CharacterProfileService:
         )
         pack = self.context_builder.build(query, budget_tokens=budget_tokens, limit=8)
         context_lines = [f"- [{hit.ref}] {hit.title}: {hit.body}".strip() for hit in pack.hits]
-        revised = self._draft(brief, context_lines, prior=prior, feedback=[feedback.strip()])
+        revised = self._draft(
+            brief,
+            context_lines,
+            ContextPack(query=query, budget_tokens=budget_tokens),
+            prior=prior,
+            feedback=[feedback.strip()],
+        )
         revised.entity.metadata["revised_from_feedback"] = True
         return revised
 
@@ -246,6 +302,7 @@ class CharacterProfileService:
         self,
         brief: CharacterBrief,
         context_lines: list[str],
+        inspiration_pack: ContextPack,
         *,
         prior: CharacterDraft | None = None,
         feedback: list[str] | None = None,
@@ -263,12 +320,17 @@ class CharacterProfileService:
             system=_SYSTEM_PROMPT
             + lesson_section
             + "\n\nWorld facts context:\n"
-            + ("\n".join(context_lines) if context_lines else "(none)"),
+            + ("\n".join(context_lines) if context_lines else "(none)")
+            # 素材是接在世界事实之后的**独立一段**，两者绝不混进同一个 context 列表。没有素材时是
+            # 空串 → 系统提示词与接线之前逐字节一致。
+            + inspiration_prompt_section(inspiration_pack),
             user=_brief_user_message(brief, prior=prior, feedback=feedback),
         )
-        return self._draft_from_payload(_parse_payload(raw), brief)
+        return self._draft_from_payload(_parse_payload(raw), brief, inspiration_pack)
 
-    def _draft_from_payload(self, payload: dict[str, Any], brief: CharacterBrief) -> CharacterDraft:
+    def _draft_from_payload(
+        self, payload: dict[str, Any], brief: CharacterBrief, inspiration_pack: ContextPack
+    ) -> CharacterDraft:
         name = str(payload.get("name") or brief.name).strip() or brief.name
         summary = str(payload.get("summary") or brief.concept).strip()
         profile = {
@@ -319,6 +381,8 @@ class CharacterProfileService:
             metadata={
                 "profile": profile,
                 "character_brief": brief.model_dump(mode="json", exclude_defaults=True),
+                # 空 dict when no material was recalled → metadata 与接线之前一致。
+                **inspiration_refs_metadata(inspiration_pack),
                 **({"suggested_relations": suggestions} if suggestions else {}),
             },
             origin=Origin.AI_DRAFT,
