@@ -18,7 +18,7 @@ from owcopilot.app.actions.workflow import create_task_action, open_workflow_sto
 from owcopilot.content.hash import content_hash
 from owcopilot.content.models import ContentBundle, Quest, QuestStage
 from owcopilot.content.store import ContentStore
-from owcopilot.workflow.intent_application import apply_intent_review
+from owcopilot.workflow.intent_application import apply_intent_review, preview_intent_application
 from owcopilot.workflow.models import Artifact, TaskInput
 
 
@@ -136,3 +136,93 @@ def test_outside_artifact_changes_are_not_silently_lost_or_published(tmp_path):
         )
     assert store.get_task(task.id).revision == 1
     assert len(store.artifacts(task.id)) == 1
+
+
+def test_application_preview_is_read_only_stable_and_matches_actual_projection(tmp_path):
+    root, store, task, baseline, review, decision = prepared(tmp_path)
+    with store.connection() as db:
+        before = list(db.iterdump())
+    kwargs = {
+        "expected_review_hash": review["review_hash"],
+        "continuation": {"reading_path": "/quest/objective"},
+    }
+    preview = preview_intent_application(root, "p", review["id"], **kwargs)
+    assert preview == preview_intent_application(root, "p", review["id"], **kwargs)
+    with store.connection() as db:
+        assert list(db.iterdump()) == before
+    assert preview["writes_draft"] is False and preview["writes_canon"] is False
+    assert preview["impact"]["target"]["artifact_id"] is None
+    assert preview["impact"]["changes"] == [
+        {
+            "path": "/quest/objective",
+            "before_exists": True,
+            "after_exists": True,
+            "before": "Before",
+            "after": "After",
+        }
+    ]
+    assert preview["impact"]["reading"]["current_text_will_change"] is True
+    assert preview["impact"]["references"]["cross_source_semantics"] == "unknown"
+    applied = apply_intent_review(
+        root,
+        "p",
+        review["id"],
+        expected_decision_hash=decision["decision_hash"],
+        expected_preview_hash=preview["preview_hash"],
+        **kwargs,
+    )
+    assert applied["artifact_hash"] == preview["candidate_artifact_hash"]
+    assert applied["impact"]["changes"] == preview["impact"]["changes"]
+    with pytest.raises(ValueError, match="过期"):
+        preview_intent_application(root, "p", review["id"], **kwargs)
+
+
+def test_preview_does_not_authorize_apply_and_changed_context_requires_recheck(tmp_path):
+    root, store, task, _, review, decision = prepared(tmp_path)
+    preview = preview_intent_application(
+        root,
+        "p",
+        review["id"],
+        expected_review_hash=review["review_hash"],
+        continuation={"reading_path": "/quest/objective"},
+    )
+    with pytest.raises(ValueError, match="修改影响或继续位置已变化"):
+        apply_intent_review(
+            root,
+            "p",
+            review["id"],
+            expected_review_hash=review["review_hash"],
+            expected_decision_hash=decision["decision_hash"],
+            expected_preview_hash=preview["preview_hash"],
+            continuation={"reading_path": "/quest/title"},
+        )
+    assert store.get_task(task.id).revision == 1 and len(store.artifacts(task.id)) == 1
+    with store.connection() as db:
+        db.execute("DELETE FROM creative_intent_decisions WHERE review_id=?", (review["id"],))
+    preview_intent_application(root, "p", review["id"], expected_review_hash=review["review_hash"])
+    with pytest.raises(ValueError, match="明确选择"):
+        apply_intent_review(
+            root,
+            "p",
+            review["id"],
+            expected_review_hash=review["review_hash"],
+            expected_decision_hash=decision["decision_hash"],
+        )
+
+
+def test_preview_uses_current_source_guards_and_rejects_unpublishable_candidate(tmp_path):
+    root, store, _, _, review, _ = prepared(tmp_path)
+    with pytest.raises(ValueError, match="hash已改变"):
+        preview_intent_application(root, "p", review["id"], expected_review_hash="0" * 64)
+    bundle = ContentStore(root).load()
+    bundle.quests["q"].title = "Changed source"
+    ContentStore(root).save(bundle)
+    with pytest.raises(ValueError, match="项目基线已改变"):
+        preview_intent_application(
+            root, "p", review["id"], expected_review_hash=review["review_hash"]
+        )
+    root2, _, _, _, review2, _ = prepared(tmp_path / "other", other_field=True)
+    with pytest.raises(ValueError, match="not_publishable"):
+        preview_intent_application(
+            root2, "p", review2["id"], expected_review_hash=review2["review_hash"]
+        )

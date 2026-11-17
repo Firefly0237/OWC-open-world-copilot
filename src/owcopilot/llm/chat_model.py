@@ -178,15 +178,34 @@ def build_chat_model(
             raise ModuleNotFoundError(
                 f"langchain-openai is not installed; {_LIVE_INSTALL_HINT}"
             ) from exc
-        return ChatOpenAI(
+        chat_type = ChatOpenAI
+        if (urlparse(base_url or "").hostname or "").lower() == "api.deepseek.com":
+
+            class OfficialDeepSeekChatOpenAI(ChatOpenAI):
+                """Keep the selected SDK while using this endpoint's output-cap field."""
+
+                def _get_request_payload(
+                    self,
+                    input_: LanguageModelInput,
+                    *,
+                    stop: list[str] | None = None,
+                    **kwargs: Any,
+                ) -> dict:
+                    payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+                    if "max_completion_tokens" in payload:
+                        payload["max_tokens"] = payload.pop("max_completion_tokens")
+                    return payload
+
+            chat_type = OfficialDeepSeekChatOpenAI
+        return chat_type(
             model=model,
             base_url=base_url,
             api_key=SecretStr(api_key) if api_key else None,
             temperature=temperature,
             max_retries=max_retries,
             timeout=timeout,
-            # ChatOpenAI's output-cap field is aliased to the current API parameter name
-            # (it sends `max_completion_tokens`; the old `max_tokens` is deprecated there).
+            # ChatOpenAI owns its field alias; the official DeepSeek endpoint above
+            # translates only the final wire payload back to max_tokens.
             max_completion_tokens=max_tokens,
         )
     try:

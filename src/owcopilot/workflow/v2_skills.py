@@ -151,7 +151,9 @@ def assert_skill_admission(
 ):
     current = store.get_task(task.id)
     if (current.project, current.revision, current.base_hash) != (
-        task.project, task.revision, task.base_hash
+        task.project,
+        task.revision,
+        task.base_hash,
     ):
         raise ValueError("流程准入所用任务版本已过期")
     skills = NarrativeEvolutionStore(store)
@@ -168,8 +170,12 @@ def assert_skill_admission(
         from .method_trial_scope_v2 import validate_trial_scope
 
         permit = validate_trial_scope(
-            store, task, version["id"], trial_scope_id,
-            expected_trial_scope_hash, machine_requirements or {},
+            store,
+            task,
+            version["id"],
+            trial_scope_id,
+            expected_trial_scope_hash,
+            machine_requirements or {},
         )
         if permit["allowed_versions"][version["id"]] != version["version_hash"]:
             raise ValueError("候选版本与试用许可不一致")
@@ -222,22 +228,47 @@ def prepare_skill_run(
     narrative_transition_id=None,
     trial_scope_id=None,
     expected_trial_scope_hash=None,
+    asset=None,
+    selection_decision_id=None,
+    adaptation=None,
+    skill_card_selections=None,
+    apply_project_skills=True,
+    summarize_skill=False,
 ):
     from .v2_service import prepare_v2_run
 
     admission = assert_skill_admission(
-        store, task, skill_version_id, machine_requirements=machine_requirements,
-        trial_scope_id=trial_scope_id, expected_trial_scope_hash=expected_trial_scope_hash,
+        store,
+        task,
+        skill_version_id,
+        machine_requirements=machine_requirements,
+        trial_scope_id=trial_scope_id,
+        expected_trial_scope_hash=expected_trial_scope_hash,
     )
     version = admission["version"]
+    graph = version["graph"]
+    asset_binding = None
+    entries = version["entries"]
+    if asset is not None:
+        from .method_assets import bind_asset
+
+        if plan_guidance:
+            raise ValueError("片段组合后的指导修改须使用明确的阶段修订")
+        composed, asset_binding = bind_asset(version, asset, adaptation)
+        graph = composed.model_dump(mode="json")
+        operations = {
+            node.operation for node in composed.nodes if node.parameters.get("asset_binding")
+        }
+        if asset_binding["asset"]["kind"] != "graph":
+            entries = [entry for entry in entries if entry.get("operation") in operations]
     return prepare_v2_run(
         store,
         root,
         task,
-        version["graph"],
+        graph,
         prior_run_id=prior_run_id,
         skill_version_id=version["id"],
-        guidance_entries=version["entries"],
+        guidance_entries=entries,
         plan_guidance=plan_guidance,
         skill_authorization=admission["authorization"],
         machine_requirements=machine_requirements,
@@ -248,6 +279,11 @@ def prepare_skill_run(
         narrative_transition_id=narrative_transition_id,
         method_trial_scope_id=admission["trial_scope_id"],
         method_trial_scope_hash=admission["trial_scope_hash"],
+        asset_binding=asset_binding,
+        selection_decision_id=selection_decision_id,
+        skill_card_selections=skill_card_selections,
+        apply_project_skills=apply_project_skills,
+        summarize_skill=summarize_skill,
     )
 
 
@@ -286,6 +322,16 @@ def check_run_authorization(store, project, run):
         raise ValueError("默认流程缺少对应的作者采用与版本来源，需重新选择流程")
     if family["disabled"] or state["author_acceptance"] == "rejected":
         raise ValueError("技能已停用或被明确拒绝，停止后续派发与发布")
+    if run.get("asset_binding"):
+        from .method_assets import bind_asset
+
+        _, binding = bind_asset(
+            version,
+            run["asset_binding"]["asset"],
+            run["asset_binding"].get("adaptation", {}).get("kind"),
+        )
+        if binding != run["asset_binding"]:
+            raise ValueError("片段来源、合同或绑定记录已变化")
     if selected.get("selection") == "trial" and state["trial_status"] == "unlicensed":
         raise ValueError("本次方法试用许可已撤销")
 
@@ -415,6 +461,8 @@ def evolve_family(
     source_kind="author_feedback",
     embedder=None,
     attempt_reason=None,
+    feedback_kind=None,
+    feedback_event_id=None,
 ):
     from .v2_method_runtime import evolve_family as run_method_episode
 
@@ -430,6 +478,8 @@ def evolve_family(
         source_kind=source_kind,
         embedder=embedder,
         attempt_reason=attempt_reason,
+        feedback_kind=feedback_kind,
+        feedback_event_id=feedback_event_id,
     )
 
 
@@ -613,7 +663,17 @@ def prepare_auto_run(
     narrative_transition_id=None,
     provider=None,
     emit=None,
+    decision_policy=None,
+    decision_budget=None,
+    skill_card_selections=None,
+    apply_project_skills=True,
+    summarize_skill=False,
 ):
+    import os
+
+    from .budget_policy import BudgetExhaustedError, active_policy
+    from .execution_records import DecisionReceipt, ExecutionRecords, SourceAxes
+    from .method_selection import JointRulePolicy, enumerate_actions, observed_role_costs
     from .v2_service import narrative_generation_context, prepare_v2_run
 
     if plan_guidance:
@@ -627,16 +687,91 @@ def prepare_auto_run(
         requirements=requirements,
         confirmed_requirement_keys=set(requirements),
         include_trials=False,
+        limit=3,
     )
-    selected = next(
-        (row for row in matches if row["eligible_to_execute"] and row["score"] > 0), None
+    policy = decision_policy or JointRulePolicy()
+    model = (
+        getattr(provider, "model", None)
+        or task.request.model
+        or os.getenv("OWCOPILOT_CHEAP_MODEL")
+        or "deepseek-v4-flash"
     )
-    if selected:
+    stats = observed_role_costs(store, task.project, model)
+    actions = enumerate_actions(matches, machine_requirements, stats)
+    with store.connection() as db:
+        dispatch_policy = active_policy(db)["policy"]
+    budget = {
+        "remaining_dispatches": dispatch_policy["max_run_dispatches"],
+        "remaining_tokens": None,
+        "basis": "dispatch_grant_not_monetary_budget",
+        **(decision_budget or {}),
+    }
+    observation = {
+        "task_id": task.id,
+        "revision": task.revision,
+        "request_hash": content_hash(task.request),
+        "base_hash": task.base_hash,
+        "machine_requirements": machine_requirements or {},
+        "protected": task.request.protected,
+        "role_cost_observations": stats,
+        "retrieved_versions": [
+            {
+                "version_id": row["version_id"],
+                "version_hash": row["version"]["version_hash"],
+                "assessment": row["assessment"],
+                "score": row["score"],
+            }
+            for row in matches
+        ],
+        "pool_boundary": {
+            "retrieval_limit": 3,
+            "asset_limit": 3,
+            "selection": "top_match_per_grain",
+            "admission": "typed_store_gate_before_retrieval",
+            "active_paid_probes": False,
+        },
+    }
+    selected = policy.select(observation, actions, budget)
+    if selected is None:
+        reason = "没有满足当前约束和预算的工作方法"
+    elif selected.mode == "fresh":
+        reason = (
+            "现有方法的适用或成本依据不足，为本次要求重新规划"
+            if selected.estimated_tokens is None
+            else "本次重新规划的预计开销更合适"
+        )
+    elif selected.mode == "adapt":
+        reason = "保留已有方法，补齐本次所需的决策检查"
+    else:
+        reason = "在已采用的方法中选择适用且预计开销较低的组合"
+    receipt = ExecutionRecords(store).append_decision(
+        DecisionReceipt(
+            project=task.project,
+            task_id=task.id,
+            task_revision=task.revision,
+            input_hash=content_hash(task.request),
+            policy_id=policy.id,
+            policy_version=policy.version,
+            observation=observation,
+            candidates=[a.receipt() for a in actions],
+            selected_action_id=selected.id if selected else None,
+            reason=reason,
+            budget=budget,
+            source=SourceAxes(
+                task_origin=task.origin_kind,
+                actor_origin="system",
+                collection_condition="normal_use",
+            ),
+        )
+    )
+    if selected is None:
+        raise BudgetExhaustedError(reason)
+    if selected.mode != "fresh":
         return prepare_skill_run(
             store,
             root,
             task,
-            selected["version_id"],
+            selected.asset["source_version_id"],
             prior_run_id=prior_run_id,
             machine_requirements=machine_requirements,
             collaboration_policy=collaboration_policy,
@@ -644,6 +779,12 @@ def prepare_auto_run(
             narrative_scene_id=narrative_scene_id,
             narrative_preview_id=narrative_preview_id,
             narrative_transition_id=narrative_transition_id,
+            asset=selected.asset,
+            adaptation=selected.adaptation,
+            selection_decision_id=receipt["id"],
+            skill_card_selections=skill_card_selections,
+            apply_project_skills=apply_project_skills,
+            summarize_skill=summarize_skill,
         )
     # Automatic mode cannot silently use variant/factory after an invalid model plan.
     planned = plan_initial_graph(
@@ -662,6 +803,9 @@ def prepare_auto_run(
         ),
         provider=provider,
         emit=emit,
+        decision_id=receipt["id"],
+        skill_card_selections=skill_card_selections,
+        apply_project_skills=apply_project_skills,
     )
     return prepare_v2_run(
         store,
@@ -675,11 +819,25 @@ def prepare_auto_run(
         narrative_scene_id=narrative_scene_id,
         narrative_preview_id=narrative_preview_id,
         narrative_transition_id=narrative_transition_id,
+        selection_decision_id=receipt["id"],
+        skill_card_selections=skill_card_selections,
+        apply_project_skills=apply_project_skills,
+        summarize_skill=summarize_skill,
     )
 
 
 def plan_initial_graph(
-    store, root, task, *, requirements=None, narrative_context=None, provider=None, emit=None
+    store,
+    root,
+    task,
+    *,
+    requirements=None,
+    narrative_context=None,
+    provider=None,
+    emit=None,
+    decision_id=None,
+    skill_card_selections=None,
+    apply_project_skills=True,
 ):
     from .v2_planning import plan_initial_graph as run_planner
 
@@ -691,4 +849,7 @@ def plan_initial_graph(
         narrative_context=narrative_context,
         provider=provider,
         emit=emit,
+        decision_id=decision_id,
+        skill_card_selections=skill_card_selections,
+        apply_project_skills=apply_project_skills,
     )

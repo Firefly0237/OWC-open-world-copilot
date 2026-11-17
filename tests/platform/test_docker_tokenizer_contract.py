@@ -11,18 +11,10 @@ from scripts import prefetch_models
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize(
-    ("dockerfile", "cache_contract"),
-    (
-        ("Dockerfile", "COPY --from=builder --chown=10001:10001 /opt/huggingface"),
-        ("infra/team/Dockerfile", "chown -R appuser:appuser /opt/huggingface"),
-    ),
-)
-def test_runtime_images_ship_only_the_pinned_tokenizer(
-    dockerfile: str,
-    cache_contract: str,
-) -> None:
-    text = (REPOSITORY_ROOT / dockerfile).read_text(encoding="utf-8")
+def test_runtime_image_ships_pinned_readonly_tokenizer_for_nonroot_user() -> None:
+    """Check the image definition; actual non-root reads require a built-image smoke check."""
+    text = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    builder, runtime = text.split("FROM python:3.12-slim AS runtime", 1)
     install_lines = [line for line in text.splitlines() if "pip install" in line and ".[" in line]
     prefetch_lines = [
         line for line in text.splitlines() if "prefetch_models.py" in line and "COPY" not in line
@@ -37,11 +29,16 @@ def test_runtime_images_ship_only_the_pinned_tokenizer(
         for forbidden in ("--component all", "--component embedding", "--component reranker")
     )
     assert any("--offline" in line for line in prefetch_lines)
-    assert "HF_HOME=/opt/huggingface" in text
-    assert "HF_HUB_OFFLINE=1" in text
-    assert "TRANSFORMERS_OFFLINE=1" in text
-    assert "chmod -R a-w /opt/huggingface" in text
-    assert cache_contract in text
+    assert "HF_HOME=/opt/huggingface" in runtime
+    assert "HF_HUB_OFFLINE=1" in runtime
+    assert "TRANSFORMERS_OFFLINE=1" in runtime
+    assert "chmod -R a-w /opt/huggingface" in builder
+    # Copy preserves modes; a read-only shared cache does not need appuser ownership.
+    assert "COPY --from=builder /opt/huggingface /opt/huggingface" in runtime
+    assert "useradd --create-home --uid 10001 appuser" in runtime
+    assert [line for line in runtime.splitlines() if line.startswith("USER ")] == ["USER appuser"]
+    assert "chown -R 10001:10001 /app/var" in runtime
+    assert 'VOLUME ["/app/var"]' in runtime
 
 
 def test_tokenizer_prefetch_allowlist_excludes_model_weights(

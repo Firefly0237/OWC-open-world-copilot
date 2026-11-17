@@ -67,6 +67,12 @@ def provider_settings(provider: Any) -> dict[str, Any]:
         "max_output_tokens",
         "max_retries",
         "json_mode",
+        "temperature",
+        "top_p",
+        "top_k",
+        "seed",
+        "frequency_penalty",
+        "presence_penalty",
     ):
         value = getattr(provider, name, None)
         if isinstance(value, (str, int, float, bool)):
@@ -79,6 +85,28 @@ def provider_settings(provider: Any) -> dict[str, Any]:
             result["server_address"] = None
     # Defaults supplied only by the SDK remain unknown; do not invent sampling settings.
     result["sampling_settings"] = "not_captured_or_provider_default"
+    explicit = {
+        name: result[name]
+        for name in (
+            "temperature",
+            "top_p",
+            "top_k",
+            "seed",
+            "frequency_penalty",
+            "presence_penalty",
+        )
+        if name in result
+    }
+    if explicit:
+        result["sampling_settings"] = "explicit_fields_only_unspecified_defaults_unknown"
+    # A real-looking URL, SDK class name, or reported usage is not transport attestation.
+    result["execution_origin"] = (
+        "controlled_transport" if getattr(provider, "_injected_chat", False) else "unknown"
+    )
+    declared = getattr(provider, "execution_origin", None)
+    if declared in {"controlled_transport", "no_model"}:
+        result["execution_origin"] = declared
+    result["transport_attestation"] = "not_recorded"
     return result
 
 

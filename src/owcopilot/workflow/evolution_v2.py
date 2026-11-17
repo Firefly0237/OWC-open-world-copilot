@@ -223,6 +223,15 @@ class ReflectionReportV2(_Model):
     reusable_entries: list[ReusableEntry] = Field(default_factory=list, max_length=30)
     proposed_change: Literal["structure", "guidance", "mixed", "none"]
     risks: list[str] = Field(default_factory=list, max_length=20)
+    evidence_status: Literal["sufficient", "insufficient"] = "sufficient"
+
+    @model_validator(mode="after")
+    def unchanged_is_empty(self) -> Self:
+        if self.proposed_change == "none" and self.reusable_entries:
+            raise ValueError("无需变更的报告不能同时提出经验更新")
+        if self.evidence_status == "insufficient" and self.proposed_change != "none":
+            raise ValueError("证据不足不能提出方法修改")
+        return self
 
 
 class TypedEvolutionProposalV2(_Model):
@@ -293,6 +302,15 @@ class ReflectionDraftV3(_Model):
     reusable_entries: list[EntryTemplateIR] = Field(default_factory=list, max_length=30)
     proposed_change: Literal["structure", "guidance", "mixed", "none"]
     risks: list[str] = Field(default_factory=list, max_length=20)
+    evidence_status: Literal["sufficient", "insufficient"] = "sufficient"
+
+    @model_validator(mode="after")
+    def unchanged_is_empty(self) -> Self:
+        if self.proposed_change == "none" and self.reusable_entries:
+            raise ValueError("无需变更的报告不能同时提出经验更新")
+        if self.evidence_status == "insufficient" and self.proposed_change != "none":
+            raise ValueError("证据不足不能提出方法修改")
+        return self
 
 
 class TypedEvolutionDraftV3(_Model):
@@ -603,13 +621,25 @@ def compare_production_runs(
         contexts = [value for value in contexts if value is not None]
         if not contexts or any(value != contexts[0] for value in contexts):
             return None
+        configurations = {}
+        for row in requests:
+            request = row.get("request", {})
+            role = request.get("role_id")
+            config = request.get("config")
+            if not role or not isinstance(config, dict) or not config:
+                return None
+            configurations.setdefault(role, {})[content_hash(config)] = config
+        providers = {
+            role: [configs[key] for key in sorted(configs)]
+            for role, configs in sorted(configurations.items())
+        }
         return content_hash(
             {
                 "task": contexts[0],
                 "references": run["references"],
                 "requirements": (run.get("requirements") or {}).get("machine"),
                 "contracts": run.get("host_contract_identity"),
-                "provider": [row.get("request", {}).get("config") for row in requests[:1]],
+                "provider": providers,
             }
         )
 

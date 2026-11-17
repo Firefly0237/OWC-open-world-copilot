@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, useId } from "vue";
-import { CREATOR_OPERATIONS, type CollaborationPolicy } from "../storyCreatorApi";
+import { CREATOR_OPERATIONS, SYSTEM_CREATOR_CHECKS, type CollaborationPolicy } from "../storyCreatorApi";
 
 const props = defineProps<{
   modelValue: CollaborationPolicy;
@@ -11,7 +11,7 @@ const emit = defineEmits<{ "update:modelValue": [value: CollaborationPolicy] }>(
 const id = useId();
 const operationIds = [
   "plan_events", "draft_quest", "draft_logic", "logic_contract", "draft_dialogue",
-  "dialogue_constrained", "bind_dialogue", "coverage_audit", "validate_decisions",
+  "dialogue_constrained", "bind_dialogue",
 ];
 const registered = new Set(operationIds);
 const visibleOperations = computed(() => {
@@ -49,14 +49,15 @@ function toggleReview(operation: string, event: Event): void {
   if (props.disabled || !registered.has(operation) || !allowed(operation) || modeReview(operation)) return;
   const selected = new Set(props.modelValue.review_operations ?? []);
   if ((event.target as HTMLInputElement).checked) selected.add(operation); else selected.delete(operation);
-  emit("update:modelValue", { ...props.modelValue, review_operations: [...selected].sort() });
+  emit("update:modelValue", { ...props.modelValue,
+    review_operations: [...selected].filter(item => !SYSTEM_CREATOR_CHECKS.has(item)).sort() });
 }
 </script>
 
 <template>
   <details class="stage-settings">
     <summary>制作步骤设置</summary>
-    <p :id="`${id}-scope`" class="hint">只约束下面列出的制作步骤；已有参与方式的确认点继续保留</p>
+    <p :id="`${id}-scope`" class="hint">选择AI可参与的创作步骤与确认时机。技术检查由系统执行。</p>
     <div v-if="visibleOperations.length" class="operation-list" :aria-describedby="`${id}-scope`">
       <fieldset v-for="item in visibleOperations" :key="item.operation" :disabled="disabled" class="operation-row">
         <legend>{{ item.label }}</legend>

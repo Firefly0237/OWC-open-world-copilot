@@ -48,7 +48,7 @@ def _episode_with_attempt(episode, state):
     latest = state.get("latest") or {}
     if latest.get("status") in {"completed", "completed_failed"}:
         evidence = (latest.get("events") or [{}])[-1].get("evidence", {})
-        if evidence.get("status") in {"candidate", "failed"}:
+        if evidence.get("status") in {"candidate", "failed", "no_change", "insufficient_evidence"}:
             result = evidence
     return {
         **episode,
@@ -241,6 +241,17 @@ def _curate(
         )
         old[entry.id] = guidance
     graph = install_entry_templates(graph, list(updated.values()), retired)
+    conditions = proposal.conditions or parent["conditions"]
+    description = (
+        proposal.description if proposal.description is not None else parent["description"]
+    )
+    if (
+        content_hash(graph) == content_hash(parent["graph"])
+        and content_hash(list(old.values())) == content_hash(parent["entries"])
+        and content_hash(conditions) == content_hash(parent["conditions"])
+        and description == parent["description"]
+    ):
+        return None
     return skills.add_version(
         project,
         parent["family_id"],
@@ -277,19 +288,15 @@ def evolve_family(
     source_kind="author_feedback",
     embedder=None,
     attempt_reason=None,
+    feedback_kind=None,
+    feedback_event_id=None,
 ):
     from .budget_policy import BudgetLedger
+    from .feedback_routing import route_feedback
     from .v2_service import _check_references, _json, v2_detail
     from .v2_skills import NarrativeEvolutionStore
 
     source = v2_detail(store, project, source_run_id)
-    if source.get("collaboration", {}).get("policy", {}).get("allow_read_tools") is False:
-        HarnessStore(store).append(
-            source_run_id,
-            "evolution/admission_rejected",
-            {"reason": "author_policy_disallows_read_tools", "model_dispatches": 0},
-        )
-        raise ValueError("当前作者策略未允许读取工具，停止演化且不派发模型")
     task = store.get_task(source["task_id"])
     skills = NarrativeEvolutionStore(store)
     parent_id = source.get("skill_version_id") or (source.get("saved_skill") or {}).get(
@@ -301,11 +308,30 @@ def evolve_family(
         raise ValueError("源运行没有采用或创建该技能家族")
     parent = skills.get_version(project, parent_id)
     family = skills.get_family(project, family_id)
-    outcomes = (source.get("result") or {}).get("outcomes", {})
-    errors = " ".join(str(row.get("error", "")) for row in outcomes.values()).lower()
-    operational = any(
-        token in errors for token in ("connection", "timeout", "401", "429", "apierror", "network")
+    route = route_feedback(
+        store, project, family_id, source, text, source_kind=source_kind,
+        feedback_kind=feedback_kind, feedback_event_id=feedback_event_id,
     )
+    if not route["method_eligible"]:
+        return {
+            "status": "operational_failure_recorded" if route["kind"] == "provider_failure"
+            else "feedback_routed", "feedback_route": route, "candidate": None,
+            "result": {
+                "status": "insufficient_evidence" if route["kind"] == "unclassified"
+                else "repair_required" if route["kind"] == "technical_failure"
+                else "no_change",
+                "candidate_version_id": None, "evidence": {"feedback_route_id": route["id"]},
+            },
+            "new_proposal_dispatched": False,
+        }
+    if source.get("collaboration", {}).get("policy", {}).get("allow_read_tools") is False:
+        HarnessStore(store).append(
+            source_run_id,
+            "evolution/admission_rejected",
+            {"reason": "author_policy_disallows_read_tools", "model_dispatches": 0},
+        )
+        raise ValueError("当前作者策略未允许读取工具，停止演化且不派发模型")
+    outcomes = (source.get("result") or {}).get("outcomes", {})
     requirements = (source.get("requirements") or {}).get("machine") or {}
     snapshot = {
         "run_id": source_run_id,
@@ -319,6 +345,7 @@ def evolve_family(
         "feedback_origin": source_kind,
         "entities": task.base_bundle.get("entities", {}),
         "machine_requirements": requirements,
+        "feedback_route_id": route["id"],
     }
     source_ref = SourceRef(
         kind="development_input"
@@ -332,9 +359,7 @@ def evolve_family(
     experience = skills.record_experience(
         project,
         family_id,
-        kind="provider_failure"
-        if operational
-        else "hypothesis"
+        kind="hypothesis"
         if source_kind == "development_input"
         else "author_feedback"
         if text.strip()
@@ -344,12 +369,6 @@ def evolve_family(
         problem_key="narrative-method",
         version_id=parent_id,
     )
-    if operational:
-        return {
-            "status": "operational_failure_recorded",
-            "experience": experience,
-            "candidate": None,
-        }
     episode = skills.begin_episode(
         project,
         family_id,
@@ -382,7 +401,7 @@ def evolve_family(
         ).fetchone()
     legacy_state = (
         "completed_failed"
-        if original_result and original_result["status"] != "candidate"
+        if original_result and original_result["status"] in {"failed", "blocked"}
         else "completed"
         if original_result
         else "claimed_unknown"
@@ -485,6 +504,8 @@ def evolve_family(
                         "operation必须单个注册角色名，跨角色通用经验用空字符串，不能斜杠拼接多个角色。"
                         "只引用给定SourceRef。实例实体／数量要求需要抽象时必须用binding片段，"
                         "区分支持与反例、观察与假设，不把开发输入称作者偏好。不要改作者原题。"
+                        "没有必要修改时proposed_change=none且reusable_entries为空；"
+                        "证据不足同时设置evidence_status=insufficient，不虚构改进。"
                     ),
                 },
                 {
@@ -558,6 +579,35 @@ def evolve_family(
             },
             node_id="method_reflector",
         )
+        if report.proposed_change == "none":
+            if cancelled():
+                raise ValueError("源任务、证据或许可已变化，不发布迟到的无需变更结论")
+            status = (
+                "insufficient_evidence" if report.evidence_status == "insufficient" else "no_change"
+            )
+            evidence = {
+                "reflection_hash": content_hash(report), "feedback_route_id": route["id"],
+                "candidate_execution": "not_performed", "author_acceptance": "unknown",
+                "curator_dispatched": False,
+            }
+            outcome = {"status": status, "candidate_version_id": None, "evidence": evidence}
+            if original_result is None:
+                skills.finish_episode(project, episode["id"], status=status, evidence=evidence)
+            ledger.finish_execution(attempt["id"], status="completed", evidence=outcome)
+            store.update_run(trace.id, status="completed")
+            result = skills.get_episode(project, episode["id"])
+            events.append(
+                trace.id, "evolution/result",
+                {"episode_id": episode["id"], "result": outcome,
+                 "original_result": result["result"], "execution_attempt_id": attempt["id"],
+                 "trial": "not_applicable"},
+            )
+            if emit:
+                emit("evolution/result", {"episode_id": episode["id"], "trace_run_id": trace.id})
+            return {
+                **result, "original_result": result["result"], "result": outcome,
+                "attempt_state": ledger.execution_state(operation_key), "trace_run_id": trace.id,
+            }
         combined = {row["id"]: GuidanceEntry.model_validate(row) for row in parent["entries"]}
         combined.update({entry.id: entry.guidance() for entry in report.reusable_entries})
         try:
@@ -664,8 +714,8 @@ def evolve_family(
             entry_compilation=entry_compilation,
         )
         outcome = {
-            "status": "candidate",
-            "candidate_version_id": candidate["id"],
+            "status": "candidate" if candidate is not None else "no_change",
+            "candidate_version_id": candidate["id"] if candidate is not None else None,
             "evidence": {
                 "candidate_execution": "not_performed",
                 "author_acceptance": "unknown",
@@ -679,8 +729,8 @@ def evolve_family(
             skills.finish_episode(
                 project,
                 episode["id"],
-                status="candidate",
-                candidate_version_id=candidate["id"],
+                status=outcome["status"],
+                candidate_version_id=outcome["candidate_version_id"],
                 evidence={
                     "candidate_execution": "not_performed",
                     "author_acceptance": "unknown",
