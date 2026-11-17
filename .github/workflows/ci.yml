@@ -2,12 +2,16 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: ["master"]
   pull_request:
   workflow_call:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   python:
@@ -62,6 +66,10 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
+      - name: Use the project npm version
+        run: |
+          npm install --global "$(node -p 'require("./apps/web/package.json").packageManager')" --registry=https://registry.npmjs.org
+          npm --version
       - name: Install frontend dependencies
         run: npm ci --prefix apps/web
       - name: Test interaction contracts

@@ -2,7 +2,8 @@
 FROM node:22-slim AS frontend
 WORKDIR /app/frontend
 COPY apps/web/package.json apps/web/package-lock.json ./
-RUN npm ci
+RUN npm install --global "$(node -p 'require("./package.json").packageManager')" --registry=https://registry.npmjs.org \
+ && npm ci
 COPY apps/web/ ./
 RUN npm run build
 
