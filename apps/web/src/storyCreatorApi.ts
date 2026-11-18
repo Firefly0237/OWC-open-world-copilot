@@ -134,6 +134,12 @@ export interface RequirementsReport {
   semantic_status?: string; author_satisfaction?: string; limitations?: string[];
 }
 export interface StoryRunState {
+  memory_mode?: "existing" | "routed";
+  memory_route?: { receipt_hash: string; cluster_id: string; backend: "trajectory" | "skill" | "strategy";
+    read_snapshot: { state_version: number; omitted_units: number; already_bound_skill_versions?: string[];
+      payload: { units?: unknown[]; skills?: unknown[]; messages?: unknown[]; lessons?: unknown[] } } } | null;
+  memory_update?: { status: string; state_version?: number; reason?: string;
+    learning_status?: string; lesson_count?: number; observation_kind?: string; formation_run_id?: string };
   run: EvolutionRunState["run"];
   skill_summary_job_id?: string | null;
   skill_summary_error?: string | null;
@@ -168,6 +174,7 @@ export interface StoryRunState {
   requirements_report?: RequirementsReport | Record<string, RequirementsReport> | null;
 }
 export interface ProductionInput {
+  memory_mode?: "existing" | "routed";
   selection: "planned" | "matching" | "template";
   variant: "baseline" | "constrained";
   skill_version_id?: string; prior_run_id?: string;

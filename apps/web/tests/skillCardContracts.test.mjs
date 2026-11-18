@@ -264,7 +264,7 @@ function production(produce) {
     task: ref({ id: "task", revision: 1 }), narrativeProjectId: ref(""), narrativeReady: ref(true),
     narrativeSceneId: ref(""), narrativePreviewId: ref(""), narrativeTransitionId: ref(""),
     selection: ref("planned"), variant: ref("constrained"), machine: () => ({}), policy: ref({ mode: "delegate" }),
-    applyProjectSkills: ref(false), autoSummarizeSkill: ref(true), skillSelections: ref([{ card_id: "card", version_id: "card-v1", version_hash: "version-card" }]),
+    applyProjectSkills: ref(false), autoSummarizeSkill: ref(true), memoryMode: ref("existing"), skillSelections: ref([{ card_id: "card", version_id: "card-v1", version_hash: "version-card" }]),
     chosenVersion: ref(null), selectedTrial: ref(null), run: ref(null), generation: 0, alive: true,
     api: { produce }, baselineRunId: ref(""), expectingRun: ref(false), jobId: ref(""), job: ref(null), notice: ref(""),
     sessionStorage: { setItem: () => {} }, jobCacheKey: () => "job-key", chooseRun: () => {}, poll: async () => {},
@@ -278,8 +278,18 @@ test("production sends explicit skill identities separately from defaults and co
   assert.equal(calls[0][1].selection, "planned");
   assert.equal(calls[0][1].apply_project_skills, false);
   assert.equal(calls[0][1].summarize_skill, true);
+  assert.equal(calls[0][1].memory_mode, "existing");
   assert.deepEqual(calls[0][1].skill_card_selections, [{ card_id: "card", version_id: "card-v1", version_hash: "version-card" }]);
   assert.deepEqual(state.skillSelections.value, []);
+});
+
+test("automatic experience selection preserves explicit skills in the real production request", async () => {
+  const calls = [];
+  const state = production(async (...args) => { calls.push(args); return { job_id: "job" }; });
+  state.memoryMode.value = "routed";
+  await state.startProduction();
+  assert.equal(calls[0][1].memory_mode, "routed");
+  assert.deepEqual(calls[0][1].skill_card_selections, [{ card_id: "card", version_id: "card-v1", version_hash: "version-card" }]);
 });
 
 test("a rejected production request preserves the explicit next-run choice for a deliberate retry", async () => {

@@ -22,6 +22,40 @@ function execute(names, env = {}) {
 const SYSTEM_CREATOR_CHECKS = new Set(["coverage_audit", "validate_decisions"]);
 const CREATOR_OPERATIONS = { draft_quest: "场景梗概", coverage_audit: "检查分支与条件", validate_decisions: "检查选择与后果" };
 const { turnState, modeText, usageStatus, usageSummary } = execute(["operationName", "turnState", "modeText", "usageStatus", "usageSummary"], { SYSTEM_CREATOR_CHECKS, CREATOR_OPERATIONS });
+const { memorySummary } = execute(["memorySummary"]);
+const { memoryLearningSummary } = execute(["memoryLearningSummary"]);
+
+test("memory display distinguishes actual content, cold starts, already-bound skills and omissions", () => {
+  assert.equal(memorySummary(null), "");
+  const run = { memory_route: { backend: "trajectory", read_snapshot: { payload: { units: [] }, omitted_units: 0 } } };
+  assert.equal(memorySummary(run), "本轮没有带入历史内容");
+  run.memory_route.read_snapshot.payload.units.push({});
+  run.memory_route.read_snapshot.omitted_units = 2;
+  assert.equal(memorySummary(run), "带入 1 项历史记录；2 项未带入");
+  run.memory_route.backend = "skill";
+  run.memory_route.read_snapshot.payload = { skills: [] };
+  run.memory_route.read_snapshot.already_bound_skill_versions = ["version-1"];
+  assert.match(memorySummary(run), /已由本次选用提供/);
+  run.memory_route.backend = "trajectory";
+  run.memory_route.read_snapshot.already_bound_skill_versions = [];
+  run.memory_route.read_snapshot.omitted_units = 0;
+  run.memory_route.read_snapshot.payload = { messages: [{}, {}] };
+  assert.equal(memorySummary(run), "带入 2 项历史消息");
+  run.memory_route.backend = "strategy";
+  run.memory_route.read_snapshot.payload = { lessons: [{}] };
+  assert.equal(memorySummary(run), "带入 1 项参考做法");
+});
+
+test("memory formation does not claim adoption or hide maintenance failure", () => {
+  const run = { memory_route: { backend: "strategy" }, memory_update: { status: "recorded", learning_status: "completed", lesson_count: 2 } };
+  assert.equal(memoryLearningSummary(run), "已整理 2 条参考做法");
+  run.memory_update.learning_status = "unknown";
+  assert.equal(memoryLearningSummary(run), "经验整理结果待核对");
+  run.memory_update.learning_status = "failed";
+  assert.match(memoryLearningSummary(run), /未完成.*草稿保留/);
+  run.memory_update.status = "not_recorded";
+  assert.equal(memoryLearningSummary(run), "");
+});
 const runRecord = (status = "running") => ({
   run: { id: "run", revision: 2, status },
   collaboration: { policy: { mode: "edit", plan_review: true, key_step_review: true }, pending_gate: null },

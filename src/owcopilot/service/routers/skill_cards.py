@@ -137,6 +137,9 @@ def submit_summary(
 
 def schedule_run_summary(request, project, store, root, result):
     """A separate background job never holds up or changes the finished story."""
+    from ...workflow.v2_service import finalize_memory_run
+
+    result = finalize_memory_run(store, root, project, result)
     if result["run"]["status"] not in {
         "completed",
         "completed_with_skips",

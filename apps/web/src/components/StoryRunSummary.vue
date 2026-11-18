@@ -67,6 +67,29 @@ function modeText(run: StoryRunState | null): string {
 function usageStatus(value: SkillUsageStatus): string {
   return ({ bound: "已配置", dispatched: "已带入调用", response_received: "收到回应", unknown: "记录待核对" })[value] ?? "记录待核对";
 }
+function memorySummary(run: StoryRunState | null): string {
+  const route = run?.memory_route;
+  if (!route) return "";
+  const snapshot = route.read_snapshot;
+  const count = route.backend === "trajectory"
+    ? snapshot.payload.messages?.length ?? snapshot.payload.units?.length ?? 0
+    : route.backend === "strategy" ? snapshot.payload.lessons?.length ?? 0 : snapshot.payload.skills?.length ?? 0;
+  const bound = snapshot.already_bound_skill_versions?.length ?? 0;
+  const label = route.backend === "trajectory" ? snapshot.payload.messages ? "历史消息" : "历史记录"
+    : route.backend === "strategy" ? "参考做法" : "Skill";
+  const text = count ? `带入 ${count} 项${label}` : bound ? "相关 Skill 已由本次选用提供" : "本轮没有带入历史内容";
+  return text + (snapshot.omitted_units ? `；${snapshot.omitted_units} 项未带入` : "");
+}
+function memoryLearningSummary(run: StoryRunState | null): string {
+  const update = run?.memory_update;
+  if (!update || run?.memory_route?.backend !== "strategy" || update.status === "not_recorded") return "";
+  if (update.learning_status === "unknown") return "经验整理结果待核对";
+  if (update.learning_status === "failed") return "经验整理未完成，已有草稿保留";
+  if (update.learning_status === "no_change") return "本轮未新增参考做法";
+  if (update.learning_status === "completed") return update.lesson_count
+    ? `已整理 ${update.lesson_count} 条参考做法` : "本轮未新增参考做法";
+  return "";
+}
 function usageSummary(skill: RunSkillUsage["skills"][number]): string {
   if (skill.version == null || !skill.steps.length) return "版本记录待核对";
   const supplied = skill.steps.filter(step => ["dispatched", "response_received"].includes(step.status)).length;
@@ -128,6 +151,9 @@ onBeforeUnmount(() => { alive = false; generation += 1; sequence += 1; });
     <p v-if="development" class="origin">开发检查</p>
     <div class="turn-line" :class="currentTurn.state" role="status" aria-live="polite" aria-atomic="true"><div><strong>{{ currentTurn.actor }}</strong><p>{{ currentTurn.detail }}</p></div><a v-if="currentTurn.target" :href="currentTurn.target">{{ currentTurn.state === 'waiting' ? '查看待确认内容' : currentTurn.state === 'attention' ? '查看详情' : '查看草稿' }} <span aria-hidden="true">↓</span></a></div>
     <div class="agreement"><span>本轮方式：{{ modeText(run) }}</span><span v-if="run">任务 v{{ run.run.revision }}<template v-if="draftRevision != null && draftRevision !== run.run.revision"> · 当前草稿 v{{ draftRevision }}</template></span><a v-if="impactText" href="#creator-last-impact">{{ impactText }} ↗</a></div>
+    <p v-if="run?.memory_route" class="memory-note">{{ memorySummary(run) }}</p>
+    <p v-if="memoryLearningSummary(run)" class="memory-note">{{ memoryLearningSummary(run) }}</p>
+    <p v-if="run?.memory_update?.status === 'not_recorded'" class="memory-note">经历尚未更新：{{ run.memory_update.reason }}</p>
     <p v-if="summaryIssue" class="summary-warning" role="status">Skill 整理未启动：{{ summaryIssue }}</p>
     <details v-if="stageOperations.length" class="scope"><summary>本轮分工</summary><dl><dt>AI 参与</dt><dd>{{ aiScope.length ? aiScope.join('、') : '未开放创作步骤' }}</dd><dt>执行前确认</dt><dd>{{ reviewScope.length ? reviewScope.join('、') : '按约定连续执行' }}</dd><dt>技术检查</dt><dd>由系统执行</dd></dl></details>
     <details v-if="run" class="used-skills"><summary>本轮 Skill <span v-if="usage && usage.coverage !== 'unavailable'">· {{ usage.skills.length ? `${usage.skills.length} 项` : usage.coverage === 'complete' ? '未选用' : '记录未齐' }}</span></summary>
@@ -145,6 +171,7 @@ onBeforeUnmount(() => { alive = false; generation += 1; sequence += 1; });
 .turn-line strong { font-size: .94rem; font-weight: 600; }.turn-line p { margin: .3rem 0 0; color: var(--ow-ink-soft); font-size: .78rem; line-height: 1.7; }
 a, button { color: var(--creator-teal, var(--ow-gold)); font-size: .75rem; white-space: nowrap; text-decoration: none; }a:hover { text-decoration: underline; }a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--ow-gold-soft); outline-offset: 3px; }
 .agreement { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem 1rem; padding: 0 .9rem .85rem; font-size: .73rem; color: var(--ow-ink-mute); }
+.memory-note { margin: 0; padding: 0 .9rem .75rem; font-size: .75rem; color: var(--ow-ink-mute); line-height: 1.7; }
 .summary-warning { margin: 0; padding: 0 .9rem .85rem; color: var(--ow-gold); font-size: .76rem; line-height: 1.7; }
 .used-skills { border-top: 1px solid var(--ow-paper-edge); padding: .75rem .9rem; }summary { cursor: pointer; color: var(--ow-ink-soft); font-size: .78rem; }summary > span { color: var(--ow-ink-mute); }
 .scope { border-top: 1px solid var(--ow-paper-edge); padding: .75rem .9rem; }.scope dl { display: grid; grid-template-columns: auto 1fr; gap: .4rem .8rem; font-size: .76rem; line-height: 1.7; margin: .6rem 0 0; }.scope dt { color: var(--ow-ink-mute); }.scope dd { margin: 0; color: var(--ow-ink-soft); }

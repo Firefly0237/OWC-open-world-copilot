@@ -9,8 +9,12 @@ no network access and fails when a requested artifact is absent or incomplete.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import sys
+import urllib.request
+import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -59,11 +63,45 @@ def _load_revisions() -> dict[str, dict[str, str]]:
 
 
 def _components(requested: str) -> tuple[str, ...]:
+    if requested == "memory":
+        return ("memory-tokenizer", "embedding")
     if requested == "all":
         return ("embedding", "reranker")
     if requested == "tokenizer":
         return ("tokenizer",)
     return (requested,)
+
+
+def provision_memory_tokenizer(*, offline: bool) -> dict[str, str]:
+    from owcopilot.workflow.memory_history import DEFAULT_TOKENIZER_PATH, TOKENIZER_SHA256
+
+    target = DEFAULT_TOKENIZER_PATH.resolve()
+    if target.is_file():
+        if hashlib.sha256(target.read_bytes()).hexdigest() != TOKENIZER_SHA256:
+            raise RuntimeError("memory-tokenizer: existing local artifact has an unexpected hash")
+    elif offline:
+        raise RuntimeError("memory-tokenizer: local artifact missing; provision without --offline")
+    else:
+        url = "https://cdn.deepseek.com/api-docs/deepseek_v4_tokenizer.zip"
+        with urllib.request.urlopen(url, timeout=30) as response:
+            archive = response.read(40_000_001)
+        archive_hash = "e7310d1dafe0a86d8a5629fe78a7c763760f651db9b8682718a1781dcd6fe495"
+        if len(archive) > 40_000_000 or hashlib.sha256(archive).hexdigest() != archive_hash:
+            raise RuntimeError(
+                "memory-tokenizer: official download differs from the pinned artifact"
+            )
+        with zipfile.ZipFile(io.BytesIO(archive)) as package:
+            data = package.read("deepseek_v4_tokenizer/tokenizer.json")
+        if hashlib.sha256(data).hexdigest() != TOKENIZER_SHA256:
+            raise RuntimeError("memory-tokenizer: extracted tokenizer hash is invalid")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    return {
+        "component": "memory-tokenizer",
+        "sha256": TOKENIZER_SHA256,
+        "snapshot_path": str(target),
+        "status": "verified" if offline else "provisioned",
+    }
 
 
 def _verify_snapshot(component: str, snapshot: Path, revision: str) -> None:
@@ -83,6 +121,8 @@ def _verify_snapshot(component: str, snapshot: Path, revision: str) -> None:
 
 
 def provision(component: str, *, offline: bool) -> dict[str, str]:
+    if component == "memory-tokenizer":
+        return provision_memory_tokenizer(offline=offline)
     try:
         from huggingface_hub import snapshot_download
     except ImportError as exc:  # pragma: no cover - exercised by a clean environment
@@ -124,7 +164,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--component",
-        choices=("tokenizer", "embedding", "reranker", "all"),
+        choices=("tokenizer", "embedding", "reranker", "all", "memory-tokenizer", "memory"),
         default="tokenizer",
         help="artifact to provision; tokenizer avoids downloading model weights",
     )

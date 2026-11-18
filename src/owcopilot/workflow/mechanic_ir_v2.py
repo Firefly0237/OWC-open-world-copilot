@@ -52,6 +52,51 @@ COMPILER_VERSION = "mechanic-ir-v2.1"
 _CONTROL_PREFIX = "_owc_"
 _ID_PATTERN = r"^[A-Za-z][A-Za-z0-9_-]{0,79}$"
 _SEALED_KEY = "mechanic_compilation_v2"
+_CONDITION_DSL_HELP = (
+    "可选安全布尔DSL；空字符串表示无附加限制。仅引用variables中已声明的游戏变量；"
+    "逻辑运算用and/or/not，比较用==、!=、<、>、<=、>=，可用括号。"
+    "常量只用true/false、非负整数或带引号字符串；不支持算术、函数、赋值或自然语言。"
+    "不能用中文且/或代替操作符，不写已完成某阶段等历史描述。"
+)
+_CONDITION_EXAMPLES = ("", "admitted == true", "(admitted == true) and (mode == 'ready')")
+_CONDITION_FIELD_RULES = {
+    "quest_precondition": "任务开始条件必须在声明变量初态为真；没有额外业务限制时留空。",
+    "precondition": (
+        "阶段条件只判断真实游戏状态；阶段先后由to_stage和宿主流程管理，"
+        "不能把完成上一阶段写成条件，也不能猜造阶段完成变量；没有额外状态限制时留空。"
+    ),
+    "extra_guard": (
+        "选项附加条件只能读取本任务不会修改的声明游戏变量，且在声明初态为真；"
+        "不能引用宿主selector或用后续结算状态提前屏蔽选项；没有额外限制时留空。"
+    ),
+}
+
+
+def condition_expression_contract() -> dict[str, Any]:
+    return {
+        "fields": [
+            "quest_precondition",
+            "stages[].precondition",
+            "stages[].options[].extra_guard",
+            "stages[].automatic.extra_guard",
+        ],
+        "syntax": _CONDITION_DSL_HELP,
+        "field_rules": dict(_CONDITION_FIELD_RULES),
+        "valid_examples": list(_CONDITION_EXAMPLES),
+        "example_variables": [
+            {"id": "admitted", "type": "bool", "default": True},
+            {"id": "mode", "type": "enum", "default": "ready", "enum_values": ["ready", "closed"]},
+        ],
+        "invalid_examples": [
+            {"value": "signal == 0 且 trust == 0", "reason": "中文且不是DSL运算符"},
+            {"value": "已完成信号阶段", "reason": "阶段历史不是布尔DSL或声明游戏变量"},
+            {"value": "admitted = true", "reason": "单等号赋值不受支持，比较须用=="},
+        ],
+        "variable_scope": (
+            "示例变量仅解释语法，不会自动创建；实际表达式必须引用本次variables声明。"
+        ),
+        "stage_order": "用真实to_stage和宿主流程表达阶段先后，不在条件字符串中描述阶段历史。",
+    }
 
 
 class _Model(BaseModel):
@@ -156,7 +201,12 @@ class MechanicTransitionV2(_Model):
     purpose: str = Field(min_length=1, max_length=4000)
     to_stage: str | None = None
     outcome: str = Field(default="", max_length=8000)
-    extra_guard: str = Field(default="", max_length=1500)
+    extra_guard: str = Field(
+        default="",
+        max_length=1500,
+        description=_CONDITION_DSL_HELP + _CONDITION_FIELD_RULES["extra_guard"],
+        examples=list(_CONDITION_EXAMPLES),
+    )
     effects: list[MechanicEffectV2] = Field(default_factory=list, max_length=64)
 
     @model_validator(mode="after")
@@ -169,7 +219,12 @@ class MechanicTransitionV2(_Model):
 class MechanicStageV2(_Model):
     stage_id: str = Field(pattern=_ID_PATTERN)
     purpose: str = Field(min_length=1, max_length=4000)
-    precondition: str = Field(default="", max_length=1500)
+    precondition: str = Field(
+        default="",
+        max_length=1500,
+        description=_CONDITION_DSL_HELP + _CONDITION_FIELD_RULES["precondition"],
+        examples=list(_CONDITION_EXAMPLES),
+    )
     decision_id: str | None = None
     options: list[MechanicTransitionV2] = Field(default_factory=list, max_length=6)
     automatic: MechanicTransitionV2 | None = None
@@ -188,7 +243,12 @@ class MechanicDesignIRV2(_Model):
     schema_version: Literal[2] = 2
     purpose: str = Field(min_length=1, max_length=8000)
     variables: list[MechanicVariableV2] = Field(default_factory=list, max_length=100)
-    quest_precondition: str = Field(default="", max_length=1500)
+    quest_precondition: str = Field(
+        default="",
+        max_length=1500,
+        description=_CONDITION_DSL_HELP + _CONDITION_FIELD_RULES["quest_precondition"],
+        examples=list(_CONDITION_EXAMPLES),
+    )
     stages: list[MechanicStageV2] = Field(min_length=1, max_length=64)
 
 
@@ -865,6 +925,7 @@ def mechanic_prompt_contract(
         "plan": plan.model_dump(mode="json"),
         "quest": quest.model_dump(mode="json"),
         "compiler_version": COMPILER_VERSION,
+        "condition_expression_contract": condition_expression_contract(),
         "model_responsibility": [
             "声明真正游戏变量及严格初值，设计每个计划选项的真实effects、目的和下一阶段/终局",
             "每个游戏变量填写面向策划的name，如信任、线索已公开；内部id保持稳定",

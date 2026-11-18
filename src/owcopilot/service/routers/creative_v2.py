@@ -70,6 +70,7 @@ class RunInput(_Input):
     skill_card_selections: list[SkillSelection] = Field(default_factory=list, max_length=8)
     apply_project_skills: bool = True
     summarize_skill: bool = False
+    memory_mode: Literal["existing", "routed"] = "existing"
 
     @model_validator(mode="after")
     def paired_trial_scope(self):
@@ -241,7 +242,21 @@ def _prepare_production(store, root, task, req):
         "skill_card_selections": [value.model_dump() for value in req.skill_card_selections],
         "apply_project_skills": req.apply_project_skills,
         "summarize_skill": req.summarize_skill,
+        "memory_mode": req.memory_mode,
     }
+    if req.memory_mode == "routed" and req.selection == "planned" and not req.skill_version_id:
+        from ...workflow.memory_routing import route_task_memory
+
+        extra["memory_route"] = route_task_memory(
+            store,
+            root,
+            task,
+            mode=req.memory_mode,
+            requirements=extra["machine_requirements"],
+            narrative_context=narrative_context,
+            skill_card_selections=extra["skill_card_selections"],
+            apply_project_skills=extra["apply_project_skills"],
+        )
     if req.skill_version_id:
         return v2_service.prepare_skill_run(
             store,
@@ -269,6 +284,7 @@ def _prepare_production(store, root, task, req):
             narrative_context=narrative_context,
             skill_card_selections=extra["skill_card_selections"],
             apply_project_skills=extra["apply_project_skills"],
+            memory_route=extra.get("memory_route"),
         )
         return v2_service.prepare_v2_run(store, root, task, planned["graph"], **extra)
     return v2_service.prepare_v2_run(
@@ -432,6 +448,7 @@ def create_run(project: str, task_id: str, req: RunInput, request: Request) -> d
             "skill_card_selections": [value.model_dump() for value in req.skill_card_selections],
             "apply_project_skills": req.apply_project_skills,
             "summarize_skill": req.summarize_skill,
+            "memory_mode": req.memory_mode,
         }
         if req.skill_version_id:
             state = _call(

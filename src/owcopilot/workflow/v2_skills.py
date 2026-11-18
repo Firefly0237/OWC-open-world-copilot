@@ -838,6 +838,7 @@ def plan_initial_graph(
     decision_id=None,
     skill_card_selections=None,
     apply_project_skills=True,
+    memory_route=None,
 ):
     from .v2_planning import plan_initial_graph as run_planner
 
@@ -852,4 +853,5 @@ def plan_initial_graph(
         decision_id=decision_id,
         skill_card_selections=skill_card_selections,
         apply_project_skills=apply_project_skills,
+        memory_route=memory_route,
     )

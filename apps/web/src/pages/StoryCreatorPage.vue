@@ -60,6 +60,7 @@ const selection = ref<"planned" | "matching" | "template">("planned");
 const skillSelections = ref<SkillCardSelection[]>([]);
 const applyProjectSkills = ref(true);
 const autoSummarizeSkill = ref(true);
+const memoryMode = ref<"existing" | "routed">("existing");
 const variant = ref<"baseline" | "constrained">("constrained");
 const sourceTitle = ref("");
 const sourceText = ref("");
@@ -313,6 +314,7 @@ function clearRun(): void {
   feedback.value = ""; feedbackKind.value = "content"; feedbackTarget.value = ""; priorStageDraft.value = null;
 }
 function newDraft(): void {
+  memoryMode.value = "existing";
   saveEditorDraft();
   generation += 1; clearRun(); task.value = null; brief.value = ""; displayTitle.value = ""; protectedText.value = ""; taskView.value = "author";
   participants.value = []; selectedSources.value = []; businessRoles.value = [];
@@ -340,6 +342,7 @@ async function refreshCatalogs(): Promise<void> {
   if (failures.length) error.value = failures.map((item) => item.status === "rejected" ? humanizeError(item.reason) : "").join("；");
 }
 function restoreInputs(state?: StoryRunState): void {
+  memoryMode.value = state?.memory_mode === "routed" ? "routed" : "existing";
   const requirements = state?.requirements?.machine;
   savedRequirements.value = requirements ? JSON.parse(JSON.stringify(requirements)) as MachineRequirements : {};
   stageCount.value = requirements?.stage_count == null ? "" : String(requirements.stage_count);
@@ -464,6 +467,7 @@ async function startProduction(): Promise<void> {
     selection: selection.value, variant: variant.value, machine_requirements: machine(), collaboration_policy: { ...policy.value },
     apply_project_skills: applyProjectSkills.value,
     summarize_skill: autoSummarizeSkill.value,
+    memory_mode: memoryMode.value,
     skill_card_selections: skillSelections.value.map(item => ({ ...item })),
     ...(chosenVersion.value ? { skill_version_id: chosenVersion.value.id } : {}),
     ...(selectedTrial.value && selectedTrial.value.version_id === chosenVersion.value?.id ? { trial_scope_id: selectedTrial.value.scope_id, expected_trial_scope_hash: selectedTrial.value.permit_hash } : {}), ...(run.value ? { prior_run_id: run.value.run.id } : {}),
@@ -782,6 +786,8 @@ onUnmounted(() => { saveEditorDraft(); alive = false; generation += 1; stopPolli
             <details><summary>高级流程设置</summary><label>步骤安排<select v-model="selection"><option value="planned">按本次任务安排步骤</option><option value="matching">匹配已采用的工作图</option><option value="template">选择基础流程</option></select></label><label v-if="selection === 'template'">基础模板<select v-model="variant"><option value="constrained">先设计状态后果，再写对白</option><option value="baseline">正文与对白先行</option></select></label><p v-if="chosenVersion" class="chosen-method">本任务下一轮已选用：方法 v{{ chosenVersion.version }} <button class="text-link" @click="chosenVersionId = ''">取消本次手选</button></p></details>
           </details>
           <StorySkillPanel class="creator-skills" v-model="skillSelections" v-model:apply-project-skills="applyProjectSkills" v-model:auto-summarize="autoSummarizeSkill" :project="project" :run-id="run?.run.id ?? ''" :summary-job-id="run?.skill_summary_job_id" :disabled="busy || inFlight" />
+          <label>经历复用<select v-model="memoryMode" :disabled="busy || inFlight || Boolean(run)"><option value="existing">使用当前方法</option><option value="routed">自动挑选本项目经历</option></select></label>
+          <p v-if="memoryMode === 'routed'" class="hint">手选 Skill 保留；经验选择与整理会增加模型调用。</p>
           <div class="primary-actions"><button v-if="!task" class="primary" :disabled="busy || !brief.trim() || (Boolean(narrativeProjectId) && !narrativeReady)" @click="createAndProduce">生成草稿 <span>→</span></button><button v-else class="primary" :disabled="busy || inFlight || (Boolean(narrativeProjectId) && !narrativeReady)" @click="perform(startProduction)">重新生成</button><p v-if="narrativeProjectId && !narrativeReady" class="hint">请先保存章节、场景和资料引用。</p></div>
         </section>
 
